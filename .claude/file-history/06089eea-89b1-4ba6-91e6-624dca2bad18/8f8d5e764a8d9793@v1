@@ -1,0 +1,22 @@
+[package]
+name = "plugin_moxa_firmware_update"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+MOXA_AES_ENCRYPTION_KEY_MIGRATION = []
+MOXA_PASSWORD_POLICY_CHECK = []
+
+[dependencies]
+matchit = "0.8.4"
+qstring = "0.7.2"
+serde_json = "1.0"
+
+rust_moxa_common = { path = "../../rust_moxa_common-custom" }
+lib_moxa_rust_debug_log_ng = { path = "../../lib_moxa_rust_debug_log_ng-custom" }
+lib_moxa_rust_encrypt = { path = "../../lib_moxa_rust_encrypt-custom" }
+lib_moxa_rust_firmware_header = { path = "../../lib_moxa_rust_firmware_header-custom" }
+lib_moxa_rust_system = { path = "../../lib_moxa_rust_system-custom" }
+lib_moxa_rust_system_information = { path = "../../lib_moxa_rust_system_information-custom" }

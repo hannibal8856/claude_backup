@@ -1,0 +1,974 @@
+#!/usr/bin/env python3
+"""Generate SNMP Plan C v2 design doc as docx."""
+
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+doc = Document()
+
+# ---------- Document style ----------
+style = doc.styles['Normal']
+style.font.name = 'Microsoft JhengHei'
+style.font.size = Pt(10.5)
+# Set East Asian font
+rpr = style.element.get_or_add_rPr()
+rfonts = rpr.find(qn('w:rFonts'))
+if rfonts is None:
+    rfonts = OxmlElement('w:rFonts')
+    rpr.append(rfonts)
+rfonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
+
+# ---------- Helper functions ----------
+def add_h1(text):
+    p = doc.add_heading(text, level=1)
+    return p
+
+def add_h2(text):
+    return doc.add_heading(text, level=2)
+
+def add_h3(text):
+    return doc.add_heading(text, level=3)
+
+def add_para(text, bold=False, italic=False):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.font.name = 'Microsoft JhengHei'
+    run.bold = bold
+    run.italic = italic
+    return p
+
+def add_bullet(text, level=0):
+    p = doc.add_paragraph(style='List Bullet')
+    p.paragraph_format.left_indent = Cm(0.5 + level * 0.5)
+    run = p.add_run(text)
+    run.font.name = 'Microsoft JhengHei'
+    return p
+
+def add_code(text):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.font.name = 'Consolas'
+    run.font.size = Pt(9)
+    # Light gray background via shading
+    pPr = p._p.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), 'F2F2F2')
+    pPr.append(shd)
+    return p
+
+def add_table(headers, rows, widths_cm=None):
+    table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+    table.style = 'Light Grid Accent 1'
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    # Header
+    hdr = table.rows[0].cells
+    for i, h in enumerate(headers):
+        hdr[i].text = ''
+        para = hdr[i].paragraphs[0]
+        run = para.add_run(h)
+        run.font.name = 'Microsoft JhengHei'
+        run.bold = True
+        run.font.size = Pt(10)
+    # Body
+    for ri, row in enumerate(rows):
+        for ci, val in enumerate(row):
+            cell = table.rows[ri+1].cells[ci]
+            cell.text = ''
+            para = cell.paragraphs[0]
+            run = para.add_run(str(val))
+            run.font.name = 'Microsoft JhengHei'
+            run.font.size = Pt(10)
+    if widths_cm:
+        for ri in range(len(rows)+1):
+            for ci, w in enumerate(widths_cm):
+                if w:
+                    table.rows[ri].cells[ci].width = Cm(w)
+    return table
+
+
+# ============================================================
+# Title
+# ============================================================
+title = doc.add_heading('SNMP Plan D — Multi-Subagent + Shared Library 全面架構重構', level=0)
+sub = doc.add_paragraph()
+sub_run = sub.add_run('AgentX 統一架構:net-snmp master + ISS / framework / daemons subagent + 共用 lib_moxa_snmp_ies_auto_mibs + lib_moxa_(rust_)snmp_agentx')
+sub_run.italic = True
+sub_run.font.size = Pt(11)
+
+meta = doc.add_paragraph()
+meta_run = meta.add_run('日期:2026-06-02   |   平台:MDS-G4000-L3-4XGS   |   狀態:brainstorm 完成,待動工')
+meta_run.italic = True
+meta_run.font.size = Pt(10)
+
+note = doc.add_paragraph()
+note_run = note.add_run('註:本案承接 Plan C(小變動 ies-auto-mibs + agentx_owned.list,已 revert)。Plan C 詳述見獨立文件 SNMP_Plan_C_Design_2026-06-02.docx。')
+note_run.italic = True
+note_run.font.size = Pt(10)
+
+doc.add_paragraph()
+
+# ============================================================
+# 1. TL;DR
+# ============================================================
+add_h1('1. TL;DR')
+add_para(
+    '把 SNMP 三條 dispatch path(ies-auto-mibs / dlmod / ISS)收斂成 net-snmp master + 三條 AgentX subagent '
+    '(ISS / framework / daemons)。透過 REGISTER_MIB() with priority shadowing 自我宣告擁有權,'
+    '不需要外部 list 檔協調。所有 subagent 的 SET 都統一 patch 到 framework REST,維持 framework 為 '
+    'SET source-of-truth。'
+)
+add_para('預期延遲改善:GET 5–25 ms → < 1 ms;SET 50–500 ms → < 1 ms。', bold=True)
+add_para('工程量:~6 個月。')
+
+add_h2('1.1 跟 Plan C 的關係')
+add_para(
+    'Plan C 是「最小變動加 AgentX RO 加速」(ies-auto-mibs + agentx_owned.list + ISS Aricent 接 RO,~2 週),'
+    '已驗證 build 但 2026-06-02 revert。'
+    'Plan D 是「全面 multi-subagent + 共用 lib」的繼任方案,'
+    '工程量大但長期維護成本顯著低。'
+)
+add_table(
+    ['面向', 'Plan C', 'Plan D(本案)'],
+    [
+        ['變動範圍',          '最小(~85 行 + 1 list)',     '全面(2 新 lib + 3 subagent + ~500 RW swap)'],
+        ['工程量',            '~2 週',                       '~6 個月'],
+        ['ies-auto-mibs',     '維持,加 list reader',         '抽 ~80% 進 lib_moxa_snmp_ies_auto_mibs'],
+        ['SET 路徑',          '不動(RW 留本地走 framework)','統一走 framework REST(含 ISS hook)'],
+        ['framework subagent','無',                           '有(Rust FFI via lib_moxa_rust_snmp_agentx)'],
+        ['Daemon subagent',   '無',                           '有(每 daemon 用 lib_moxa_snmp_agentx)'],
+        ['Mapping data 共用', '無(資料留 net-snmp)',         '抽 lib_moxa_snmp_ies_auto_mibs 共用'],
+        ['Priority 機制',      '無(用 list skip register)',  'subagent priority=50 shadow'],
+        ['Aricent SetHandler', '不動',                         '~500 個換 MoxaIesAutoMibs_AricentSet adapter'],
+        ['GET 改善',          'ifTable RO ~7 ms → ~3 ms',    '全 OID 5–25 ms → < 1 ms'],
+        ['SET 改善',          '無',                           '50–500 ms → ~5 ms (ISS) / < 1 ms (framework)'],
+        ['可否漸進遷移',      '一次到位',                     '可 daemon-by-daemon 上線,fallback 自然'],
+    ],
+    widths_cm=[3.5, 4, 5.5]
+)
+add_para('Plan C 細節:獨立文件 SNMP_Plan_C_Design_2026-06-02.docx。', italic=True)
+
+# ============================================================
+# 2. 設計決策(6 條,經本次 brainstorm 確認)
+# ============================================================
+add_h1('2. Plan D 設計決策(7 條,經本次 brainstorm 確認)')
+
+add_h2('2.1 net-snmp 當 AgentX master,不換')
+add_bullet('listen TCP:127.0.0.1:705 接受 subagent 連線')
+add_bullet('Dispatch 用 longest-prefix-match,priority 數字小者勝')
+add_bullet('snmpd.conf 加 master agentx / agentXSocket / agentXTimeout 4 行(由 plugin_moxa_snmp 生成)')
+add_para('理由:net-snmp 是 RFC 2741 reference,Plan C 試作已證實 buildroot 整合可行,標準/文件/社群最完整。')
+
+add_h2('2.2 ISS 沿用 Aricent AgentX,不重寫')
+add_bullet('ISS 內 snmpv3/snx*.c 已 production 10+ 年,涵蓋 ~60% std MIB(IF-MIB / OSPF / BGP / VRRP 等)')
+add_bullet('只調整 startup script,boot 時自動 enable subagent(`enable snmpsubagent master ip4 127.0.0.1 port 705`)')
+add_bullet('ISS 端前置:cherry-pick 兩個 commit(`749cc015` make.ent SNMP_LNXIP=YES;`8ac27ddf` myconfig.h #define SNMP_LNXIP_WANTED)')
+add_para('理由:涵蓋範圍大、production 穩定。重寫成本 20–40 週不划算。')
+
+add_h2('2.3 framework + daemons 用 lib_moxa_(rust_)snmp_agentx 統一 wrapper')
+add_bullet('lib_moxa_snmp_agentx (C):給 daemons 用,~400–500 行,FRR lib/agentx.c style 但 clean-room 重寫(避免 GPLv2 衝突)')
+add_bullet('lib_moxa_rust_snmp_agentx (Rust):給 framework 用,純 FFI 包前者,捨棄既有 Rust AgentX crate(如 agentx-tokio)')
+add_bullet('封裝 net-snmp 的 init_agent / init_snmp / snmp_select_info / snmp_read 等 boilerplate')
+add_bullet('統一 daemon 嵌入 pattern,讓 fiber_check / dhcp_snp / lldp / ... 各 daemon 不用各自寫一份 subagent 初始化')
+add_para('理由:net-snmp API 為「snmpd app」設計,直接嵌入 daemon 有許多 boilerplate 跟 event loop 整合議題。FRR 已驗證 wrapper 模式可行 10+ 年。')
+
+add_h2('2.7 Rust 端走純 FFI,不用既有 Rust AgentX crate')
+add_bullet('lib_moxa_rust_snmp_agentx 採純 FFI 包 lib_moxa_snmp_agentx,不採用 agentx-tokio 等既有 Rust crate')
+add_bullet('參考其他既有 FFI 實作(Moxa Rust ecosystem 內有多個 lib_moxa_rust_* 包 C lib 的範例)')
+add_bullet('Rust framework 透過 lib_moxa_rust_snmp_agentx 呼下層 lib_moxa_snmp_agentx,跟 C daemons 共用同一底層')
+add_para(
+    '理由:**統一性**。一份 C wrapper(lib_moxa_snmp_agentx)同時服務 C daemon 跟 Rust framework,'
+    '行為一致、bug fix 只動一處、AgentX session 管理跟 net-snmp version 升級只動一處。'
+    '若 Rust 用獨立 crate,等於兩套 AgentX subagent 實作維護,違反「低耦合高內聚」原則。'
+)
+add_para('放棄 Rust crate 的代價:')
+add_bullet('需要自行寫 FFI binding(中等工程量,但 Moxa 已有 Rust ecosystem FFI pattern 可參考)')
+add_bullet('Rust async ergonomics 較不直接(但 AgentX subagent 對 async 需求不高,event-loop 即可)')
+
+add_h2('2.4 lib_moxa_snmp_ies_auto_mibs 從 3rdparty_net_snmp 獨立成 shared library(3 層架構)')
+add_para('Trace 後發現純「mapping data lib」不夠。ies-auto-mibs 內有 ~1000 行 SET 路徑邏輯(flag 分支 / index 轉換 / 值型別轉換 / URI 組裝 / framework REST 呼叫),不能讓每個 subagent 各自 reimplement。lib 內容分 3 層:')
+add_bullet('Layer 1 — Data:OID ↔ URI ↔ owner ↔ val_type ↔ flags 的 entry data + lookup/iterate API')
+add_bullet('Layer 2 — SET dispatch:把 mox_snmp_flask_handle_entry_set 整段邏輯包成 MoxaSnmpSet_ApplyToFramework 對外 API')
+add_bullet('Layer 3 — URI action:把 moxa_snmp_handle_util.c 內 UtilCfgPostURIConfig / PatchURIConfig / DelURIConfig / TriggerURICommand 等包成 MoxaSnmpUri_* API')
+add_para('Consumer:ISS / framework / 各 daemon subagent 都 link 它。Subagent 自己的 SET handler ≤ 10 行,只負責 lookup + 呼 lib API。')
+add_para('理由:OID/URI 對映 + SET 處理邏輯是 single-source-of-truth,抽出來讓所有 SNMP 處理方共用,避免 5+ 份 reimplementation。')
+add_para('從 3rdparty_net_snmp/ies-auto-mibs/ 搬走 ~80% 的 .c 跟 .h,留下 mox_snmp_handle_entry() net-snmp dlmod 接口層。')
+
+add_h2('2.5 OID 擁有權靠 REGISTER_MIB() with priority shadowing,不用 agentx_owned.list')
+add_bullet('每個 subagent 啟動時透過 mapping lib iterate_by_owner() 拿到自己的 OID 列表')
+add_bullet('呼 MoxaAgentX_RegisterByMappingEntry(entry, handler) 註冊,priority = 50(預設)')
+add_bullet('ies-auto-mibs 原本對同 OID 的 register 仍在(priority = 127 default)但被 shadow')
+add_bullet('master dispatch 時 priority 小者勝 → subagent 拿到 request')
+add_bullet('subagent 斷線:master 自動 fallback 到 ies-auto-mibs handler,服務不中斷')
+add_para(
+    '理由:省一個需要維護的 artifact(agentx_owned.list),達到「code = truth」、低耦合高內聚。'
+    'subagent 啟動就宣告擁有權,沒啟動就交給 ies-auto-mibs,自然漸進遷移。'
+)
+
+add_h2('2.6 SET 統一 patch 到 framework REST(包含 ISS Aricent SET)')
+add_bullet('所有 subagent(framework / daemon / ISS)收到 SET 時:')
+add_bullet('  Step 1:查 lib_moxa_snmp_ies_auto_mibs 拿 OID 對應的 URI', level=1)
+add_bullet('  Step 2:呼 LibFrameworkUri_PatchUri / PostUri 進 framework REST', level=1)
+add_bullet('  Step 3:framework 寫 JSON 落盤 + 通知相關 daemon 應用變更', level=1)
+add_bullet('ISS 端要 hook Aricent 的 SET handler,讓它走 framework REST 而非直接 set ISS 內部 state')
+add_bullet('避免 framework JSON 跟 ISS 內部 state 短暫 out-of-sync(show running 不一致)')
+add_para(
+    '理由:framework 是 SET source-of-truth,所有 SET 必須經它。ISS 直接 set 內部 state 會造成 '
+    'framework JSON 落後,show running 跟實際狀態不一致。延伸 1 採決議 B。'
+)
+
+# ============================================================
+# 3. 架構圖
+# ============================================================
+add_h1('3. 架構總覽')
+
+add_h2('3.1 整體架構')
+add_code('''
+                        SNMP request
+                             ↕
+                ┌──────────────────────────┐
+                │  net-snmp (snmpd)        │
+                │  - AgentX master :705    │
+                │  - ies-auto-mibs (不變)  │
+                │    legacy 註冊照舊       │
+                │    但被 subagent 的      │
+                │    priority shadow       │
+                └──────────────────────────┘
+                  ↕            ↕            ↕
+  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+  │ ISS              │ │ framework        │ │ Daemons          │
+  │ subagent         │ │ subagent         │ │ subagent         │
+  │                  │ │                  │ │                  │
+  │ 用 Aricent       │ │ 用 lib_moxa_     │ │ 用 lib_moxa_     │
+  │ snx*.c           │ │ rust_snmp_       │ │ snmp_agentx      │
+  │ (不重寫)         │ │ agentx (FFI)     │ │ (C wrapper)      │
+  │                  │ │                  │ │                  │
+  │ SnxMainRegister  │ │ MoxaAgentX_      │ │ MoxaAgentX_      │
+  │ Mibs() 註冊      │ │ Register*        │ │ Register*        │
+  │                  │ │ priority 50      │ │ priority 50      │
+  │                  │ │                  │ │                  │
+  │ Handler:         │ │ Handler:         │ │ Handler:         │
+  │ GET: gpMibReg    │ │ GET: AppState    │ │ GET: SHM/        │
+  │   .Get → ISS     │ │   或 plugin      │ │   memory         │
+  │   internal       │ │   .get_status    │ │                  │
+  │ SET: lookup URI  │ │ SET: lookup URI  │ │ SET: lookup URI  │
+  │   → patch        │ │   → patch        │ │   → patch        │
+  │   framework      │ │   framework      │ │   framework      │
+  └──────────────────┘ └──────────────────┘ └──────────────────┘
+            ↓ ↑              ↓ ↑                  ↓ ↑
+            (Aricent)     (Rust FFI)           (C link)
+                ↓             ↓                    ↓
+          ┌──────────────────────────────────────────────┐
+          │   lib_moxa_snmp_ies_auto_mibs               │
+          │                                              │
+          │   Data: OID ↔ URI ↔ owner ↔ flags ↔ ...    │
+          │                                              │
+          │   API:                                       │
+          │   - ies_mapping_iterate_by_owner(owner)     │
+          │     → 啟動時拿 OID 列表去 REGISTER_MIB     │
+          │   - ies_mapping_lookup_by_oid(oid)          │
+          │     → SET 時查對應 URI                       │
+          └──────────────────────────────────────────────┘
+
+          ┌──────────────────────────────────────────────┐
+          │ lib_moxa_snmp_agentx (C)                    │
+          │ lib_moxa_rust_snmp_agentx (Rust FFI)        │
+          │                                              │
+          │ - MoxaAgentX_Init(daemon_name)              │
+          │ - MoxaAgentX_RegisterByMappingEntry         │
+          │     (priority=50 shadow ies-auto-mibs)      │
+          │ - MoxaAgentX_RunInThread                    │
+          │ - 內部封裝 net-snmp init_agent / init_snmp/ │
+          │   snmp_select_info / snmp_read              │
+          └──────────────────────────────────────────────┘
+''')
+
+add_h2('3.2 三個 subagent 的職責分工')
+add_table(
+    ['Subagent', '用什麼 wrapper', 'Register 機制', 'GET 來源', 'SET 路徑', 'Owns'],
+    [
+        ['ISS', 'Aricent snx*.c\n(不重寫)', 'SnxMainRegisterMibs\n(原有)', 'gpMibReg.Get\n(ISS 內部)', '查 mapping URI\n→ framework PATCH\n(HTTP loopback)', '~60% std MIB\n(IF-MIB/OSPF/\nBGP/VRRP...)'],
+        ['framework', 'lib_moxa_rust_snmp_agentx\n(Rust FFI)', 'MoxaAgentX_Register*\npriority=50', 'AppState 記憶體\n或 plugin.get_status\n(in-process,§5.6)', '查 mapping URI\n→ config_operation\n::update_config\n(in-process,跳過 HTTP)', 'Moxa private config\n+ broad fallback\n(see §3.3)'],
+        ['Daemons\n(hot path 才需要,\n例 fiber_check)', 'lib_moxa_snmp_agentx\n(C)', 'MoxaAgentX_Register*\npriority=50', 'SHM / 自家\n記憶體 (~50 µs)', '查 mapping URI\n→ framework PATCH\n(HTTP loopback)', '高頻 status OID\n(strict ownership)'],
+    ],
+    widths_cm=[2.2, 2.8, 2.3, 2.6, 2.8, 2.3]
+)
+
+add_h2('3.3 Broad + Strict 混合 ownership(2026-06-02 brainstorm 確認)')
+add_para('framework subagent 走 broad ownership(透過 URI 反問 status_layer / config_layer 拿全部資料),'
+         '只在「daemon 自家 SHM + 高頻 query」的 OID 才獨立成 daemon subagent(strict ownership)。'
+         '不是每個 daemon 都需要寫 subagent code。')
+add_table(
+    ['Ownership 模式', '誰處理', 'GET 延遲', '工程量', '適用 OID'],
+    [
+        ['Broad (framework)',  'framework 一隻 subagent 透過 plugin.get_status() / configs 拿全部',
+         '~200 µs (status, 經 plugin trait)\n~100 µs (config)',
+         '只動 framework',  '冷門 OID / 一次性 walk / Moxa private config'],
+        ['Strict (daemon)',     '各 daemon 自己 subagent owns 高頻 OID',
+         '~50 µs (直讀 SHM)', '每 daemon 各 3–4 週',
+         'hot path:fiberCheckStatTx/RxPower(NMS 高頻監控)、lldpRemTable 等'],
+    ],
+    widths_cm=[3, 5, 3.5, 2.5, 4]
+)
+add_para('落地路徑:Phase A 先全 broad → Phase B 辨識 hot path → Phase C 把這幾個 daemon 拆 strict。'
+         '其他 daemon 維持 broad,不動。')
+
+# ============================================================
+# 4. 兩條共用 library 詳述
+# ============================================================
+add_h1('4. 兩條共用 library')
+
+add_h2('4.1 lib_moxa_snmp_agentx (C) + lib_moxa_rust_snmp_agentx (Rust FFI)')
+add_para('FRR lib/agentx.c style 的 thin wrapper,底下走 net-snmp(libnetsnmpagent + libnetsnmpmibs + libnetsnmp)。')
+add_para('對外 API 草圖:')
+add_code('''/* Lifecycle */
+int  MoxaAgentX_Init(const char *daemon_name);
+void MoxaAgentX_Shutdown(void);
+
+/* Register */
+int  MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                                int mode, Netsnmp_Node_Handler *handler);
+int  MoxaAgentX_RegisterByMappingEntry(const ies_mapping_entry_t *e,
+                                        Netsnmp_Node_Handler *handler);
+    /* priority 預設為 50,shadow ies-auto-mibs 的 127 default */
+
+/* Event loop integration */
+int  MoxaAgentX_GetFds(fd_set *fds, int *maxfd, struct timeval *timeout);
+int  MoxaAgentX_ProcessFds(const fd_set *fds);
+int  MoxaAgentX_RunInThread(void);
+
+/* Notification / Trap */
+int  MoxaAgentX_SendTrap(const oid *trap_oid, size_t olen,
+                          netsnmp_variable_list *varbinds);''')
+
+add_h2('4.2 lib_moxa_snmp_ies_auto_mibs(3 層)')
+add_para('Layer 1 — Data + lookup API:')
+add_code('''struct ies_mapping_entry {
+    const oid     *oid;
+    size_t         oid_len;
+    const char    *uri;              /* "ifmibdb/ifTable/" */
+    const char    *uri_index;        /* "ifAdminStatus" */
+    int            val_type;         /* SNMP_DATA_TYPE_INTEGER, ... */
+    int            mode;             /* HANDLER_CAN_RONLY/RWRITE */
+    uint32_t       flags;            /* IES_FLAG_SNMP_* */
+    int            iss_build;        /* 1 = ISS / 0 = framework */
+    const char    *owner;            /* "iss"/"framework"/"fiber_check"... */
+};
+
+const ies_mapping_entry_t *
+ies_mapping_lookup_by_oid(const oid *o, size_t olen);
+
+const ies_mapping_entry_t *
+ies_mapping_lookup_by_uri(const char *uri, const char *uri_index);
+
+int ies_mapping_iterate_by_owner(const char *owner,
+        int (*cb)(const ies_mapping_entry_t *, void *), void *ctx);
+
+const char *ies_mapping_version(void);''')
+add_para('Layer 2 — SET dispatch(對 subagent 的主要對外 API):')
+add_code('''/* 把一個 SET request 套上對應的 framework PATCH 行為。
+ * 內部處理:flag 分支 / index 轉換 / 值型別轉換 / URI 組裝 /
+ *           framework REST 呼叫 / 4-phase。
+ * Subagent 收到 SET 時呼這個就好,不用自己重做 1000 行。
+ */
+int MoxaSnmpSet_ApplyToFramework(
+    netsnmp_agent_request_info *reqinfo,
+    netsnmp_request_info       *requests,
+    const ies_mapping_entry_t  *entry,
+    struct LibFrameworkUri_Handle *uri_handle,
+    const char                 *security_token);
+
+/* 給 Aricent ISS 用的 adapter — Aricent SET callback 簽名跟
+ * net-snmp 不同,thin wrapper 內做風格轉換。 */
+INT4 MoxaIesAutoMibs_AricentSet(
+    tSNMP_OID_TYPE *pOid,
+    tSnmpIndex     *pSnmpIndex,
+    tRetVal        *pRetVal,
+    /* ... Aricent 其他參數 ... */ );
+''')
+add_para('Layer 3 — URI action(底層 framework REST wrapper):')
+add_code('''int MoxaSnmpUri_PostConfig    (handle, uri, json_val, token);
+int MoxaSnmpUri_PatchConfig   (handle, uri, json_val, token);
+int MoxaSnmpUri_DelConfig     (handle, uri, token);
+int MoxaSnmpUri_TriggerCommand(handle, uri, json_val, token);''')
+add_para('Consumer:')
+add_bullet('ISS Aricent code:每個 RW OID 的 SetHandler 改用 MoxaIesAutoMibs_AricentSet adapter,內部走 Layer 2')
+add_bullet('framework subagent:register 時 iterate Layer 1 取自己的 OID;SET handler 直接呼 Layer 2')
+add_bullet('各 C daemon subagent:同上')
+
+# ============================================================
+# 5. GET / SET 路徑詳細
+# ============================================================
+add_h1('5. GET / SET 路徑詳細')
+
+add_h2('5.1 GET 路徑')
+add_code('''client → snmpd master :161
+   ↓ longest-prefix-match,priority 比較
+   ↓
+   subagent (priority 50) 贏過 ies-auto-mibs (priority 127)
+   ↓ AgentX GetNext-PDU 透過 TCP:705
+   ↓
+subagent handler:
+   ├─ ISS:      gpMibReg[oid].GetHandler → ISS 內部 data
+   ├─ framework: 看 URI prefix 分流 (§5.6 細部展開):
+   │              setting/data/* → AppState.configs in-memory
+   │              status/*       → plugin.get_status() 同 REST handler
+   └─ Daemon (hot path only): 讀自家 SHM / 記憶體
+
+   → 全部 in-process,~50–500 µs
+   → AgentX Response-PDU 回 master
+   → master 包成 SNMP Response 回 client''')
+
+add_h2('5.2 SET 路徑(所有 subagent 統一 patch framework)')
+add_code('''client → snmpd master :161
+   ↓ longest-prefix-match,priority 比較
+   ↓ subagent (priority 50) 贏
+   ↓ AgentX TestSet-PDU → CommitSet-PDU
+   ↓
+subagent handler 內:
+   Step 1: 查 lib_moxa_snmp_ies_auto_mibs
+           entry = ies_mapping_lookup_by_oid(oid, olen)
+   Step 2: 依 subagent 類型分流(關鍵差異):
+           ┌──────────────────────────────────────────────────┐
+           │ ISS / Daemon:                                    │
+           │   呼 MoxaSnmpSet_ApplyToFramework                │
+           │   → LibFrameworkUri_PatchUri (HTTP loopback :80) │
+           │   → nginx → actix-web :9759 → setting_write      │
+           │   延遲: ~5 ms                                     │
+           ├──────────────────────────────────────────────────┤
+           │ Framework:  (in-process,§5.7 詳述)               │
+           │   APP_STATE.configs.lock().unwrap()              │
+           │   → config_operation::update_config(...)         │
+           │   → plugin.validate() → 寫 pre_running_config    │
+           │   → _save_as_startup_config                      │
+           │   延遲: ~100–500 µs (跳過 HTTP)                  │
+           └──────────────────────────────────────────────────┘
+   Step 3: framework 寫 JSON 落盤
+           + 通知相關 daemon 應用變更
+
+   ──────────────────────────
+   重點:framework 始終是 SET source-of-truth
+   - show running config 永遠正確
+   - startup-config diff 永遠正確
+   - 各 daemon 透過 framework 通知保持狀態同步''')
+
+add_h2('5.3 ISS Aricent SetHandler 替換 pattern')
+add_para('以 ifAdminStatus 為例,Aricent SNMPRegisterMib 註冊 ifTable RW entry 時的 callback 設定:')
+add_code('''/* ISS 內,沿用 Aricent pattern */
+static tMibData ifTableEntries[] = {
+    /* ifAdminStatus (RW) — GET 走 Aricent,SET 改走 lib adapter */
+    { {1,3,6,1,2,1,2,2,1,7},
+        IfAdminStatusGet,                /* GetHandler 不動,享 AgentX 加速 */
+        MoxaIesAutoMibs_AricentSet,      /* ← 改成 lib adapter */
+        IfAdminStatusTest,               /* TestHandler 保留 (ISS-specific 約束) */
+        IfAdminStatusDep,                /* DepHandler 保留 (依賴檢查) */
+        ... },
+    /* 其他 RW entry 同樣 swap SetHandler 為 MoxaIesAutoMibs_AricentSet */
+};
+
+SNMPRegisterMib(&ifmibOID, ifTableEntries, SNMP_MSR_TGR_FALSE);''')
+add_para('Adapter 內部做風格轉換 + 呼 Layer 2:')
+add_code('''INT4 MoxaIesAutoMibs_AricentSet(tSNMP_OID_TYPE *pOid, ...) {
+    /* (1) Aricent OID 物件 → 標準 oid array */
+    oid std_oid[MAX_OID_LEN];
+    size_t std_oid_len;
+    aricent_oid_to_std(pOid, std_oid, &std_oid_len);
+
+    /* (2) lookup mapping entry — 拿 URI + flag + val_type */
+    const ies_mapping_entry_t *entry =
+        ies_mapping_lookup_by_oid(std_oid, std_oid_len);
+    if (!entry) return SNMP_FAILURE;
+
+    /* (3) Aricent SET value → net-snmp request_info 風格 */
+    netsnmp_agent_request_info reqinfo = { .mode = MODE_SET_ACTION };
+    netsnmp_request_info requests;
+    aricent_to_netsnmp_request(pSnmpIndex, pRetVal, &requests);
+
+    /* (4) 共用 SET 邏輯 (Layer 2) */
+    int rc = MoxaSnmpSet_ApplyToFramework(&reqinfo, &requests, entry,
+                                            gFrameworkHandle, gSecurityToken);
+
+    return (rc == SNMP_ERR_NOERROR) ? SNMP_SUCCESS : SNMP_FAILURE;
+}''')
+
+add_h2('5.4 callback 替換的方針表')
+add_table(
+    ['Callback', '處理方針', '理由'],
+    [
+        ['GetHandler', '不換', '沿用 Aricent IfAdminStatusGet,gpMibReg 直接讀;享 AgentX in-process 加速紅利'],
+        ['SetHandler', '換成 MoxaIesAutoMibs_AricentSet', '走 framework REST,維持 framework = SET source-of-truth(延伸 1 決議 B)'],
+        ['TestHandler', '保留 (Aricent 自己跑)', 'Aricent TestHandler 知道 ISS-specific 約束(像 port-in-LAG),framework 不知道;先讓它把關'],
+        ['DepHandler', '保留 (Aricent 自己跑)', '同 TestHandler,ISS 內部 dependency 檢查'],
+    ],
+    widths_cm=[3, 4.5, 5]
+)
+
+add_h2('5.5 為什麼 ISS SET 也要走 framework REST(延伸決議 B)')
+add_para('Aricent ISS 預設的 SET handler 行為是直接動 ISS 內部 state(然後 ISS 自己 callback 通知 framework)。這條 path 跟「framework = SET source-of-truth」哲學衝突。')
+add_para('問題場景:')
+add_bullet('SET ifAdminStatus.1 = down 進來 → ISS 收到 → 直接 set ISS 內部 ifAdminStatus down')
+add_bullet('ISS 自己 callback 通知 framework → framework 寫 JSON')
+add_bullet('但這中間有 race window:外部讀 framework JSON 的人會短暫看到 up(舊值)')
+add_bullet('show running config 跟實際 hardware 狀態可能 desync(雖然 ms 級,但會出現)')
+add_para('採決議 B 後的行為:')
+add_bullet('SET ifAdminStatus.1 = down 進來 → ISS 收到')
+add_bullet('ISS 的 SET handler hook 過,呼 LibFrameworkUri_PatchUri 而非直接 set')
+add_bullet('framework 寫 JSON → 通知 ISS apply → ISS 動 hardware')
+add_bullet('所有 SET path 行為一致,JSON 永遠先於 hardware state',)
+add_para('代價:需要 hook Aricent 的 SET handler 接口。實際工程量視 Aricent code 結構,估 1–2 週。')
+
+add_h2('5.6 Framework GET handler — URI 分流到 config_layer / status_layer')
+add_para('Framework subagent 的 GET handler 透過 URI prefix 自動分流,直接呼 framework 內部 function,跳過 HTTP。'
+         '本質上是「無 HTTP 的 REST handler」,跟 actix-web setting_read / setting_status_read 共用同一份下層 code。')
+add_code('''/* framework AgentX GET handler (broad ownership) */
+fn framework_get_handler(oid: &[u32]) -> Result<Vec<u8>> {
+    /* (1) 透過 Rust FFI 拿 mapping entry */
+    let entry = ies_mapping_lookup_by_oid_via_ffi(oid)?;
+
+    /* (2) 由 URI prefix 分流到對應 layer */
+    let value = if entry.uri.starts_with("setting/data/") {
+        /* config OID:讀 in-memory AppState (跟 REST setting_read 同) */
+        let configs = APP_STATE.configs.lock().unwrap();
+        navigate_json(&configs.running_config, &entry.uri)?
+
+    } else if entry.uri.starts_with("status/") {
+        /* status OID:呼 plugin.get_status() (跟 REST setting_status_read 同) */
+        let mut plugins = APP_STATE.plugins_status.lock().unwrap();
+        let plugin_name = extract_plugin_name(&entry.uri);
+        let plugin = plugins.iter_mut()
+            .find(|p| p.get_name() == plugin_name)
+            .ok_or(ErrorType::NotFound)?;
+        plugin.get_status(&entry.uri, &request_info)?
+
+    } else {
+        return Err(SNMP_ERR_NOSUCHNAME);
+    };
+
+    /* (3) JSON 值轉 ASN.1 SNMP value */
+    Ok(encode_asn1_by_val_type(value, entry.val_type))
+}''')
+add_para('對應到 REST handler 的 mapping:')
+add_table(
+    ['REST endpoint', '對應 framework AgentX 內部呼叫'],
+    [
+        ['GET /api/v1/setting/data/{path} (setting_read)',     '讀 configs.running_config[path]'],
+        ['GET /api/v1/status/{path} (setting_status_read)',    '呼 plugin_status::Plugin::get_status()'],
+        ['PATCH /api/v1/setting/data/{path} (setting_write)',  '呼 config_operation::update_config()'],
+        ['POST /api/v1/setting/action/save',                    '呼 _save_as_startup_config()'],
+    ],
+    widths_cm=[6, 7]
+)
+
+add_h2('5.7 Framework SET handler — 跳過 HTTP loopback 的 in-process commit')
+add_para('framework SET 跟 daemon / ISS 不同,**自己就是 framework**,呼 lib 的 Layer 2 MoxaSnmpSet_ApplyToFramework 等於是走 HTTP 給自己。'
+         '直接呼下層 config_operation 函式更快,~10x。')
+add_code('''/* framework AgentX SET handler (跳過 HTTP) */
+fn framework_set_handler(oid: &[u32], val: SnmpValue, phase: SnmpSetPhase)
+    -> Result<()>
+{
+    let entry = ies_mapping_lookup_by_oid_via_ffi(oid)?;
+
+    match phase {
+        SnmpSetPhase::TestSet => {
+            /* phase 1:用 plugin.validate() 跑 schema validation */
+            let mut plugins = APP_STATE.plugins_config.lock().unwrap();
+            let plugin = plugins.iter_mut()
+                .find(|p| p.get_name() == extract_plugin_name(&entry.uri))?;
+            plugin.validate(&val.to_json(), &configs.pre_running_config, &request_info)
+                  .map_err(|_| SNMP_ERR_BADVALUE)?;
+            Ok(())
+        }
+        SnmpSetPhase::CommitSet => {
+            /* phase 2:真寫入 (in-process) */
+            let mut configs = APP_STATE.configs.lock().unwrap();
+            let mut plugins = APP_STATE.plugins_config.lock().unwrap();
+
+            /* 共用 setting_write 內部呼的同一個 function */
+            config_operation::update_config(
+                &mut plugins,
+                &userinfo,
+                &entry.uri,
+                val.to_json(),
+                &mut configs.pre_running_config,
+            )?;
+
+            /* commit 走既有 _save_as_startup_config */
+            _save_as_startup_config(&data, &mut configs,
+                                    configs.running_config.clone());
+            Ok(())
+        }
+        SnmpSetPhase::UndoSet => { /* revert */ }
+        SnmpSetPhase::CleanupSet => { /* nothing */ }
+    }
+}''')
+add_para('延遲對照(同一個 SET RW OID):')
+add_table(
+    ['路徑', '路徑細節', '延遲'],
+    [
+        ['ISS / daemon (走 HTTP)',     'lib MoxaSnmpSet_ApplyToFramework → LibFrameworkUri_PatchUri → HTTP :80 → nginx → :9759 → setting_write', '~5 ms'],
+        ['Framework (in-process)',     'lib_mapping_lookup_by_oid → APP_STATE.configs.lock() → config_operation::update_config()', '**~100–500 µs**'],
+    ],
+    widths_cm=[5, 7, 2]
+)
+add_para('Framework 不需要走 lib 的 Layer 2 (MoxaSnmpSet_ApplyToFramework) — 那層是給「外部 process」用的,'
+         'framework 自己**只用 Layer 1 (mapping lookup)**,SET 邏輯直接接 config_operation 內部 function。')
+
+add_h2('5.8 Concurrency:framework Mutex 跟 AgentX 4-phase 互動')
+add_para('Framework 用 std::sync::Mutex<Configs> 作 coarse-grained lock — 所有 SET/GET (REST 跟 AgentX 共用) serialize 在這把鎖上。'
+         '不會 race,但 4-phase 之間有 design-time race window:')
+add_bullet('TestSet phase:**不持鎖**(只 validate,不改 state)→ 不 block 其他 SET')
+add_bullet('CommitSet phase:**持鎖**做 in-memory commit + 寫盤 → 大概持鎖 100–500 µs')
+add_bullet('Master 在 TestSet 後送 Abort/Undo 是合法行為(RFC 2741),所以 phase 之間 race window 是 protocol 預期的')
+add_para('AgentX 跟 REST 共用同把鎖,**Plan D 不需要新增同步機制**。'
+         '若兩個同 OID SET 近時間進來:完全 serialize,last-writer-wins。')
+
+# ============================================================
+# 6. 跟現況比較
+# ============================================================
+add_h1('6. 跟現況比較')
+
+add_h2('6.1 延遲對照')
+add_table(
+    ['場景', '現況', '改善後'],
+    [
+        ['GET ifTable RO', '10–150 ms (cold cache)', '< 1 ms'],
+        ['GET Moxa private config', '5–15 ms', '~100 µs'],
+        ['GET fiberCheckStat', '15 ms (dlmod + ISS CLI)', '~50 µs (daemon SHM)'],
+        ['SET RW (含 framework persist)', '50–500 ms (含 sleep)', '~200–500 µs (in-memory commit, framework subagent)'],
+        ['SET RW (ISS / daemon)', '50–500 ms', '~5 ms (走 framework REST,但無 HTTP framing 跨 process 開銷)'],
+    ],
+    widths_cm=[4, 4, 4]
+)
+
+add_h2('6.2 跟 Plan C 的詳細差異')
+add_para('(完整 Plan C 規格見獨立文件 SNMP_Plan_C_Design_2026-06-02.docx)')
+add_table(
+    ['維度', 'Plan C', 'Plan D(本案)'],
+    [
+        ['ies-auto-mibs 是否動', '加 ~85 行 list reader + skip logic', '不動 entry array;抽 ~80% source 進新 lib'],
+        ['配置檔', '/etc/moxa/netsnmp/agentx_owned.list', '無'],
+        ['擁有權如何宣告', 'list 內列 URI prefix', 'subagent REGISTER_MIB priority=50'],
+        ['ISS subagent', '只 RO(由 list 控制)', 'Aricent SnxMainRegisterMibs 處理 + ~500 RW SetHandler 換 adapter'],
+        ['framework / daemon subagent', '未實作', 'lib_moxa_(rust_)snmp_agentx + lib_moxa_snmp_ies_auto_mibs'],
+        ['SET 行為', '不變(ies-auto-mibs handle)', '統一走 lib_moxa_snmp_ies_auto_mibs → framework REST'],
+        ['ISS SET', '不變', 'hook 後也走 framework REST(延伸 B)'],
+        ['工程量', '~2 週', '~6 個月(完整架構)'],
+    ],
+    widths_cm=[4, 4, 4]
+)
+
+# ============================================================
+# 7. 工程量與時程
+# ============================================================
+add_h1('7. 工程量與時程')
+
+add_h2('7.1 階段分解(2026-06-02 修正:broad+strict 混合 ownership)')
+add_para('採 broad+strict 混合後,framework 一隻 subagent 預設覆蓋全部 OID(透過 URI 反問 config/status layer),'
+         '只有 hot path daemon (fiberCheckStat / lldpRemTable 等)才額外做 strict daemon subagent。'
+         '階段 5 工程量大幅縮短。')
+add_table(
+    ['階段', '任務', '估工', 'go/no-go'],
+    [
+        ['0',   'Plan C 試作(已 revert,知識保留)', '—', '—'],
+        ['0\'', '重新 brainstorm 落地方案(本文件後完成)', '已完成', '—'],
+        ['1',   'lib_moxa_snmp_ies_auto_mibs(3 層:data + SET dispatch + URI action)從 3rdparty_net_snmp 搬 ~80% source', '5 週', '—'],
+        ['1.5', 'lib_moxa_snmp_agentx + lib_moxa_rust_snmp_agentx wrapper', '2 週', '—'],
+        ['2',   'PoC fiber_check daemon subagent (strict ownership)', '3 週', '✓ 決策點'],
+        ['3',   'framework subagent (Rust FFI,broad ownership) — §5.6/§5.7 描述', '8 週', '—'],
+        ['4',   'ISS subagent 整合(沿用 Aricent + ~500 個 RW SetHandler 換 adapter)', '6–8 週', '—'],
+        ['5',   'Hot path daemon strict subagent(只 2–3 隻:fiber_check 已 PoC、lldp、dhcp_snp)', '**3–5 週**(原 6–10 週縮短)', '—'],
+        ['6',   'snmpd ies-auto-mibs cleanup', '2–3 週', '—'],
+        ['',    '總時程', '**~23 週(~5.3 個月)**(原 ~26 週)', '—'],
+    ],
+    widths_cm=[1.5, 7, 2.5, 1.5]
+)
+add_para('階段 5 縮短原因:其他 daemon(time / multicoupling / mstp / mab / port_security 等)'
+         '都走 framework broad ownership(透過 plugin.get_status 拿資料),不需要各自寫 subagent code。')
+
+add_h2('7.2 階段 4 ISS 工程量詳細(再修正:6–8 週)')
+add_para('Trace Aricent SET handler 後發現 RW 數量比預想多(MDS-G4000-L3-4XGS 約 500 個 RW SetHandler 要替換),且每個都要寫 thin adapter。建議用 macro / script 自動產生 adapter 減少手工。')
+add_bullet('整合 Aricent subagent 自動 enable(0.5 週)')
+add_bullet('在 mapping lib 標記 owner="iss" 的 prefix(0.5 週)')
+add_bullet('設計 MoxaIesAutoMibs_AricentSet adapter pattern + 工具(自動產生 ~500 個 thin wrapper 的 script)(1.5 週)')
+add_bullet('套用到所有 RW SetHandler(per module,可並行;ifTable / VRRP / OSPF 優先測)(3 週)')
+add_bullet('跨 subagent walk / SET 測試 + framework JSON 同步驗證(1.5 週)')
+add_bullet('Aricent TestHandler / DepHandler 保留不動,風險主要在 SetHandler swap')
+
+# ============================================================
+# 8. 風險與緩解
+# ============================================================
+add_h1('8. 風險與緩解')
+
+add_table(
+    ['風險', '影響', '緩解'],
+    [
+        ['Rust AgentX crate 不成熟', 'framework subagent 卡關',
+         '已決議走 FFI (§2.7),包 lib_moxa_snmp_agentx;不依賴 crate 生態'],
+        ['Hook Aricent SET handler 複雜', 'ISS SET 整合卡關',
+         '先在 ifAdminStatus 試 PoC;成功再用 macro 自動推廣到其他 ~500 個 RW OID(§11.6)'],
+        ['~500 個 RW SetHandler 手工替換工程量大', '階段 4 拖長',
+         '用 X-macro 或 Python script 自動產生 adapter(見 §11.6);只需維護 RW_OID_LIST 一份'],
+        ['Aricent SetHandler list 不完整 / 漏 hook 某 RW OID', 'SET 沒走 framework 造成 desync',
+         '建立 RW handler 完整 grep + check(§11.3 表 + 自動產生工具);CI 跑檢查'],
+        ['Aricent SET callback 風格跟 net-snmp 差異大', 'adapter 翻譯複雜',
+         'PoC 階段 4 先做 1–2 個 OID 確認 adapter pattern,再 macro 化'],
+        ['Priority 50 衝突(其他 dlmod 也用 50)', 'dispatch 結果不可預期',
+         '在 lib_moxa_snmp_agentx 文件明訂「priority 50 reserved for Moxa subagent」'],
+        ['多 subagent 啟動順序', 'snmpd 啟動時 subagent 未上線,該 OID 暫時走 ies-auto-mibs',
+         'systemd ordering: subagent After=app_moxa_snmp_server.service'],
+        ['mapping lib version 不同步', '不同 consumer 用不同 schema',
+         'ies_mapping_version() 啟動時 cross-check,不對就 fallback'],
+        ['Walk gap (snmpwalk 跨 subagent)', '客戶 walk 看到 OID 缺漏',
+         'mapping lib iterate by prefix 確保 owner 註冊範圍連續;測試覆蓋'],
+        ['SET 跨 subagent 4-phase 協調', 'TestSet 部分成功部分失敗',
+         'master AgentX 內建 4-phase 對所有 subagent 協調;失敗發 UndoSet'],
+    ],
+    widths_cm=[3.5, 4, 5]
+)
+
+# ============================================================
+# 9. 開放問題
+# ============================================================
+add_h1('9. 開放問題')
+add_para('已決議(從開放問題搬到 §2 設計決策):', italic=True)
+add_bullet('Rust AgentX 取捨 → §2.7:走純 FFI,捨棄既有 crate')
+add_para('已實作 / 已納入 NOS(獨立於本案):', italic=True)
+add_bullet('SCHED policy:Vincent 2026 PDF 提的 SCHED_OTHERS → SCHED_RR for ISS SNMP — 已實作且納入 NOS,跟本案 AgentX 改造正交,延遲改善已生效')
+add_para('仍待釐清:', italic=True)
+add_bullet('Trap 路徑統一:現況 ISS 內建 trap(15 處 SNMP_AGT_RIF_Notify_Trap)跟 MQTT pipeline 共存。長期是否要把 ISS 那邊也改成走 MQTT?評估改寫 cfa link / OSPF / BGP / RIP / ISIS trap 的成本')
+add_bullet('Hook Aricent SET handler 的具體接口:估出 1 週,但 ISS code 不熟悉,實作時可能拉長')
+add_bullet('lib_moxa_snmp_ies_auto_mibs 內 800+ entry 是否需要 schema versioning(對應未來新增 MIB 時的 backward compatibility)')
+
+# ============================================================
+# 10. 參考資料
+# ============================================================
+add_h1('10. 參考資料')
+
+add_h2('10.1 Jira / 工單')
+add_bullet('RDMDS42-32 — 北京十號線 SNMP 加速')
+add_bullet('RDMDS43-17 — 2025 SNMP Enhancement 主案')
+add_bullet('RDNOS-3253 — ISS 啟動時直接 init SNMP agent on port 6161')
+
+add_h2('10.2 既有文件')
+add_bullet('2022 Vincent PoC:~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx + branch 289-read-oid-enhancement@3rdparty_net_snmp')
+add_bullet('2025 北京十號線 (Yutzu):~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx')
+add_bullet('2026 Vincent 重構計畫:~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung.pdf')
+add_bullet('本案 reference 簡報:~/WORK/SNMP_50ms/SNMP Enhancement 2026.pdf')
+
+add_h2('10.3 標準 / 上游')
+add_bullet('RFC 2741(AgentX 協定)')
+add_bullet('net-snmp 5.9.3 source:agent/mibgroup/agentx/{master,subagent,protocol,client}.c')
+add_bullet('FRR lib/agentx.c(~/SRC/frr/lib/agentx.c,392 行 — clean-room 重寫的設計參考)')
+add_bullet('Aricent ISS SNMP:app_moxa_iss_10_1_0/code/future/snmpv3/snx*.c')
+
+add_h2('10.4 Session 期間衍生文件')
+add_bullet('~/agentx_vs_proxy_truth.md(AgentX vs proxy 機制深度分析)')
+add_bullet('~/beijing_proxy_case_study.md(北京 10 號線 proxy case study)')
+add_bullet('~/agentx_multi.md(Multi-subagent 完整規劃)')
+add_bullet('~/fiber_check_optimization.md(fiber_check link status 取法優化)')
+add_bullet('~/session-snmp-enhancement-2026-06-02.md(本 session 總整理 markdown 版)')
+
+add_h2('10.5 Plan C(前身方案,獨立文件)')
+add_bullet('完整 Plan C 規格:SNMP_Plan_C_Design_2026-06-02.docx(同日另檔)')
+add_bullet('Plan C 試作 commits:3rdparty_net_snmp 4f9ead5 + plugin_moxa_snmp 4951001(均 2026-06-02 revert)')
+add_bullet('ISS 端 SNMP_LNXIP_WANTED cherry-pick(749cc015 + 8ac27ddf)— Plan D 仍會用到,屬於 Plan C 的可保留遺產')
+
+# ============================================================
+# 11. 附錄 — Aricent ISS RW SetHandler 清單
+# ============================================================
+add_h1('11. 附錄 — Aricent ISS RW SetHandler 清單')
+add_para(
+    '本附錄為 ISS 內 Aricent 的 RW SET handler 統計,作為階段 4 工程量估算與替換範圍依據。'
+    '所有列出的 handler 都要在新架構下改用 thin adapter (MoxaIesAutoMibs_AricentSet) '
+    '走 framework REST(延伸決議 B)。Get/Test/Dep handler 保留不動。',
+    italic=False
+)
+
+add_h2('11.1 命名 pattern')
+add_table(
+    ['Pattern', '範圍', '範例'],
+    [
+        ['Nc*Set',    '標準 MIB-II / BRIDGE-MIB 等 RFC 標準 MIB 的 SET',  'NcIfAdminStatusSet'],
+        ['nmhSet*',   'Aricent 自家 + Moxa private MIB 的 SET (low-level wrapper)',  'nmhSetVrrpConfigEnable'],
+    ],
+    widths_cm=[3, 6, 5]
+)
+
+add_h2('11.2 SET handler 總數(ISS 全 build)')
+add_para('未經 build feature 過濾的 source-level 統計:')
+add_bullet('Nc*Set 標準 MIB-II handlers:~132 個')
+add_bullet('nmhSet* Aricent / Moxa private handlers:~1,863 個')
+add_bullet('合計:~1,995 個 RW SetHandler')
+add_para('注意:這是 ISS source tree 全部 .c 內 SET handler 總和,包含 WSS (wireless)、MPLS、Y.1564 等 MDS-G4000-L3-4XGS 上不啟用的模組。實際 deploy 上需要 hook 的 handler 數會少很多。')
+
+add_h2('11.3 MDS-G4000-L3-4XGS 預期啟用模組的 SET handler 統計')
+add_table(
+    ['模組', 'SET handler 數', '說明 / 關鍵 OID'],
+    [
+        ['firewall',         '107', 'Aricent firewall + IDS'],
+        ['macsec',           '69',  'MACsec (802.1AE) 加密'],
+        ['ptp',              '55',  'PTPv2 (IEEE 1588) timing'],
+        ['cfa2 (interface)', '40',  'IF-MIB ifAdminStatus / ifAlias / ifPromiscuousMode / ifLinkUpDownTrapEnable / ifStackStatus / ifRcvAddressStatus + Moxa Ext.'],
+        ['stp / mstp / rstp / pvrst', '32', 'Spanning Tree 各版本'],
+        ['lldp',             '26',  'LLDP-MIB std + Moxa private'],
+        ['tracking',         '21',  '路由追蹤'],
+        ['phr',              '20',  'PHR (Port Heartbeat Redundancy)'],
+        ['pnac (802.1X)',    '18',  'Port-based authentication'],
+        ['bgp',              '17',  'BGP4-MIB (L3)'],
+        ['portsecurity',     '14',  'Port-based security'],
+        ['ospf',             '14',  'OSPF-MIB (L3)'],
+        ['iec62439_2',       '10',  'PRP/HSR redundancy'],
+        ['multicoupling',    '9',   'Multi-Coupling'],
+        ['mab (MAC Auth Bypass)', '9', '802.1X MAB'],
+        ['vrrp',             '8',   'VRRP (L3)'],
+        ['isis',             '6',   'IS-IS (L3)'],
+        ['goosecheck',       '5',   'IEC 61850 GOOSE check'],
+        ['rip',              '1',   'RIP v2 (L3,少 RW)'],
+        ['','',''],
+        ['L3 build 預估 RW handler 合計', '~481', '(Aricent nmhSet*) + ~30 (std Nc*Set) ≈ **~500 個**'],
+    ],
+    widths_cm=[4, 2, 7]
+)
+
+add_h2('11.4 IF-MIB (ifTable / ifXTable / ifStackTable) 標準 RW handler 完整清單')
+add_para('IF-MIB std handler 用 Nc*Set 命名,在 cfa2/src/ 內。是 PoC 階段 4 ISS 整合的首要目標(因為 ifTable RW 操作最頻繁)。')
+add_table(
+    ['Aricent Handler', '對應 OID', 'MIB 物件'],
+    [
+        ['NcIfAdminStatusSet',          '.1.3.6.1.2.1.2.2.1.7',     'ifAdminStatus (RW)'],
+        ['NcIfAliasSet',                '.1.3.6.1.2.1.31.1.1.1.18', 'ifAlias (RW)'],
+        ['NcIfLinkUpDownTrapEnableSet', '.1.3.6.1.2.1.31.1.1.1.14', 'ifLinkUpDownTrapEnable (RW)'],
+        ['NcIfPromiscuousModeSet',      '.1.3.6.1.2.1.31.1.1.1.16', 'ifPromiscuousMode (RW)'],
+        ['NcIfStackStatusSet',          '.1.3.6.1.2.1.31.1.2.1.3',  'ifStackStatus (RW row status)'],
+        ['NcIfRcvAddressStatusSet',     '.1.3.6.1.2.1.31.1.4.1.2',  'ifRcvAddressStatus (RW)'],
+        ['NcIfRcvAddressTypeSet',       '.1.3.6.1.2.1.31.1.4.1.3',  'ifRcvAddressType (RW)'],
+    ],
+    widths_cm=[6, 5, 4]
+)
+
+add_h2('11.5 Aricent 自家 / Moxa private RW handler 範例(部分)')
+add_para('完整 ~1900 個 nmhSet* 太多,以下只列各模組代表性 handler 作為 adapter 開發的基準範例:')
+
+add_h3('11.5.1 cfa2 (interface 擴充)')
+add_code('''nmhSetIfMainPortRole               # Moxa Ext: port role
+nmhSetIfMainExtLinkUpEnabledStatus # Moxa Ext: link-up 控制
+nmhSetIfMainExtLinkUpDelayTimer    # Moxa Ext: link-up delay
+nmhSetIfLinkUpEnabledStatus
+nmhSetIfMainEncapDot1qVlanId       # 802.1Q VLAN encapsulation
+nmhSetIfIpPortVlanId               # IP port VLAN
+nmhSetIfUfdSystemControl           # UFD (Uplink Failure Detection)
+nmhSetIfUfdGroupRowStatus
+nmhSetIfUfdGroupName
+nmhSetIfUfdGroupUplinkPorts
+nmhSetIfUfdGroupDownlinkPorts
+nmhSetIfUfdGroupDesigUplinkPort
+nmhSetIfMainUfdGroupId
+nmhSetIfMainDesigUplinkStatus
+nmhSetIfUfdModuleStatus
+nmhSetIfSplitHorizonSysControl     # Split-horizon
+nmhSetIfSplitHorizonModStatus
+nmhSetIfOOBNode0SecondaryIpAddress # Out-of-band
+nmhSetIfOOBNode0SecondaryIpMask
+nmhSetIfOOBNode1SecondaryIpAddress
+nmhSetIfOOBNode1SecondaryIpMask
+nmhSetDaiConfigStatus              # DAI
+nmhSetIpsgConfigStatus             # IPSG''')
+
+add_h3('11.5.2 vrrp')
+add_code('''nmhSetVrrpConfigEnable
+nmhSetVrrpConfigVersion
+nmhSetVrrpConfigOperTableEntryV2AcceptMode
+nmhSetVrrpConfigOperTableEntryV2AdvIntInMsec
+nmhSetVrrpv3ConfigOperTableEntryPreemptDelay
+nmhSetFsVrrpv3Status
+nmhSetFsVrrpv3OperationsTrackedGroupTrackedLinks
+nmhSetFsVrrpv3OperationsTrackGroupIfRowStatus''')
+
+add_h3('11.5.3 ospf')
+add_code('''nmhSetOspfConfigRrdAdminStat        # RRD admin
+nmhSetOspfConfigRrdMetricType
+nmhSetOspfConfigRrdMetricValue
+nmhSetOspfConfigSPFHoldTime
+nmhSetOspfConfigRFC1583Compatibility
+nmhSetOspfConfigIfPassiveStatus
+nmhSetOspfConfigIfCryptoAuthType
+nmhSetOspfConfigIfCryptoAuthKeyId
+nmhSetOspfConfigIfCryptoAuthKey
+nmhSetOspfConfigVirtIfCryptoAuthType
+nmhSetOspfConfigVirtIfCryptoAuthKeyId
+nmhSetOspfConfigVirtIfCryptoAuthKey''')
+
+add_h3('11.5.4 bgp')
+add_code('''nmhSetFsbgp4VpnRouteLeakStatus
+nmhSetFsMIBgp4DebugType
+nmhSetFsMIBgp4DebugTypeIPAddr
+nmhSetFsMIBgp4EvpnAddrFamily
+nmhSetFsMIBgp4MacMobDuplicationTimeInterval
+nmhSetFsMIBgp4MaxMacMoves
+nmhSetFsMIBgp4RRDNetworkAddrType
+nmhSetFsMIBgp4RRDNetworkPrefixLen
+nmhSetFsMIBgp4RRDNetworkRowStatus
+(完整 17 個)''')
+
+add_h3('11.5.5 mab')
+add_code('''nmhSetMabConfigGlobalEnable
+nmhSetMabConfigAuthMode
+nmhSetMabConfigAuthType
+nmhSetMabConfigPortEnable
+nmhSetMabConfigQuietPeriod
+nmhSetMabConfigReAuthEnable
+nmhSetMabConfigReAuthPeriod
+nmhSetMabConfigLocalDatabaseRowStatus
+nmhSetMabConfigLocalDatabaseMacRemoveAll''')
+
+add_para('完整每個模組的 handler 清單可由 grep 自動產生:', italic=True)
+add_code('''cd ~/mds4xg/buildroot/dl/app_moxa_iss_10_1_0/code/future
+grep -hE "^INT1 +(nmhSet|Nc[A-Z][a-zA-Z]+Set)" \\
+    <module>/src/*.c | sed -E 's/^INT1 +([^ (]+).*/\\1/' | sort -u''')
+
+add_h2('11.6 自動產生 adapter 的 macro 範例')
+add_para('因為 ~500 個 handler 手寫 adapter 太繁瑣,建議用 macro 自動展開。一個 X-macro 範例:')
+add_code('''/* RW_OID_LIST.h — 在新 lib 內定義 */
+#define RW_OID_LIST(X)                                                       \\
+    X(NcIfAdminStatusSet,           {1,3,6,1,2,1,2,2,1,7})                  \\
+    X(NcIfAliasSet,                 {1,3,6,1,2,1,31,1,1,1,18})              \\
+    X(NcIfLinkUpDownTrapEnableSet,  {1,3,6,1,2,1,31,1,1,1,14})              \\
+    X(nmhSetVrrpConfigEnable,       {1,3,6,1,4,1,8691,605,3,1,1,1})         \\
+    /* ... */
+
+/* generate.h — adapter 自動展開 */
+#define GENERATE_ADAPTER(name, oid_init)                                     \\
+    INT4 name##_AricentAdapter(/* Aricent SET params */) {                  \\
+        static const oid lookup_oid[] = oid_init;                            \\
+        const ies_mapping_entry_t *e =                                       \\
+            ies_mapping_lookup_by_oid(lookup_oid,                            \\
+                sizeof(lookup_oid)/sizeof(oid));                             \\
+        if (!e) return SNMP_FAILURE;                                         \\
+        netsnmp_agent_request_info reqinfo = { .mode = MODE_SET_ACTION };   \\
+        netsnmp_request_info requests;                                       \\
+        /* fill from Aricent params */                                       \\
+        return MoxaSnmpSet_ApplyToFramework(&reqinfo, &requests, e, ...);   \\
+    }
+
+RW_OID_LIST(GENERATE_ADAPTER)
+
+/* 啟動時呼 hook function 把 Aricent 原本 SetHandler 替換成 adapter */
+void MoxaIesAutoMibs_HookAllAricentSetHandlers(void) {
+    #define HOOK_SET(name, oid_init) \\
+        AricentSwapSetHandler(oid_init, name##_AricentAdapter);
+    RW_OID_LIST(HOOK_SET)
+}''')
+
+add_para('或用外部 Python script 從 grep 結果產 .c 檔,在 buildroot build 階段先跑 generator,**手工只需維護 X-macro 清單**。')
+
+# ============================================================
+# Save
+# ============================================================
+out_path = '/home/moxa/SNMP_Plan_D_Design_2026-06-02.docx'
+doc.save(out_path)
+print(f"Saved: {out_path}")

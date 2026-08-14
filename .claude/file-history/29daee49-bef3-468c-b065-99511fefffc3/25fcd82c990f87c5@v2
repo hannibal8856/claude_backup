@@ -1,0 +1,31 @@
+#!/bin/sh
+# usage: dlmod_exit_test.sh off|on
+# 驗證 dlmod 的「退出」機制:停用 mms_setting 這個 dlmod 模組,看它的 OID 會怎樣。
+# 手法與 libnetsnmpmibs 變體實驗相同 —— 用 bind mount 遮蓋,不修改唯讀 rootfs 上的檔案,
+# 重開機即自動還原。
+CONF=/etc/moxa/netsnmp/config/mms_setting.conf
+UNIT=app_moxa_snmp_server.service
+
+systemctl stop $UNIT
+sleep 3
+grep -q "$CONF" /proc/mounts && umount "$CONF" 2>/dev/null
+
+if [ "$1" = "off" ]; then
+    sed 's/^[[:space:]]*dlmod/# dlmod/' "$CONF" > /tmp/mms_setting.conf.off
+    mount -o bind /tmp/mms_setting.conf.off "$CONF" || echo "!! BIND FAILED"
+fi
+
+echo "--- 目前 $CONF 內容:"
+cat "$CONF"
+echo "--- 遮蓋狀態:"; grep 'mms_setting' /proc/mounts || echo "(無,使用出廠檔)"
+
+systemctl start $UNIT
+i=0
+while [ $i -lt 20 ]; do
+    /usr/bin/snmpget -v2c -c public -t 2 -r 1 127.0.0.1 .1.3.6.1.2.1.1.3.0 >/dev/null 2>&1 && break
+    i=$((i+1)); sleep 3
+done
+echo "--- snmpd 起來了(等了 $((i*3))s)"
+echo "--- dlmod 載入狀況(snmpd 記錄的錯誤/載入訊息):"
+grep -i 'dlmod\|mms' /var/log/messages 2>/dev/null | tail -5
+echo "### DONE"

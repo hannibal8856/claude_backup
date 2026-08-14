@@ -1,0 +1,53 @@
+Plan C 其實有兩個獨立機制：
+
+┌─────────────────────────────────────────────────┬──────┬───────────────────────────────────────────────┬────────────────────────────────────────────┐
+│                      機制                       │ 對象 │                    做什麼                     │                  GET/SET                   │
+├─────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┼────────────────────────────────────────────┤
+│ agentx_owned.list + skip                        │ RO   │ in-master 不註冊 → subagent 全拿                  │ GET+SET 都給 subagent（但這些是 RO，本來就沒    │
+│                                                 │ 欄   │                                               │ SET）                                      │
+├─────────────────────────────────────────────────┼──────┼───────────────────────────────────────────────┼────────────────────────────────────────────┤
+│ mox_iss_get_forward_rules + forward（3062,      │ RW   │ in-master 保留（SET 留本地）、GET forward 給  │ 這才是分流                                 │
+│ 3297）                                          │ 欄   │ subagent                                           │                                            │
+└─────────────────────────────────────────────────┴──────┴───────────────────────────────────────────────┴────────────────────────────────────────────┘
+
+- skip = 把整條（get+set）讓出去，只用在 RO 欄。
+- forward = 真正的 GET/SET 分流，用在 RW 欄；而它能動，正是因為 forward 的目標 subagent 是 table。
+
+
+❯ 所以走這個邏輯的話, 所有RW都會被is_agentx_owned() 跳過; 所以才會進in-master對嗎?
+
+結論對（所有 RW 都會進 in-master），但「被 is_agentx_owned() 跳過」這個用詞反了，會埋下誤解。關鍵是有兩個不同的「跳過」：
+
+兩個「跳過」要分清
+
+// mox_snmp_init_entry 迴圈
+if ( mox_snmp_entry_is_agentx_owned(entry) ) {   // 回 1 才成立
+    free(entry); continue;      // ← 「跳過註冊」= 這條不進 in-master、去 subagent
+}
+RegisterToNetSNMP(entry);       // ← 沒跳過 = 註冊進 in-master
+
+// is_agentx_owned 內部
+if (entry->mode & HANDLER_CAN_SET) return 0;   // RW → 回 0
+
+- RW → is_agentx_owned() 回 0 ＝ 它不認領 RW（你可以說「is_agentx_owned 略過 RW」）。
+- 正因為回 0，迴圈就不執行 free;continue ＝ 沒有跳過註冊 → RW 被 RegisterToNetSNMP 註冊進 in-master。
+
+所以精確講法
+
+RW 不是「被跳過」才進 in-master——恰恰相反，是「沒被跳過」才進 in-master。
+
+- 「被 free;continue 跳過註冊」的是 RO + ifmibdb prefix 命中（回 1）→ 去 subagent。
+- RW（回 0）不跳過 → 進 in-master。
+
+一個補充（免得又埋雷）
+
+留 in-master 的不只 RW。is_agentx_owned() 回 0 有兩種情況，都留 in-master：
+1. RW（mode & HANDLER_CAN_SET）→ 回 0。
+2. RO 但 prefix 沒命中（不在 agentx_owned.list）→ 也回 0。
+
+只有「RO 且 prefix 命中」這一種才 skip 去 subagent。
+
+
+
+一句話總結：agentx_owned.list 只把「指定 prefix 的 RO 欄」讓給 subagent；其餘（所有 RW + 未列的 RO）全留 in-master。 RW 進 in-master 是「沒被 skip」的自然結果，不是被誰主動送進去。
+

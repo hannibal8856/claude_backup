@@ -1,0 +1,106 @@
+# ADR-0008: framework subagent 的 config GET 改採 hybrid（in-process 優先 + REST loopback fallback）—— **暫時 work-around，日後必須改回單一路徑**
+
+Status: Accepted（**但明確標記為暫時 work-around / 技術債，償還條件見 Consequences**）
+Date: 2026-07-29
+
+Context:
+  ADR-0007 的 config 半邊實作完成後（framework AgentX subagent 的所有 config GET
+  一律走 REST loopback `GET /api/v1/setting/data/<uri>`，取代 in-process
+  `running_config` 讀取），功能面全數驗過（trustAccess / mxTrap scalars / mxIpIf
+  欄位值皆正確）。但緊接著的 mxTurboRingV2 walk 出現**嚴重卡頓**，DUT pcap
+  （`~/pcap/2026-07-29_plan-E_mxTurboRingV2_walk_slow.pcapng`，148 個 SNMP frame）
+  量化出決定性差距 —— **同一個 walk pass 內**：
+
+  | OID 區段 | 讀取方式 | 每次 GET |
+  |---|---|---|
+  | `.8691.603.3.4.1.3.x.0`（coupling）、`.1.4.x.0`（protection）= config scalar | REST loopback | **~0.7–1.0 秒** |
+  | `.8691.603.3.4.2.1.1.x`（ring 狀態）= status | in-process `get_status_with_snap` | **~4 ms** |
+
+  差距約 **200 倍**。pcap frame 43→50 顯示 SNMP client 對 config scalar 連續
+  **timeout 重試 4 次、卡約 5 秒**才取得回應；其後每個 config scalar 皆 ~0.8s。
+
+  **根因 = REST loopback 在 framework 是 self-loop。**
+  路徑為 `subagent thread → nginx:80 → 繞回「同一個 process」的 actix:9759 →
+  config_layer（每次還跑 authenticate）`。subagent 與 actix worker 同屬
+  `app_moxa_framework` 這一個行程，這條迴圈每次約 0.8s。
+
+  **in-master 沒有這個問題**：snmpd 是獨立行程，HTTP 打到「另一個行程」的 flask，
+  不會自己卡自己。→ self-loop 成本是 **framework in-process 設計獨有**的代價；
+  ADR-0007 當初只在 DUT 驗證了「REST 資料完整性」，**未驗證 walk 效能**。
+
+Decision:
+  1. **config GET 改為 hybrid**（`snmp_subagent.rs::hybrid_config_get`）：
+     先讀 in-process `config_operation::get_config_from_path(running_config)`（~ms）；
+     **僅當**結果為 `Null` / 空陣列 / `Err` 時，才 fallback 到 REST
+     `ies_config_get`（完整、file-backed）。
+  2. **密碼剝除兩路都做**：in-process 分支補呼叫
+     `config_operation::remove_password_from_config`（與 REST `_setting_get`
+     在 `rust_moxa_config_layer/src/lib.rs:270` 的行為一致）；REST 分支由
+     server 端自行剝除。
+  3. **status 維持 in-process**（`get_status_with_snap`），**不**改走
+     `/api/v1/status` REST —— 實測證明改走 REST 會把現行 4ms 的 status 打慢 200 倍。
+  4. 這**修正了 ADR-0007 的主決策**：ADR-0007 原文採「uniform（依 flag 走三路、
+     全面取代 in-process GET）」為主決策、把 hybrid 僅列為「日後選配的效能優化」；
+     本 ADR 因實測效能證據，**將 hybrid 提升為現行主決策**。ADR-0007 的資料
+     完整性結論（:80 setting endpoint 完整、可作為後盾）**仍然成立、未被推翻**。
+
+Alternatives Considered:
+  - **維持 uniform REST（ADR-0007 原決策）**：否決。實測 ~0.8s/GET，walk 觸發
+    SNMP client timeout 重試，實務上不可用。
+  - **status 也改走 REST `/api/v1/status`（完全對齊 in-master 三路模型）**：否決。
+    這是本輪原本的方向，但 pcap 證據顯示同一個 self-loop 會把目前 4ms 的 status
+    劣化 200 倍。「貼近 in-master」在此與「可用效能」直接衝突，效能優先。
+  - **消除 self-loop：subagent 直接呼叫 config_layer handler、不繞 nginx**：
+    未採用為本輪解法，但**列為償還方向之一**（見 Consequences）。
+  - **逐 plugin 修 `running_config` 載入，使 in-process 視圖完整**：這是**根解**，
+    但 effort 大，列為償還工項而非本輪解法。
+
+Consequences:
+  - **效益**：walk 回到 ~ms 等級；只有 in-process 真的缺資料的表（如 mxIpIf
+    `ipInterface/l3VlanIfTable`）才付一次 REST 代價。
+  - **成本／技術債（本 ADR 的重點）**：framework 的 config 讀取**同時存在兩條路徑**
+    （in-process + REST loopback），這本身就是不一致，違反「單一讀取路徑」的設計目標。
+    **此為明確、暫時的 work-around。**
+  - **⚠️ 償還責任（user 明確要求，2026-07-29）**：
+    為了一致性，**日後必須移除 REST loopback fallback，改回單一的 AgentX/in-process
+    路徑**。償還的**前提**是先解掉根本問題 ——
+    `rust_moxa_config_layer/src/config_loader.rs` 的 `check_and_fix_config(plugins)`
+    依註冊 plugins 建構 `running_config`，造成該視圖**較窄**（mxIpIf 讀不到）。
+    根本問題解掉後，config GET 應只剩 in-process 一條路徑，`ies_config_get` /
+    `config_get` 的 fallback 即可移除。**在償還完成前，不得把這個 hybrid 當成終局設計。**
+  - **「合法空」的誤判成本**：本實作把 `Null` / 空陣列一律視為「缺資料」→ 對**合法為空**
+    的表（例如尚未設定的 `snmpTrap/host`）每次都會多打一次 REST。行為仍正確，
+    但多付一次 self-loop 延遲。
+  - **隱蔽性風險**：未來遷移的表若 in-process 缺資料，會**靜默**走 fallback ——
+    結果正確但慢，效能問題不易在功能驗證中被發現。新遷移表應留意 walk 耗時。
+
+Constraints / Assumptions:
+  - in-process `running_config` 對「已完整」的群組與 REST `_setting_get` 回傳
+    **byte-identical**（同一組 `get_config_from_path` + `remove_password_from_config`）。
+  - REST loopback 僅作為完整性後盾，其 ~0.8s 成本可被容忍，因為只在 fallback 觸發。
+  - SET 路徑不受本 ADR 影響，仍走 REST PATCH（SET 罕見，延遲無感）。
+  - self-loop 延遲來自 `subagent → nginx:80 → 同行程 actix:9759`；此為觀測結論，
+    尚未逐層拆解（nginx vs actix vs authenticate 各佔多少未細分）。
+
+Related Files / Modules:
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs（`hybrid_config_get`；
+    所有 config 讀取入口：`handle_get` / pbmp get·set / rowstatus get·set /
+    `handle_idx_table_index_get` config 分支 / `config_field_is_bool` / `*_rows()`）
+  - buildroot/dl/app_moxa_framework/src/uri_service.rs（`start_snmp_subagent`
+    需傳入 `plugins_config` / `configs` 供 in-process 讀取）
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/config_set.c（`ies_config_get` /
+    `ies_string_free` —— fallback 專用，償還後可移除）
+  - buildroot/dl/lib_moxa_rust_ies_auto_mibs/src/lib.rs（`config_get` FFI，同上）
+  - buildroot/dl/rust_moxa_config_layer/src/config_loader.rs（`check_and_fix_config`
+    = `running_config` 較窄的根源，**償還的施力點**）
+  - buildroot/dl/rust_moxa_config_layer/src/lib.rs:270（`_setting_get` =
+    `get_config_from_path` + `remove_password_from_config`，密碼行為對照基準）
+  - ~/pcap/2026-07-29_plan-E_mxTurboRingV2_walk_slow.pcapng（效能證據）
+
+Related ADRs:
+  - **修正（amend，不 supersede）: ADR-0007** —— 其「uniform 取代 in-process GET」
+    的主決策改為 hybrid；其「:80 setting endpoint 完整」的資料完整性結論仍成立。
+  - 延伸: ADR-0002（lib_moxa_ies_auto_mibs 資料層 + REST bridge）
+  - 相關: ADR-0004（native dual-reg + table_iterator）、ADR-0005（iss0 end-state）
+  - 個案背景: mxIpIf（in-process 缺資料 → 觸發 fallback 的代表案例）、
+    mxTurboRingV2（status 維持 in-process 的效能理由來源）

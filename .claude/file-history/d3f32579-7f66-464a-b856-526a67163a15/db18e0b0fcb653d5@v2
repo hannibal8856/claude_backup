@@ -1,0 +1,94 @@
+# ADR-0014: Plan C GET-forward —— 目標與 probe 改為執行期推導,並以 `agentx_owned.list` 逐行 `+getfwd` opt-in
+
+Status:
+  **Accepted（2026-08-08）** —— 已實作、DUT 全流程驗證、commit 並 push。
+  `3rdparty_net_snmp` `e605314`、`plugin_moxa_snmp` `a7f3b02`(branch `snmp-plan-E`)。
+
+Date: 2026-08-08
+
+Context:
+  `agentx_owned.list` 只讓 **RO** entry 跳過本地註冊(交給 ISS subagent);**RW**
+  entry 一律留在 in-master,因為 SET 必須走 framework/config 路徑。但 RW 欄的
+  **GET** 走本地 `ies_uri_handle`(產 value file 再解析)非常慢,而 walk 會把同一張表的
+  RO 與 RW 欄併進同一個多 varbind GETNEXT —— 一個慢欄拖垮整張表。
+
+  最初的解法是在 `ies_auto_mibs.c` 手列 `mox_iss_get_forward_rules[]`:12 列,每列把一個
+  RW 欄 OID 配一個 probe OID。維護成本高(加一個 group = 改 C 碼 + 重編),且 probe 選錯
+  會**靜默失敗**:`netsnmp_subtree_find()` 回本地 subtree、`mox_snmp_forward_get_to_iss()`
+  仍回 0 當成功,結果值型別錯、scalar 變 `noSuchInstance`、GETNEXT 在該欄迴圈,
+  mxPort walk 從 193 塌成 13,而且 wire 上完全沒有 AgentX 流量。
+
+  2026-08-08 把規則改成執行期推導(`6185d43`)後,功能全數通過、單點 GET 延遲與基線等價,
+  **但整棵 mxPort walk 慢 13.5%**(0.788s vs RO-only 基線 0.694s)。原因是政策太粗暴:
+  它讓「委派 group 裡的每一個 RW 欄」都 forward,而 mxPort 的 RW 欄本地讀取本來就不慢;
+  同時它**意外新啟用了 `stdethdb/`(dot3)的 forward**,手列版從未 forward 過 dot3。
+
+Decision:
+  分成兩件事,各自回答不同問題。
+
+  **① 哪些欄要 forward、用哪個 probe —— 執行期推導,不再手列。**
+  註冊迴圈本來就知道它把哪些 OID 交出去了(每個被 skip 的 entry 就是一個),把它們記成
+  probe 候選。候選若之後被**合成 index 欄**搶回 in-master 就註銷 ——
+  `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()` 只對沒被 skip 的 entry 執行,
+  會在本地重新註冊該表的 col 1,無聲地把那個 OID 從 subagent 拿回來。
+  選擇規則:**同表優先,退回同前綴**。兩半都必要 —— 一個前綴可橫跨數個 subagent
+  registration(`ifmibdb/` 涵蓋 ifTable 與 ifXTable,是兩個不同 registration),
+  而一張表也可能自己沒有合格候選(`mxportdb/portConfigTable` 唯一的 RO 欄是 index,
+  被合成搶回)。probe 不需要 instance sub-id:裸欄位 OID、甚至表 entry OID 再上一層,
+  都能解析到 subagent 的 registration。
+
+  **② 哪個 group 要啟用 forward —— 逐行 opt-in,預設關閉。**
+  `agentx_owned.list` 每行可在前綴後帶旗標,唯一的旗標是 `+getfwd`。沒帶旗標的行只做
+  RO 註冊 skip,不 forward 任何 RW 欄的 GET。目前只有 `ifmibdb/` 帶旗標 ——
+  出貨版手列的 4 條規則(`ifAdminStatus` 在 ifTable;`ifLinkUpDownTrapEnable` /
+  `ifPromiscuousMode` / `ifAlias` 在 ifXTable)**全都在這個前綴底下**,所以只給這一行
+  加旗標即與出貨行為等價。probe 候選也只對 `+getfwd` 的 group 記錄。
+
+Alternatives Considered:
+  - **維持手列規則表** —— 加一個 group 要改 C 碼 + 重編,且 probe 選錯會靜默失敗
+    (2026-08-07 已踩過一次完整的錯誤 probe 循環)。否決。
+  - **推導但不加 opt-in(即 `6185d43` 的狀態)** —— 功能正確但 walk 慢 13.5%,
+    違反驗收標準②(效能不能比原本 `agentx_owned.list` 版本差)。否決。
+  - **用 registration priority 做 GET/SET 分流** —— 不可行。dual registration 時
+    priority **小的贏**,in-master 的 127 贏 framework 的 200,GET 從來不會落到 framework。
+    這正是需要顯式 forward 的原因(見 ADR-0003 / ADR-0005 的脈絡)。
+  - **把 `agentx_owned.list` 改用 root OID 當鍵** —— 方向對(可消滅 `fsladb/` 那類
+    URI 前綴歧義、天然支援兩個 subagent),但**不應把 RO 的 skip 也改成執行期查表**,
+    那會把 init 期一次性的成本變成每次 GET 的成本。暫緩。
+
+Consequences:
+  - mxPort walk 中位數回到 **0.700s**(基線 0.694s,noise 內);完整性 193 不變;
+    ifTable 330 / ifXTable 285 不變。
+  - **dot3 的 forward 被關掉**,`.10.7` 連續 walk 從 594 變 581。少的 13 筆是
+    `dot3PauseAdminMode`(`.10.7.10.1.1.*`)—— 但 **mainline 同樣不在連續 walk 回它**,
+    兩邊 targeted walk / exact GET 都拿得到。對 mainline(329)與 RO-only 基線(576)
+    都不算少,符合驗收標準①。
+  - 新增 group 時要**自覺決定**要不要帶 `+getfwd`。判準:該 group 的 RW 欄本地讀是否慢。
+    快就不要帶 —— forward 不是免費的。
+  - **連帶修掉一個既有的 loader 地雷**:行 buffer 原本等於 prefix 長度(64),而檔案裡的
+    註解行多半超過 63 字元,`fgets` 切半後續行被當成新 prefix。已 commit 的檔案實際解析出
+    19 條、16 條是垃圾(`n`、`er`、`is`、`or` …),**剛好都沒撞到 45 個真實 URI 模組前綴,
+    純屬運氣**。本次為 `+getfwd` 加的註解會生出 prefix `s`,命中全部 17 個 `std*db/`。
+    修法:拆出 `AGENTX_OWNED_LINE_LEN`(256),讀到超長行就吞掉尾巴。
+    **改這個檔或 loader 前,先在 host 端跑一次獨立的 parser 小程式** —— build 不會報錯。
+
+Constraints / Assumptions:
+  - `moxa_snmp_handle_util.c` 是被 `#include` 進 `ies_auto_mibs.c` 的(第 185 行),
+    所以 note-shadowed hook 只需前置宣告,不需要新 header。
+  - `gAgentXProbe` 固定 128 格、`AGENTX_OWNED_MAX` 固定 32。前者因 opt-in 而只裝
+    `+getfwd` group 的候選;後者在 parser 修好後只算真前綴。
+  - 驗證 forward 是否真的走 ISS **必須用 pcap**(`tcpdump -i lo port 705`)。
+    「GET 回得到值」不能當證據 —— in-master 也會回值。
+
+Related Files / Modules:
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`
+    —— probe 表與推導(~3104–3210)、GET 路徑閘(~3281)、loader 與 `+getfwd` 解析(~3416–3490)
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c`
+    —— 合成 index 註冊成功後呼叫 `mox_snmp_probe_note_shadowed()`
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list` —— 清單與旗標
+  - `~/mds4xgl3/tools/walkmeasure.sh`、`~/mds4xgl3/tools/lat.py` —— 量測
+
+Related ADRs:
+  ADR-0003(iss0 GET-forward 的原始構想,已被 ADR-0004 supersede)、
+  ADR-0011(`stdethdb/` 委派)、ADR-0012(`mxportdb/` 委派)、
+  ADR-0015(候選篩選)、ADR-0016(`mxrstpdb/` 委派)

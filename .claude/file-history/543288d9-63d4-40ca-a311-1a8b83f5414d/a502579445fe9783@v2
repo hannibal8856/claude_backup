@@ -1,0 +1,12 @@
+#!/usr/bin/expect -f
+# Usage: dutget.exp <remote-path> <local-path>  -- copies FROM the DUT as admin.
+# The pull complement of dutscp.exp; getpcap.exp does this with both paths
+# hardcoded to one 2026-08-08 capture.
+set timeout 180
+log_user 1
+set src [lindex $argv 0]
+set dst [lindex $argv 1]
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no admin@192.168.127.253:$src $dst
+expect -re {[Pp]assword:} { send "moxa\r" }
+expect eof

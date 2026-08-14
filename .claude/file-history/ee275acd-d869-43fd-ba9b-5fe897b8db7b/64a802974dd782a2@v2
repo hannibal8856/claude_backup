@@ -1,0 +1,20 @@
+#!/bin/bash
+# Which commits carry the trailers, and are they also reachable from other
+# origin branches (i.e. would a rewrite make snmp-plan-E diverge from them)?
+DL=/home/moxa/mds4xgl3/buildroot/dl
+for name in 3rdparty_net_snmp app_moxa_framework lib_moxa_ies_auto_mibs \
+            lib_moxa_rust_ies_auto_mibs lib_moxa_utility plugin_moxa_fiber_check \
+            plugin_moxa_mms plugin_moxa_snmp; do
+    d="$DL/$name"
+    echo "======== $name"
+    for c in $(git -C "$d" log --format='%H' origin/develop..snmp-plan-E 2>/dev/null \
+               || git -C "$d" log --format='%H' -20 snmp-plan-E); do
+        if git -C "$d" log -1 --format='%B' "$c" | grep -qE '^(Co-Authored-By: Claude|Claude-Session:)'; then
+            subj=$(git -C "$d" log -1 --format='%s' "$c")
+            others=$(git -C "$d" branch -r --contains "$c" 2>/dev/null \
+                     | sed 's/^ *//' | grep -v 'origin/snmp-plan-E$' | tr '\n' ' ')
+            printf "  %s  %-55s\n" "$(git -C "$d" rev-parse --short $c)" "${subj:0:55}"
+            [ -n "$others" ] && printf "      also on: %s\n" "$others"
+        fi
+    done
+done

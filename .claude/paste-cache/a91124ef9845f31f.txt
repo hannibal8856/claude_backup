@@ -1,0 +1,585 @@
+[moxa@3a703fb6a6dc ~/mds4xgl3/buildroot] (2023.02.11_develop) 18:34 $ make lib_moxa_ies_auto_mibs-rebuild
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_rsynced
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_staging_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_target_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_images_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_host_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.stamp_built
+>>> lib_moxa_ies_auto_mibs custom Syncing from source dir ./dl/lib_moxa_ies_auto_mibs
+rsync -au --chmod=u=rwX,go=rX  --exclude .svn --exclude .git --exclude .hg --exclude .bzr --exclude CVS ./dl/lib_moxa_ies_auto_mibs/ /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom
+>>> lib_moxa_ies_auto_mibs custom Building
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.npm-global/bin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/eg990:/opt/toolchain/glibc/host/usr/bin:/opt/t32/bin/pc_linux:/sbin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j9 -C /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom CC=/home/moxa/mds4xgl3/buildroot/output/host/bin/arm-linux-gnueabihf-gcc EXTRA_CFLAGS="-DMDS_G4000_L3_4XGS -D"XCAT3" -D"MDSXG" -D"CPSS" -DINCLUDE_MOXA_L3 -D"MDSG40004XGS" -DMOXA_MULTICOUPLING -DMOXA_TRACKING -DMOXA_DI -DMOXA_DO_RELAY -DMOXA_MACSEC -DMOXA_GOOSE_CHECK -DMOXA_RSTP_SWIFT -DMOXA_MIRROR_VLAN_MIRROR -DMOXA_CUST -I/home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/snmp_tools/inc -I/home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs"
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+>>> lib_moxa_ies_auto_mibs custom Installing to staging directory
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.npm-global/bin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/eg990:/opt/toolchain/glibc/host/usr/bin:/opt/t32/bin/pc_linux:/sbin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j9 -C /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom DESTDIR=/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot install CC=/home/moxa/mds4xgl3/buildroot/output/host/bin/arm-linux-gnueabihf-gcc
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+>>> lib_moxa_ies_auto_mibs custom Fixing libtool files
+for la in $(find /home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/lib* -name "*.la"); do \
+    cp -a "${la}" "${la}.fixed" && \
+    /bin/sed -i -e "s:/home/moxa/mds4xgl3/buildroot/output:@BASE_DIR@:g" \
+        -e "s:/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot:@STAGING_DIR@:g" \
+         -e "s:/usr/local/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf:@TOOLCHAIN_EXTERNAL_INSTALL_DIR@:g" \
+        -e "s:\(['= ]\)/usr:\\1@STAGING_DIR@/usr:g" \
+        -e "s:\(['= ]\)/lib:\\1@STAGING_DIR@/lib:g" \
+         -e "s:@TOOLCHAIN_EXTERNAL_INSTALL_DIR@:/usr/local/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf:g" \
+        -e "s:@STAGING_DIR@:/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot:g" \
+        -e "s:@BASE_DIR@:/home/moxa/mds4xgl3/buildroot/output:g" \
+        "${la}.fixed" && \
+    if cmp -s "${la}" "${la}.fixed"; then \
+        rm -f "${la}.fixed"; \
+    else \
+        mv "${la}.fixed" "${la}"; \
+    fi || exit 1; \
+done
+>>> lib_moxa_ies_auto_mibs custom Installing to target
+LIB_MOXA_IES_AUTO_MIBS: Pre target install
+LIB_MOXA_IES_AUTO_MIBS: Pre target install ends
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.npm-global/bin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/eg990:/opt/toolchain/glibc/host/usr/bin:/opt/t32/bin/pc_linux:/sbin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j9 -C /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom DESTDIR=/home/moxa/mds4xgl3/buildroot/output/target install CC=/home/moxa/mds4xgl3/buildroot/output/host/bin/arm-linux-gnueabihf-gcc
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom'
+LIB_MOXA_IES_AUTO_MIBS: Post target install
+LIB_MOXA_IES_AUTO_MIBS: Post target install ends
+comm: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.files-list.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.files-list-staging.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.files-list-images.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_ies_auto_mibs-custom/.files-list-host.before: No such file or directory
+[moxa@3a703fb6a6dc ~/mds4xgl3/buildroot] (2023.02.11_develop) 13:52 $ make app_moxa_framework-rebuild
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_rsynced
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_staging_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_target_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_images_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_host_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_built
+>>> app_moxa_framework custom Syncing from source dir ./dl/app_moxa_framework
+rsync -au --chmod=u=rwX,go=rX  --exclude .svn --exclude .git --exclude .hg --exclude .bzr --exclude CVS ./dl/app_moxa_framework/ /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom
+>>> app_moxa_framework custom Building
+>>> app_moxa_framework custom Installing to target
+APP_MOXA_FRAMEWORK: Pre target install
+APP_MOXA_FRAMEWORK: Pre target install ends
+APP_MOXA_FRAMEWORK: Post target install
+APP_MOXA_FRAMEWORK: Post target install ends
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-staging.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-images.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-host.before: No such file or directory
+[moxa@3a703fb6a6dc ~/mds4xgl3/buildroot] (2023.02.11_develop) 13:53 $  make app_moxa_framework-rebuild rust_moxa_build-rebuild
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_rsynced
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_staging_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_target_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_images_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_host_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.stamp_built
+>>> app_moxa_framework custom Syncing from source dir ./dl/app_moxa_framework
+rsync -au --chmod=u=rwX,go=rX  --exclude .svn --exclude .git --exclude .hg --exclude .bzr --exclude CVS ./dl/app_moxa_framework/ /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom
+>>> app_moxa_framework custom Building
+>>> app_moxa_framework custom Installing to target
+APP_MOXA_FRAMEWORK: Pre target install
+APP_MOXA_FRAMEWORK: Pre target install ends
+APP_MOXA_FRAMEWORK: Post target install
+APP_MOXA_FRAMEWORK: Post target install ends
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-staging.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-images.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/app_moxa_framework-custom/.files-list-host.before: No such file or directory
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_rsynced
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_staging_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_target_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_images_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_host_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.stamp_built
+>>> rust_moxa_build custom Syncing from source dir ./dl/rust_moxa_build
+rsync -au --chmod=u=rwX,go=rX  --exclude .svn --exclude .git --exclude .hg --exclude .bzr --exclude CVS ./dl/rust_moxa_build/ /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom
+>>> rust_moxa_build custom Building
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.npm-global/bin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/eg990:/opt/toolchain/glibc/host/usr/bin:/opt/t32/bin/pc_linux:/sbin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j1  -C /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom TARGET=armv7-unknown-linux-gnueabihf RUST_TARGET_DIR="/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_target" RUST_MOXA_BUILD_CMTFLAGS="-D"XCAT3" -D"L3_BASE" -D"MDSXG" -D"CPSS"" RUST_MOXA_BUILD_FEATURES="MOXA_ACCOUNT_PASSWORD_POLICY,MOXA_ACL,MOXA_AIDE,MOXA_ALL_USER_STATUS,MOXA_API_KEY,MOXA_ARP_TABLE,MOXA_BFD,MOXA_COMMON_SYSTEM_EVENT,MOXA_CONFIG_ENCRYPTION,MOXA_CLI_EXPORT,MOXA_CONFIG_LAYER,MOXA_CUSTOMER_KEY_MANAGEMENT,MOXA_DAI,MOXA_DASHBOARD,MOXA_DEBUG_LOG,MOXA_DEBUG_LOG_NG,MOXA_DEBUG_STACKDUMP,MOXA_DEBUG_TRACE,MOXA_DEBUG_TRACE_SYSTEM,MOXA_DEBUG_TRACE_TC,MOXA_DEBUG_TRACE_TRV2,MOXA_DHCP_RELAY,MOXA_DHCPSNP,MOXA_DOT1X,MOXA_DUAL_HOMING,MOXA_EIP,MOXA_EMAIL,MOXA_EXTERNAL_STORAGE,MOXA_FACTORY_DEFAULT,MOXA_FILE_LAYER,MOXA_FIBER_CHECK,MOXA_FIRMWARE_UPDATE,MOXA_AES_ENCRYPTION_KEY_MIGRATION,MOXA_GOOSE_CHECK,MOXA_HARDWARE_INTERFACE,MOXA_IEC62439_2,MOXA_IGMP_SNOOPING,MOXA_IO,MOXA_IPSG,MOXA_L2_REDUNDANCY,MOXA_LA,MOXA_LED,MOXA_LHC_EVENT,MOXA_LLDP,MOXA_LOCATOR,MOXA_LOGIN_AUTHENTICATION,MOXA_LOGIN_POLICY,MOXA_LP,MOXA_MAB,MOXA_MACSEC,MOXA_MMS,MOXA_MODBUS_TCP,MOXA_MSTP,MOXA_MULTICOUPLING,MOXA_NTP_AES_AUTH,MOXA_PERMISSIONS,MOXA_PING,MOXA_PLATFORM_SYSTEM_EVENT,MOXA_DI,MOXA_PNAC_EVENT,MOXA_POE,MOXA_POE_AGENT,MOXA_POE_BT,MOXA_PORT,MOXA_PORT_MIRROR,MOXA_SPAN_REFLECT_MIRROR_CONTROL_FRAME,MOXA_RSPAN_REFLECT_MIRROR_CONTROL_FRAME,MOXA_MIRROR_VLAN_MIRROR,MOXA_PASSWORD_POLICY_CHECK,MOXA_PROFINET,MOXA_PSEC,MOXA_PTP,MOXA_QOS,MOXA_RATE_LIMIT_EVENT,MOXA_REBOOT,MOXA_RELAY,MOXA_REMOVE,MOXA_RLPS,MOXA_RMON,MOXA_RSTP,MOXA_RSTP_SWIFT,MOXA_SECURE_SYSTEM_DIAGNOSTICS,MOXA_SNMP,MOXA_SSH_KEY,MOXA_STATUS_LAYER,MOXA_STCL,MOXA_SWITCHING_EVENT,MOXA_SYSLOG,MOXA_SYSTEM_INFORMATION,MOXA_SYSTEM_RESOURCE_MONITOR,MOXA_TCST,MOXA_TIME,MOXA_TRACKING,MOXA_TRACE_ROUTE,MOXA_TRUSTED_ACCESS,MOXA_TURBO_CHAIN,MOXA_TURBORINGV2,MOXA_UI_SERVICE_MANAGEMENT,MOXA_USER_ACCOUNT,MOXA_USER_STATUS,MOXA_UTILIZATION,MOXA_VLAN,MOXA_WEB,MOXA_WEB_CRT,MOXA_IP_INTERFACE,MOXA_MULTICAST_LOCAL_ROUTE,MOXA_MULTICAST_ROUTING,MOXA_NETWORK_DNS,MOXA_OSPF,MOXA_PIM_DM,MOXA_PIM_SM,MOXA_RIP,MOXA_STATIC_ROUTE,MOXA_VRRP," RUST_MOXA_BUILD_PROFILING_FEATURES="MOXA_PROFILING," TOOLCHAIN_PATH="/usr/local/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf"
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom'
+# local build
+if [ ! -d "../app_moxa_framework-custom" ]; then \
+    cd ..; \
+    ln -sf app_moxa_framework app_moxa_framework-custom; \
+    cd -; \
+fi
+if [ ! -d "../app_moxa_iss_config_loader-custom" ]; then \
+    cd ..; \
+    ln -sf app_moxa_iss_config_loader app_moxa_iss_config_loader-custom; \
+    cd -; \
+fi
+# create_ln
+/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/app_moxa_framework/utils
+Reduced 259 packages currently
+/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/app_moxa_framework/utils
+[1/8] Check app_moxa_framework
+    app_moxa_framework-custom existed already
+[2/8] Check app_moxa_token_module
+    app_moxa_token_module-custom existed already
+[3/8] Check app_moxa_user_status
+    app_moxa_user_status-custom existed already
+[4/8] Check app_moxa_token_and_user_status_daemon
+    app_moxa_token_and_user_status_daemon-custom existed already
+[5/8] Check plugins_moxa_framework
+    plugins_moxa_framework-custom existed already
+[6/8] Check plugins_moxa_export_cli_submode
+    plugins_moxa_export_cli_submode-custom existed already
+[7/8] Check plugins_moxa_export_cli
+    plugins_moxa_export_cli-custom existed already
+[8/8] Check plugins_moxa_debug_log_ng
+    plugins_moxa_debug_log_ng-custom existed already
+../rust_moxa_create_dummy_package-custom/rust_moxa_create_dummy_package.sh ../plugins_moxa_framework-custom/Cargo.toml
+[../rust_moxa_create_dummy_package-custom/rust_moxa_create_dummy_package.sh]
+../rust_moxa_create_dummy_package-custom/rust_moxa_create_dummy_package.sh ../plugins_moxa_export_cli_submode-custom/Cargo.toml
+[../rust_moxa_create_dummy_package-custom/rust_moxa_create_dummy_package.sh]
+RUST_MOXA_BUILD_CMTFLAGS is: -DXCAT3 -DL3_BASE -DMDSXG -DCPSS
+RKSPL findstring result is: 
+warning: constant `MAIN_RING_HSR` is never used
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_multicoupling-custom/framework/src/agent.rs:11:7
+   |
+11 | const MAIN_RING_HSR: u64 = 3;
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAIN_RING_HSR` is never used
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_multicoupling-custom/framework/src/config.rs:40:7
+   |
+40 | const MAIN_RING_HSR: u64 = 3;
+   |       ^^^^^^^^^^^^^
+
+warning: `plugin_moxa_multicoupling` (lib) generated 2 warnings
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:601:23
+    |
+601 |                 #[cfg(feature = "MOXA_QINQ")]
+    |                       ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:605:23
+    |
+605 |                 #[cfg(feature = "MOXA_QINQ")]
+    |                       ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:660:19
+    |
+660 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:664:19
+    |
+664 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:676:19
+    |
+676 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:680:19
+    |
+680 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_crt.rs:347:35
+    |
+347 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_crt.rs:366:35
+    |
+366 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_mace_crt.rs:350:35
+    |
+350 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_mace_crt.rs:369:35
+    |
+369 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: `plugin_moxa_la` (lib) generated 6 warnings
+warning: `plugin_moxa_mms` (lib) generated 4 warnings
+warning: unused variable: `port_no`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe-custom/framework/src/config.rs:38:23
+   |
+38 |         let (slot_no, port_no) =
+   |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_port_no`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:15:15
+   |
+15 |     #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |               ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:311:15
+    |
+311 |     #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |               ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:79:19
+   |
+79 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |                   ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:275:19
+    |
+275 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/export_cli_event.rs:12:18
+   |
+12 |     if #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |                  ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/status.rs:185:19
+    |
+185 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/status.rs:340:19
+    |
+340 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_syslog-custom/framework/src/status_tlsfile.rs:44:59
+   |
+44 |                     common_name = format!("{}", cn.data().as_utf8().unwrap());
+   |                                                           ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `plugin_moxa_poe` (lib) generated 1 warning (run `cargo fix --lib -p plugin_moxa_poe` to apply 1 suggestion)
+warning: `plugin_moxa_poe_agent` (lib) generated 7 warnings
+warning: `plugin_moxa_syslog` (lib) generated 1 warning
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_web_crt-custom/framework/src/file.rs:446:31
+    |
+446 |                     cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                               ^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_web_crt-custom/framework/src/file.rs:465:31
+    |
+465 |                     cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                               ^^^^^^^
+
+warning: `plugin_moxa_web_crt` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2.44s
+warning: constant `MAIN_RING_HSR` is never used
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_multicoupling-custom/framework/src/agent.rs:11:7
+   |
+11 | const MAIN_RING_HSR: u64 = 3;
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAIN_RING_HSR` is never used
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_multicoupling-custom/framework/src/config.rs:40:7
+   |
+40 | const MAIN_RING_HSR: u64 = 3;
+   |       ^^^^^^^^^^^^^
+
+warning: `plugin_moxa_multicoupling` (lib) generated 2 warnings
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:601:23
+    |
+601 |                 #[cfg(feature = "MOXA_QINQ")]
+    |                       ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:605:23
+    |
+605 |                 #[cfg(feature = "MOXA_QINQ")]
+    |                       ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:660:19
+    |
+660 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:664:19
+    |
+664 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:676:19
+    |
+676 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `MOXA_QINQ`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_la-custom/framework/src/agent.rs:680:19
+    |
+680 |             #[cfg(feature = "MOXA_QINQ")]
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `MOXA_AUTO_CONFIG`, `MOXA_DAI`, `MOXA_DHCP_SERVER_OPTION_121`, `MOXA_DHCP_SERVER_PORT_BASED_LA`, `MOXA_IPSG`, `MOXA_MULTICOUPLING`, `MOXA_PHR`, `MOXA_PTP`, and `MOXA_TRACKING`
+    = help: consider adding `MOXA_QINQ` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `plugin_moxa_la` (lib) generated 6 warnings
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_crt.rs:347:35
+    |
+347 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_crt.rs:366:35
+    |
+366 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_mace_crt.rs:350:35
+    |
+350 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_mms-custom/framework/src/file_mms_mace_crt.rs:369:35
+    |
+369 |                         cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                                   ^^^^^^^
+
+warning: unused variable: `port_no`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe-custom/framework/src/config.rs:38:23
+   |
+38 |         let (slot_no, port_no) =
+   |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_port_no`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `plugin_moxa_mms` (lib) generated 4 warnings
+warning: `plugin_moxa_poe` (lib) generated 1 warning (run `cargo fix --lib -p plugin_moxa_poe` to apply 1 suggestion)
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:15:15
+   |
+15 |     #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |               ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:311:15
+    |
+311 |     #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |               ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:79:19
+   |
+79 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |                   ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/config_event.rs:275:19
+    |
+275 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/export_cli_event.rs:12:18
+   |
+12 |     if #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+   |                  ^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+   = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/status.rs:185:19
+    |
+185 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `RKSPL`
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_poe_agent-custom/framework/src/status.rs:340:19
+    |
+340 |         #[cfg(any(feature = "RKSPL", feature = "MDS", feature = "MDSXG"))]
+    |                   ^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `EDS`, `MDS`, `MDSXG`, `RKS`, and `TN`
+    = help: consider adding `RKSPL` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+  --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_syslog-custom/framework/src/status_tlsfile.rs:44:59
+   |
+44 |                     common_name = format!("{}", cn.data().as_utf8().unwrap());
+   |                                                           ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: `plugin_moxa_poe_agent` (lib) generated 7 warnings
+warning: `plugin_moxa_syslog` (lib) generated 1 warning
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_web_crt-custom/framework/src/file.rs:446:31
+    |
+446 |                     cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                               ^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `openssl::asn1::Asn1StringRef::as_utf8`: truncates at the first interior NUL byte; use `to_string` instead
+   --> /home/moxa/mds4xgl3/buildroot/output/build/plugin_moxa_web_crt-custom/framework/src/file.rs:465:31
+    |
+465 |                     cn.data().as_utf8().unwrap().as_bytes().to_owned()
+    |                               ^^^^^^^
+
+warning: `plugin_moxa_web_crt` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 0.66s
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom'
+>>> rust_moxa_build custom Installing to target
+RUST_MOXA_BUILD: Pre target install
+RUST_MOXA_BUILD: Pre target install ends
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.npm-global/bin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/eg990:/opt/toolchain/glibc/host/usr/bin:/opt/t32/bin/pc_linux:/sbin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j1  -C /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom DESTDIR=/home/moxa/mds4xgl3/buildroot/output/target install TARGET=armv7-unknown-linux-gnueabihf MOXA_PRODUCT_NAME="MDS-G4000-L3-4XGS" MOXA_SW_PACKAGE="L3_BASE" TARGET=armv7-unknown-linux-gnueabihf RUST_TARGET_DIR="/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_target"
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom'
+# copy to /tmp for development phase
+# copy to output/target/usr/bin for release phase
+# copy app_moxa_framework.service to systemd for release phase
+# logrotate
+# copy nginx conf to output/target/etc/moxa/nginx for release phase
+# @cp ./app_moxa_iss_config_loader/src/*.py /home/moxa/mds4xgl3/buildroot/output/target//etc/moxa/app-moxa-iss-config-loader
+# @install -m 550 ./app_moxa_iss_config_loader/src/reload_iss.sh /home/moxa/mds4xgl3/buildroot/output/target//etc/moxa/app-moxa-iss-config-loader
+# @install -m 550 ./app_moxa_iss_config_loader/src/debug_mode_switch.sh /home/moxa/mds4xgl3/buildroot/output/target//etc/moxa/app-moxa-iss-config-loader
+# rust
+# copy to /tmp for development phase
+# copy to output/target/usr/sbin for release phase
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom'
+# backup Cargo.toml
+mkdir -p /home/moxa/mds4xgl3/buildroot/output/images/cargo/rust_moxa_build
+cp -f /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/Cargo.lock /home/moxa/mds4xgl3/buildroot/output/images/cargo/rust_moxa_build
+RUST_MOXA_BUILD: Post target install
+RUST_MOXA_BUILD: Post target install ends
+comm: /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.files-list.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.files-list-staging.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.files-list-images.before: No such file or directory
+comm: /home/moxa/mds4xgl3/buildroot/output/build/rust_moxa_build-custom/.files-list-host.before: No such file or directory
+[moxa@3a703fb6a6dc ~/mds4xgl3/buildroot] (2023.02.11_develop) 13:53 $ make

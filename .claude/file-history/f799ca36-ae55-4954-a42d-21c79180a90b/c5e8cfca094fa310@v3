@@ -1,0 +1,290 @@
+//! fiberCheckStatus Plugin of flask_moxa_status_layer for app_moxa_fiber_check
+
+use configparser::ini::Ini;
+use lib_moxa_rust_fiber_check as mx_fiberCheck;
+use lib_moxa_rust_iss::get_snmp_data::{self, VarType};
+use lib_moxa_rust_iss::productinfo_module as mx_module;
+use lib_moxa_rust_system as mx_system;
+use rust_moxa_common::{common_error::ErrorCommon, plugin_status, request_info};
+
+pub const NAME: &str = "fiberCheckStatus";
+
+fn _construct_port_table(max_port_num_of_switch: u32) -> serde_json::Value {
+    let mut config = Ini::new();
+    config
+        .load("/etc/moxa/app-moxa-fiber-check/fiberCheck.stat")
+        .unwrap();
+
+    // construct port state table
+    let mut linkstatus_table = vec![serde_json::json!({}); max_port_num_of_switch as usize];
+
+    fn is_valid_port(max_port_num_of_switch: u32, zero_based_port: u32) -> bool {
+        zero_based_port < max_port_num_of_switch
+    }
+
+    let _if_table = get_snmp_data::SnmpDef {
+        file_name: "ifTable",
+        index_of_table: vec!["ifIndex"],
+        value_type: vec![get_snmp_data::ValueType {
+            name: "ifOperStatus",
+            var_type: VarType::Int,
+            uri_name: None,
+            remap_data: None,
+        }],
+    };
+
+    for iftable_obj in &get_snmp_data::get_snmp_data_by_cli(_if_table) {
+        let port_idx = iftable_obj["table_index_dict"]["ifIndex"].as_u64().unwrap() - 1;
+
+        if !is_valid_port(max_port_num_of_switch, port_idx as u32) {
+            continue;
+        }
+
+        if linkstatus_table.get(port_idx as usize).is_some() {
+            linkstatus_table[port_idx as usize] = iftable_obj["ifOperStatus"].clone();
+        }
+    }
+
+    let mut port_table = vec![serde_json::json!({}); max_port_num_of_switch as usize];
+
+    for i in 0..max_port_num_of_switch as usize {
+        let mut port_valid = true;
+        let midx = mx_system::get_eth_module_idx_by_port_idx(i as u32);
+        if mx_system::is_phr_module_valid(midx) {
+            let mpidx = mx_system::get_eth_module_port_idx_by_port_idx(i as u32);
+            let mpnum = mx_system::get_eth_module_port_num(midx);
+            if mpidx >= mpnum {
+                port_valid = false;
+            }
+        }
+        port_table[i]["portIndex"] = serde_json::json!(i + 1);
+
+        port_table[i]["modelName"] =
+            serde_json::json!(config.get("status", &format!("modelName.{i}")).unwrap());
+
+        port_table[i]["serialNumber"] =
+            serde_json::json!(config.get("status", &format!("serialNumber.{i}")).unwrap());
+
+        port_table[i]["wavelength"] =
+            serde_json::json!(config.get("status", &format!("wavelength.{i}")).unwrap());
+
+        port_table[i]["temperatureC"] =
+            serde_json::json!(config.get("status", &format!("temperatureC.{i}")).unwrap());
+
+        port_table[i]["temperatureF"] =
+            serde_json::json!(config.get("status", &format!("temperatureF.{i}")).unwrap());
+
+        port_table[i]["voltage"] =
+            serde_json::json!(config.get("status", &format!("voltage.{i}")).unwrap());
+
+        port_table[i]["txPower"] =
+            serde_json::json!(config.get("status", &format!("txPower.{i}")).unwrap());
+
+        // #if not link up, show rx power N/A
+        if port_valid && [1].contains(&linkstatus_table[i].as_u64().unwrap_or(0)) {
+            port_table[i]["rxPower"] =
+                serde_json::json!(config.get("status", &format!("rxPower.{i}")));
+        } else {
+            port_table[i]["rxPower"] = serde_json::json!("N/A");
+        }
+
+        port_table[i]["txBiasCurrent"] =
+            serde_json::json!(config.get("status", &format!("txBiasCurrent.{i}")).unwrap());
+
+        port_table[i]["temperatureLimitC"] = serde_json::json!(config
+            .get("status", &format!("temperatureLimitC.{i}"))
+            .unwrap());
+
+        port_table[i]["temperatureLimitF"] = serde_json::json!(config
+            .get("status", &format!("temperatureLimitF.{i}"))
+            .unwrap());
+        let mut tx_array = vec![serde_json::json!(""), serde_json::json!("")];
+        tx_array[0] = serde_json::json!(config
+            .get("status", &format!("txPowerUnderLimit.{i}"))
+            .unwrap());
+        tx_array[1] = serde_json::json!(config
+            .get("status", &format!("txPowerOverLimit.{i}"))
+            .unwrap());
+        port_table[i]["txPowerLimit"] = serde_json::json!(tx_array);
+        let mut rx_array = vec![serde_json::json!(""), serde_json::json!("")];
+        rx_array[0] = serde_json::json!(config
+            .get("status", &format!("rxPowerUnderLimit.{i}"))
+            .unwrap());
+        rx_array[1] = serde_json::json!(config
+            .get("status", &format!("rxPowerOverLimit.{i}"))
+            .unwrap());
+        port_table[i]["rxPowerLimit"] = serde_json::json!(rx_array);
+    }
+
+    serde_json::json!(port_table)
+}
+
+#[derive(Debug)]
+pub struct Plugin {
+    max_port_num_of_switch: u32,
+}
+
+impl Plugin {
+    pub fn new(module_info: &mx_module::ModuleInfo) -> Plugin {
+        Plugin {
+            max_port_num_of_switch: module_info.max_port_num_of_switch(),
+        }
+    }
+}
+
+impl Default for Plugin {
+    fn default() -> Self {
+        Self::new(&mx_module::ModuleInfo::new())
+    }
+}
+
+impl plugin_status::Plugin for Plugin {
+    fn get_name(&self) -> &str {
+        NAME
+    }
+
+    fn get_status(
+        &mut self,
+        _path: &str,
+        _request_info: &request_info::RequestInfo,
+    ) -> Result<serde_json::Value, ErrorCommon> {
+        let _ = mx_fiberCheck::output_shared_info();
+
+        /*
+        config = configparser.ConfigParser()
+        config.read('/etc/moxa/app-moxa-fiber-check/fiberCheck.stat')
+        */
+
+        let mut ret_dict_general = serde_json::json!(null);
+        let mut ret_dict_monitor = serde_json::json!(null);
+        let mut ret_status = serde_json::json!(null);
+
+        ret_dict_general["enable"] = serde_json::json!(true);
+        ret_status["general"] = ret_dict_general;
+
+        ret_dict_monitor["portTable"] = _construct_port_table(self.max_port_num_of_switch);
+
+        ret_status["monitor"] = ret_dict_monitor;
+
+        Ok(ret_status)
+    }
+
+    fn get_cache_timeout_in_second(&self) -> u64 {
+        5
+    }
+
+    fn get_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "title": "fiber check status uri",
+            "description": "fiber check status uri",
+            "additionalProperties": false,
+            "properties": {
+                "general": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "enable": {
+                            "type": "boolean",
+                        }
+                    },
+                    "type": "object",
+                    "required": [
+                        "enable"
+                    ]
+                },
+                "monitor": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "portTable": {
+                            "additionalItems": false,
+                            "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                    "portIndex": {
+                                        "type": "integer",
+                                        "maximum": self.max_port_num_of_switch,
+                                        "minimum": 1
+                                    },
+                                    "modelName": {
+                                        "type": "string",
+                                    },
+                                    "serialNumber": {
+                                        "type": "string",
+                                    },
+                                    "wavelength": {
+                                        "type": "string",
+                                    },
+                                    "temperatureC": {
+                                        "type": "string",
+                                    },
+                                    "temperatureF": {
+                                        "type": "string",
+                                    },
+                                    "voltage": {
+                                        "type": "string",
+                                    },
+                                    "txPower": {
+                                        "type": "string",
+                                    },
+                                    "rxPower": {
+                                        "type": "string",
+                                    },
+                                    "txBiasCurrent": {
+                                        "type": "string",
+                                    },
+                                    "temperatureLimitC": {
+                                        "type": "string",
+                                    },
+                                    "temperatureLimitF": {
+                                        "type": "string",
+                                    },
+                                    "txPowerLimit": {
+                                        "type": "array",
+                                        "maxItems": 2,
+                                        "minItems": 2,
+                                        "items": {
+                                            "type": "string",
+                                        }
+                                    },
+                                    "rxPowerLimit": {
+                                        "type": "array",
+                                        "maxItems": 2,
+                                        "minItems": 2,
+                                        "items": {
+                                            "type": "string",
+                                        }
+                                    }
+                                },
+                                "type": "object",
+                                "required": [
+                                    "portIndex",
+                                    "modelName",
+                                    "serialNumber",
+                                    "wavelength",
+                                    "temperatureC",
+                                    "temperatureF",
+                                    "voltage",
+                                    "txPower",
+                                    "rxPower",
+                                    "txBiasCurrent",
+                                    "temperatureLimitC",
+                                    "temperatureLimitF",
+                                    "txPowerLimit",
+                                    "rxPowerLimit"
+                                ]
+                            },
+                            "type": "array",
+                            "maxItems": self.max_port_num_of_switch,
+                            "minItems": self.max_port_num_of_switch
+                        }
+                    },
+                    "type": "object",
+                    "required": [
+                        "enable",
+                        "portTable"
+                    ]
+                }
+            }
+
+        })
+    }
+}

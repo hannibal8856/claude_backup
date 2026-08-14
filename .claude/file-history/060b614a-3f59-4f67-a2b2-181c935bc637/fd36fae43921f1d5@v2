@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""draw.io 版面稽核 —— 見 ADR-0020。
+
+檢查四件在本次簡報製圖時反覆踩到的問題:
+
+  1. 方塊之間的非預期重疊(改一個方塊的尺寸會波及鄰居)
+  2. 垂直箭頭穿過非起訖的方塊
+  3. 箭頭出入點未對齊(orthogonal router 會畫出無謂的折線)
+  4. HTML 雙重跳脫(drawio 會把 <b> 當文字顯示)
+
+容器與其內容的重疊屬正常,用 --allow 指定豁免配對。
+
+usage:
+    tools/drawio_audit.py <file.drawio> [...] [--allow laneL:l1,laneR:r1]
+"""
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+TOL = 1.0          # 出入點對齊容差(px)
+
+
+def boxes(root):
+    out = {}
+    for c in root.iter('mxCell'):
+        if c.get('vertex') == '1':
+            g = c.find('mxGeometry')
+            if g is None or g.get('x') is None:
+                continue
+            out[c.get('id')] = (float(g.get('x')), float(g.get('y')),
+                                float(g.get('width')), float(g.get('height')))
+    return out
+
+
+def overlap(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
+
+
+def anchor(style, key, x, w):
+    m = re.search(r'%s=([-0-9.]+)' % key, style or '')
+    return x + float(m.group(1)) * w if m else x + w / 2
+
+
+def audit(path, allow):
+    root = ET.parse(path).getroot()
+    bs = boxes(root)
+    problems = []
+
+    ids = list(bs)
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            if tuple(sorted((a, b))) in allow:
+                continue
+            if overlap(bs[a], bs[b]):
+                problems.append('重疊    %s <-> %s' % (a, b))
+
+    for c in root.iter('mxCell'):
+        if c.get('edge') != '1':
+            continue
+        eid, s, t = c.get('id'), c.get('source'), c.get('target')
+        if s not in bs or t not in bs:
+            continue
+        st = c.get('style', '')
+        # 只稽核「上下流程線」。側向關聯線(從方塊左右兩側出入)本來就會轉折,跳過。
+        m = re.search(r'exitY=([-0-9.]+)', st or '')
+        if m and float(m.group(1)) != 1:
+            continue
+        sx, sy, sw, sh = bs[s]
+        tx, ty, tw, th = bs[t]
+        if ty < sy + sh:          # 目標不在來源下方 → 非上下流程線
+            continue
+        ex = anchor(st, 'exitX', sx, sw)
+        en = anchor(st, 'entryX', tx, tw)
+        if abs(ex - en) > TOL:
+            problems.append('未對齊  %s  出口 x=%.1f  入口 x=%.1f  差 %.1f px'
+                            % (eid, ex, en, abs(ex - en)))
+        y0, y1 = sy + sh, ty
+        for bid, (bx, by, bw, bh) in bs.items():
+            if bid in (s, t):
+                continue
+            if bx < ex < bx + bw and not (by + bh <= y0 or by >= y1):
+                problems.append('穿越    %s (x=%.0f) 穿過 %s' % (eid, ex, bid))
+
+    raw = open(path, encoding='utf-8').read()
+    for pat in ('amp;lt;', 'amp;gt;', 'amp;#'):
+        if pat in raw:
+            problems.append('雙重跳脫 檔案含 "%s" —— drawio 會顯示字面標籤' % pat)
+
+    return problems
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    allow = set()
+    for a in sys.argv[1:]:
+        if a.startswith('--allow'):
+            for pair in a.split('=', 1)[-1].split(','):
+                if ':' in pair:
+                    allow.add(tuple(sorted(pair.split(':', 1))))
+    if not args:
+        print(__doc__)
+        return 2
+
+    bad = 0
+    for f in args:
+        problems = audit(f, allow)
+        print('== %s' % f)
+        if problems:
+            bad = 1
+            for p in problems:
+                print('   ' + p)
+        else:
+            print('   通過')
+    return bad
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,191 @@
+---
+name: probe-snmpd-registry
+description: Read snmpd's live registration table on the Moxa DUT — including the subtree->children chains that decide which registrar answers an OID — using a read-only dlmod probe, without rebuilding or reflashing the image. Use when the question is "who actually serves this OID", "is there an AgentX registration under in-master's", "why did this OID silently disappear", "which subagent won", or whenever a claim about net-snmp registration precedence would otherwise be inferred from source instead of measured.
+---
+
+# Reading snmpd's live registration table
+
+## What this answers
+
+For any OID: **which registrations cover it, in what order, and which of them belong
+to an AgentX subagent.** That is the ground truth behind every "who serves this OID"
+question — forwarding targets, delegation coverage, priority contests, and OIDs that
+vanish with no error.
+
+## Why nothing simpler works
+
+Three obvious routes are dead ends. Check them off rather than rediscovering them:
+
+| Route | Why it fails |
+|---|---|
+| `dump_registry()` | Walks `->next` (sibling regions) only. **Never touches `->children`**, which is where every same-region competitor lives. Also `printf`s to stdout, invisible for a daemonised snmpd. |
+| A debug token (`-Dsubtree`, `-Dregister_mib`) | The overlapping-registration merge (`agent_registry.c:845-935`) contains **no `DEBUGMSG` at all**. There is nothing to turn on. |
+| `nsModuleTable` (NET-SNMP-AGENT-MIB) | Not compiled into this build — no `nsModule*` symbols in `libnetsnmpmibs.so`. |
+
+So the chain can only be read from **inside** snmpd's address space. The cheapest
+carrier is a dlmod: no rebuild, no reflash, no reboot, and removable.
+
+## Procedure
+
+`./deploy.sh` does the whole loop. It exists because the two steps people skip —
+restarting snmpd the supported way, and confirming the registry has settled — are
+exactly the two that produce wrong answers.
+
+```
+~/.claude/skills/probe-snmpd-registry/deploy.sh            # build, deploy, restart, read
+~/.claude/skills/probe-snmpd-registry/deploy.sh --read     # just re-read (probe already loaded)
+~/.claude/skills/probe-snmpd-registry/deploy.sh --clean    # remove the conf from the DUT
+```
+
+Output lands in `~/pcap/`-style working files: `chain_<date>_<n>.txt`, one per trigger.
+
+To ask about different OIDs, edit `g_probes[]` in `chainprobe.c` and re-run without
+`--read`. Section A (every multi-registration region) is unfiltered and needs no edit.
+
+## The five traps
+
+**1. The registry is not stable right after an snmpd restart.** Subagents reconnect
+and re-register asynchronously. Measured on this DUT: **2002 subtrees / 1850 chains
+shortly after restart, 3755 / 3014 once settled** — the same probe, minutes apart.
+A half-populated registry looks exactly like "that subagent doesn't register this".
+→ `deploy.sh` triggers **twice and refuses to report unless the two agree**. If you
+run the probe by hand, do the same. This is the trap most likely to produce a
+confident wrong answer.
+
+**2. `/etc` is a writable overlay whose upperdir persists across reboot.** The dlmod
+`.conf` you drop in `/etc/moxa/netsnmp/config/` survives a reboot; the `.so` in `/tmp`
+(tmpfs) does not. Leave both and every subsequent boot logs a load failure.
+→ Run `--clean` when finished, or move the `.so` somewhere persistent on purpose.
+
+**3. Restarting snmpd via moxash has a `[y/N]` prompt that leaves SNMP DISABLED if
+unanswered** (`snmp-ser acc dis` has already run by then). Use
+`~/moxash_snmp_restart.exp`, which answers it. Never send `acc dis` / `acc en` by hand.
+
+**4. `access_method` addresses change on every snmpd restart.** They identify handlers
+*within one dump*, never across dumps. The probe resolves `agentx_master_handler`
+with `dlsym(RTLD_DEFAULT, ...)` at load time and prints it in the header — compare
+against that value from the same file, not a remembered one.
+
+**5. Section A is ~2 MB.** `scp` it off; do not `cat` it over the console.
+
+## Reading the output
+
+Each chain prints head-first, one two-line block per node:
+
+```
+  [d=0] name=<registration OID> namelen=N prio=P range=(start .. end)
+        agentx=0|1 handlerName="..." handler_name="..." access_method=... myvoid=...
+```
+
+- **`[d=N]` is this probe's label, not a net-snmp concept** — how far down the
+  `->children` chain the walk has gone. `d=0` is the head: the registration that
+  answers the wire, and the only one `netsnmp_subtree_find()` returns. Everything at
+  `d>0` covers the same range and lost. Nothing but a chain walk can see them, which
+  is the whole reason this probe exists.
+- **`name`/`namelen` and `range` are different OIDs and get confused constantly:**
+
+  | field | meaning | changes when registrations overlap? |
+  |---|---|---|
+  | `range=(start .. end)` | the region this node actually **answers for** | **yes** — split to align with competitors |
+  | `name` / `namelen` | the OID the module **originally registered at** | **no** — preserved verbatim |
+
+  `agent_registry.c:876` at the merge point: *"Note: This is the only point where the
+  original registration OID (`name`) is used."* So in a chain every node shows the
+  **same `range`** and a **different `namelen`** — they all answer for the same
+  region, but they claimed it at different depths.
+
+- **Order rule (readout, not source-reading): `namelen` descending first, `priority`
+  ascending second.** Whoever registered the most specific OID wins; priority only
+  breaks ties between equally specific registrations. Worked example — trustedIp,
+  the one real dual-registration on this DUT, all three covering the identical range:
+
+  ```
+  [d=0] name=….602.1.4.1.2.1.1  namelen=14 prio=127   in-master, claimed "this column"
+  [d=1] name=….602.1.4.1.2      namelen=12 prio=200   framework IterTable, "this table"
+  [d=2] name=.1                 namelen=1  prio=0     net-snmp null, "everything"
+  ```
+
+  in-master wins on **14 > 12**; priority never enters. **Consequence: changing a
+  priority to change who serves an OID is a no-op whenever the namelens differ.**
+  (`MoxaAgentX_RegisterHandler` in `lib_moxa_snmp_agentx` deliberately matches
+  in-master's namelen for exactly this reason — it has to tie on specificity before
+  priority can decide anything.)
+- **`agentx=1` at `d>0`** means an AgentX subagent registered the *same range* and is
+  reachable — that is a forwarding candidate, found without any probe or derivation.
+- **`myvoid`** is the subagent's `netsnmp_session *`. Equal `myvoid` = same subagent.
+- `handlerName` for AgentX rows is only `"AgentX subagent <n>, session ..."` — it does
+  not say which daemon. **Identify a subagent by the ranges it owns**, e.g. on this
+  DUT `.1.3.6.1.4.1.8691.603.3.4` (mxTurboRingV2) and `.602.1.4.1.2` (trustedIp) are
+  the framework's fingerprints; `.1.0.8802.1.1.1`, `.603.1.1`, `.603.2.9`, `.603.3.2`
+  are ISS's.
+
+### Routing is interval containment, not longest-prefix match
+
+`agentx_owned.list` and various notes describe snmpd as routing by
+"longest-prefix-match". That describes the *visible effect*, not the algorithm, and
+the difference bites. `netsnmp_subtree_find()` (`agent_registry.c:1071`) does:
+
+```c
+myptr = netsnmp_subtree_find_prev(name, len, ...);   /* ordered scan on start_a */
+if (myptr && snmp_oid_compare(name, len, myptr->end_a, myptr->end_len) < 0)
+    return myptr;                                    /* name lands in [start, end) */
+return NULL;
+```
+
+An ordered **interval lookup**. `namelen` takes no part in it — it only orders the
+children chain *after* the region has been found. Two separate mechanisms:
+
+| question | decided by |
+|---|---|
+| which region does this request fall into? | `start_a` .. `end_a` containment |
+| within that region, who answers? | `namelen` desc, then `priority` asc |
+
+The consequence that breaks prefix intuition:
+
+> **An OID's ancestors do not fall inside its descendants' intervals.**
+
+A registration at `.a.b.c.d` produces the interval `[.a.b.c.d, .a.b.c.e)`. The
+ancestor `.a.b.c` sorts *before* that start, so it is **not** matched by that
+registration — it lands in whatever interval does contain it, typically a leftover
+fragment of something much wider.
+
+This is why "walk up the OID until you find the enclosing subagent registration" is
+not a sound construction: walking up does not find *the registration that contains
+me*, it finds *whatever region happens to cover that point*. Whether that is useful
+depends entirely on whether somebody registered something genuinely wide there.
+Two readouts from the same DUT, both one level above an in-master column:
+
+```
+.603.2.9.1   -> range=(.603.2.9 .. .603.2.9.1.1.1.2)    agentx=1   ISS's wide root, split
+.603.5.1.1   -> range=(.603.4.16 .. .603.5.1.1.1)       agentx=0   the .1 null's gap fragment
+```
+
+Same operation, opposite meaning. To ask "who else serves *this* OID", look at the
+children of the OID's **own** region — same interval, no walking.
+
+### The `.1` null node at the bottom of every chain is not a bug
+
+`setup_tree()` (`agent_registry.c:2211-2213`) registers `.0`, `.1` and `.2` with
+`netsnmp_null_handler`. **This covers the entire OID tree**, so:
+
+> `netsnmp_subtree_find()` can never return NULL for any OID under `.1`.
+
+Two consequences worth carrying around:
+
+- Any test of the form *"is this registration **not** ours? then it must be someone
+  useful"* is unsound — the null handler satisfies it everywhere. Identify a target by
+  what it **is** (compare `access_method` against `agentx_master_handler`), never by
+  what it is not.
+- `netsnmp_null_handler` (`helpers/null.c:72-84`) is a silent sink: `MODE_GET` sets
+  `SNMP_NOSUCHOBJECT` synchronously and in-process (**no packet on the wire**), and
+  `MODE_GETNEXT`/`GETBULK` return `SNMP_ERR_NOERROR` having done *nothing*, leaving
+  the varbind `ASN_NULL` so the master skips the whole region. An OID handed to it
+  disappears from walks with no error and no traffic — which is what "the group
+  vanished and the capture is empty" looks like.
+
+## Safety
+
+The probe is strictly read-only: it walks the registry and writes a text file. It
+registers exactly one OID of its own (`.1.3.6.1.4.1.8691.9999.1`, unused) and mutates
+nothing else. Keep it that way — this runs inside the live snmpd, and a crash there
+takes SNMP down until the next restart.

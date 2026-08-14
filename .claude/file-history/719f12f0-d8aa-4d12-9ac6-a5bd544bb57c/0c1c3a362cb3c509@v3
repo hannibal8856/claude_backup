@@ -1,0 +1,146 @@
+/*
+ * lib_moxa_snmp_agentx — FRR-style AgentX subagent wrapper on net-snmp.
+ *
+ * Encapsulates the net-snmp boilerplate (AGENT_ROLE / AGENT_X_SOCKET / init_agent
+ * / init_snmp / select-process loop) so any process can act as an AgentX subagent
+ * connecting to the snmpd master at tcp:127.0.0.1:705.
+ *
+ * GET/SET only — no trap API. Traps are out-of-band (app events -> MQTT ->
+ * trap_notification -> /bin/snmptrap).
+ *
+ * Clean-room; design reference only was FRR lib/agentx.c (not copied).
+ */
+#ifndef LIB_MOXA_SNMP_AGENTX_H
+#define LIB_MOXA_SNMP_AGENTX_H
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Exported even though the library builds with -fvisibility=hidden. */
+#define MOXA_AGENTX_API __attribute__((visibility("default")))
+
+/* Initialize the calling process as an AgentX subagent (connects to the snmpd
+ * master at tcp:127.0.0.1:705). Call once before any MoxaAgentX_Register*.
+ * Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_Init(const char *daemon_name);
+
+/* Register one scalar OID with a net-snmp node handler.
+ * mode = HANDLER_CAN_RONLY / HANDLER_CAN_RWRITE. Returns MIB_REGISTERED_OK (0)
+ * on success. */
+MOXA_AGENTX_API int  MoxaAgentX_RegisterScalar(const char *descr,
+                                               const oid *o, size_t olen,
+                                               int mode,
+                                               Netsnmp_Node_Handler *handler);
+
+/* Register a read-only integer scalar instance backed by an internal value.
+ * B0 connectivity test only; the real config GET handlers come in a later task.
+ * `o`/`olen` is the full instance OID (e.g. ...99.1.0). Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_RegisterTestInt(const char *descr,
+                                                const oid *o, size_t olen,
+                                                long value);
+
+/* Register an exact-instance OID (full OID incl. the trailing .0) served by
+ * `handler` (mirrors the dlmod's netsnmp_register_instance). mode =
+ * HANDLER_CAN_RONLY / HANDLER_CAN_RWRITE. Returns MIB_REGISTERED_OK (0). */
+MOXA_AGENTX_API int  MoxaAgentX_RegisterInstance(const char *descr,
+                                                 const oid *o, size_t olen,
+                                                 int mode,
+                                                 Netsnmp_Node_Handler *handler);
+
+/* Register a subtree OID (same shape as in-master netsnmp_register_handler) at
+ * priority 200. Plan E dual-reg: matching namelen lets in-master priority 127
+ * win the wire; framework is the children sibling that GET is forwarded to.
+ * Do NOT use for OIDs that must be exclusive to the framework. */
+MOXA_AGENTX_API int  MoxaAgentX_RegisterHandler(const char *descr,
+                                                const oid *o, size_t olen,
+                                                int mode,
+                                                Netsnmp_Node_Handler *handler);
+
+/* Plan E (ADR-0003, refresh-gap fix): register a LIVE read-only table via
+ * net-snmp table_iterator. `row_count` returns the current number of rows (read
+ * live from config each call); `handler` fills each column's value from live
+ * config. Index = one `index_asn` (INTEGER) row number 1..count; columns
+ * min_col..max_col. Priority 200 (GET-serving; SET stays in-master). Because it
+ * reads live on every request, GET reflects config changes with no reboot — the
+ * fix for the table_data_set startup-snapshot staleness. Returns 0 on success. */
+typedef unsigned int (*MoxaRowCountFn)(void);
+MOXA_AGENTX_API int   MoxaAgentX_RegisterIterTable(const char *name,
+                                                   const oid *root, size_t root_len,
+                                                   int index_asn,
+                                                   unsigned int min_col,
+                                                   unsigned int max_col,
+                                                   MoxaRowCountFn row_count,
+                                                   Netsnmp_Node_Handler *handler);
+
+/* Handler-side helpers (call from within a Netsnmp_Node_Handler; `requests` is
+ * the netsnmp_request_info* the handler receives). */
+
+/* Copy the requested OID into buf (buf_max = capacity in subids); sets *out_len.
+ * Returns 0 on success, -1 if it would overflow. */
+MOXA_AGENTX_API int  MoxaAgentX_GetRequestOid(void *requests,
+                                              oid *buf, size_t buf_max,
+                                              size_t *out_len);
+
+/* Set the request's value to an OCTET STRING of `len` bytes. Returns 0. */
+MOXA_AGENTX_API int  MoxaAgentX_SetOctetString(void *requests,
+                                               const char *s, size_t len);
+
+/* Set the request's value to an INTEGER. Returns 0. */
+MOXA_AGENTX_API int  MoxaAgentX_SetInt(void *requests, long value);
+
+/* Set the request's value to an IpAddress (4 network-order bytes). Returns 0. */
+MOXA_AGENTX_API int  MoxaAgentX_SetIpAddress(void *requests,
+                                             const unsigned char *b4);
+
+/* Read the incoming INTEGER SET value into *value. Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_GetSetInt(void *requests, long *value);
+
+/* Mark the request with an SNMP error (e.g. SNMP_ERR_GENERR). Returns 0. */
+MOXA_AGENTX_API int  MoxaAgentX_SetError(void *requests, int snmp_err);
+
+/* Mark the request's value as noSuchInstance (the OID has no value right now).
+ * Unlike an error, a walk skips it and continues. Returns 0. */
+MOXA_AGENTX_API int  MoxaAgentX_SetNoSuchInstance(void *requests);
+
+/* Rewrite the varbind's OID. A GETNEXT handler answers with a DIFFERENT OID than
+ * the one asked for, so it must set that OID here before filling in the value.
+ * Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_SetRequestOid(void *requests,
+                                              const oid *o, size_t olen);
+
+/* Reset the varbind to "no value" (ASN_NULL), so net-snmp treats this
+ * registration as having produced no answer. Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_ClearValue(void *requests);
+
+/* SET-phase helpers. `reqinfo` is the agent_request_info* the handler receives. */
+
+/* net-snmp SET/GET mode (reqinfo->mode): MODE_GET, MODE_SET_RESERVE1, ... */
+MOXA_AGENTX_API int  MoxaAgentX_GetMode(void *reqinfo);
+
+/* ASN type of the incoming value (requestvb->type) — for MODE_SET_RESERVE1. */
+MOXA_AGENTX_API int  MoxaAgentX_GetVarType(void *requests);
+
+/* Copy the incoming OCTET-STRING SET value into buf (NUL-terminated); sets
+ * *out_len. Returns 0 on success, -1 if it would overflow. */
+MOXA_AGENTX_API int  MoxaAgentX_GetSetString(void *requests,
+                                             char *buf, size_t buf_max,
+                                             size_t *out_len);
+
+/* Spawn a dedicated OS thread that runs the AgentX select/process loop.
+ * Does NOT use any async runtime; safe to call from a tokio process (the loop
+ * lives on its own thread). Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_RunInThread(void);
+
+/* Stop the loop and shut net-snmp down. */
+MOXA_AGENTX_API void MoxaAgentX_Shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIB_MOXA_SNMP_AGENTX_H */

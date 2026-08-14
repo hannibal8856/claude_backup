@@ -1,0 +1,17 @@
+//! AgentX subagent for app_moxa_framework (Plan D B).
+//!
+//! B0: registers one read-only test scalar and connects to the snmpd master at
+//! tcp:127.0.0.1:705, proving the framework can act as an AgentX subagent. The
+//! real config GET-forward handlers come in later tasks.
+
+use lib_moxa_rust_snmp_agentx as agentx;
+
+/// .1.3.6.1.4.1.8691.99.1.0 — B0 connectivity test scalar (full instance OID).
+const TRIVIAL_OID: [agentx::Oid; 10] = [1, 3, 6, 1, 4, 1, 8691, 99, 1, 0];
+
+/// Start the AgentX subagent on its own thread (non-blocking).
+pub fn start_snmp_subagent() {
+    agentx::init("app_moxa_framework");
+    agentx::register_test_int("moxaAgentxTest", &TRIVIAL_OID, 42);
+    agentx::run_in_thread();
+}

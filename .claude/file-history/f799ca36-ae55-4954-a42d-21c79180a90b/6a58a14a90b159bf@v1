@@ -1,0 +1,60 @@
+# ADR-0001: mxTrap RowStatus via IES_COL_ROWSTATUS on framework AgentX
+
+Status: Accepted
+Date: 2026-07-22
+Context:
+  Plan D migrates iss_build==0 MIB groups from snmpd in-master (ies-auto-mibs)
+  to app_moxa_framework AgentX subagent by reusing net_*.h in
+  lib_moxa_ies_auto_mibs mapping_reuse.c. net_mx_trap_notification.h
+  (mxTrap_MibEntry) includes a host table with SNMP RowStatus. In-master
+  handles that via IES_FLAG_SNMP_READ_CREATE_v2 and
+  readCreate_uri_set_tableRowStatus_v2 (config stores host[] with a `valid`
+  boolean, not a rowStatus field). The framework handler only understood
+  IES_COL_SCALAR / ROW_INDEX / PBMP_VALUE / IDXTBL_* / TR2RING_VALUE; treating
+  rowStatus as IDXTBL_VALUE would wrongly SET snmpTrap/host/N/rowStatus.
+  We need a reusable column class for RowStatus so later groups
+  (trustAccess, IpIfdb, …) can share the same path, while migrating mxTrap
+  fully (scalars + host table + RowStatus) closest to in-master behavior.
+Decision:
+  1. Add IES_COL_ROWSTATUS (and Rust col::ROWSTATUS) for reuse classification.
+  2. Migrate mxTrap_MibEntry into g_reuse_srcs; register host rows with
+     product max 2 (schema maxItems); mark uri_index=="rowStatus" as
+     IES_COL_ROWSTATUS.
+  3. Implement RowStatus GET/SET in app_moxa_framework snmp_subagent.rs:
+     GET maps host[N].valid -> active(1)/notInService(2); SET active /
+     notInService / createAndGo / createAndWait / destroy mutates
+     snmpTrap/host[] (whole-array PATCH), mirroring in-master valid semantics.
+  4. Comment out MOX_SNMP_INIT_ENTRY(mxTrap_MibEntry) in 3rdparty_net_snmp
+     so only the framework subagent owns these OIDs.
+Alternatives Considered:
+  - Stage A only (skip rowStatus): smaller diff, but leaves create/destroy on
+    in-master or broken; does not clear the "RowStatus(架構)" migrate blocker.
+  - String-special-case uri_index=="rowStatus" in the handler without a new
+    IES_COL_*: fewer files touched, but breaks the existing table_col reuse
+    pattern and complicates the next RowStatus tables.
+  - Port the full ies-auto-mibs Read-Create v2 engine into lib_moxa_ies_auto_mibs:
+    closest byte-copy, far too large and wrong layer (lib is mapping + classify).
+Consequences:
+  - Framework owns mxTrap config OIDs; dual registration must be avoided.
+  - RowStatus semantics are reimplemented in Rust (not the C v2 engine); edge
+    cases (sparse OID index vs append) must stay aligned with product tests.
+  - Future RowStatus tables should reuse IES_COL_ROWSTATUS + extend the
+    handler rather than inventing per-MIB flags in mapping_reuse.
+  - Rebuild order: lib_moxa_ies_auto_mibs → lib_moxa_rust_ies_auto_mibs →
+    app_moxa_framework and 3rdparty_net_snmp together.
+Constraints / Assumptions:
+  - snmpTrap.host maxItems == 2 (plugin_moxa_snmp config schema).
+  - Config JSON has no rowStatus key; life-cycle maps through `valid`.
+  - SNMP RowStatus integers: 1=active, 2=notInService, 4=createAndGo,
+    5=createAndWait, 6=destroy (same as MOXA_SNMP_READ_CREATE_*).
+Related Files / Modules:
+  - lib_moxa_ies_auto_mibs/include/lib_moxa_ies_auto_mibs.h
+  - lib_moxa_ies_auto_mibs/src/mapping_reuse.c
+  - lib_moxa_rust_ies_auto_mibs/src/lib.rs
+  - app_moxa_framework/src/snmp_subagent.rs
+  - 3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c
+  - 3rdparty_net_snmp/ies-auto-mibs/net_mx_trap_notification.h
+  - 3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_handle_read_create_v2_mxTrap_host.c
+  - plugin_moxa_snmp/framework/src/config_snmp_trap.rs
+Related ADRs:
+  None

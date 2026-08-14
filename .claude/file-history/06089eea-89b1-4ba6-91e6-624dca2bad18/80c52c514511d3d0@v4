@@ -1,0 +1,305 @@
+//! # Moxa Debug Log Ng Library
+//!
+//! `rust_mx_debug_log_ng` will collect the logs from:
+//! * Standard `log` crate. The `id` will be `core`.
+//! * Moxa debug log ng APIs.
+//!
+//! # Architecture
+//! * The Moxa packages can use `mx_fn_enter!`, `mx_fn_leave!`, etc. to output messages.
+//! * The other rust packages can use `error!`, `warn!`, ..., etc. to output messages.
+//! * The above APIs will call `lib_moxa_debug_log_ng_syslog` eventually.
+//!
+//! ```text
+//!                                                 error!, warn!, info!, debug! and trace!
+//!                                                                 |
+//!                                                              Crate log
+//!                                                                 |
+//!                                                              MxLogger
+//!                                                                 |
+//!                     +---------------------------+               |
+//!                     +-- mx_fn_enter! -----------+               |
+//!                     +-- mx_fn_leave! -----------+               |
+//!                     +-- mx_todo! ---------------+               |
+//!     Other packages -+-- mx_info! ---------------+------ lib_moxa_debug_log_ng_syslog
+//!                     +-- mx_debug! --------------+
+//!                     +-- mx_warn! ---------------+
+//!                     +-- mx_error! --------------+
+//! ```
+//!
+//! # How to use it
+//!
+//! ```
+//! use rust_debug_log_ng::{lib_moxa_debug_log_ng_syslog, LibMoxaDebugLogNgLogLevel};
+//! use rust_debug_log_ng::{mx_fn_enter, mx_info, mx_error, mx_todo, mx_fn_leave};
+//!
+//! const MODULE_LIST_ID: &str = "rust_web_server.main";
+//!
+//! let _ = rust_debug_log_ng::init();
+//!
+//! mx_fn_enter!(MODULE_LIST_ID, "main");
+//! mx_info!(MODULE_LIST_ID, "Message INFO");
+//! mx_error!(MODULE_LIST_ID, "Message ERROR");
+//! mx_todo!(MODULE_LIST_ID, "Message TODO");
+//! mx_fn_leave!(MODULE_LIST_ID, "main");
+//! ```
+
+use std::fs;
+use std::io::prelude::*;
+use std::mem;
+
+use chrono::Local;
+
+use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
+
+extern crate libc;
+
+mod ffi;
+
+//  it is for RD use only, no rotate, remember to remove it
+const LOG_TO_FILE: bool = true;
+const LOG_FILE: &str = "/moxa/permanent/moxalog/app_moxa_framework.log";
+
+/// Moxa debug log ng log level
+#[derive(Debug, Copy, Clone)]
+pub enum LibMoxaDebugLogNgLogLevel {
+    Debug = 7,
+    Info = 6,
+    Notice = 5,
+    Warn = 4,
+    Error = 3,
+    Critical = 2,
+    Alert = 1,
+    Emergency = 0,
+    Disable = -1,
+}
+
+struct MxLogger {}
+
+/// Init the static LOGGER with max_level to `MAX_LEVEL`
+static LOGGER: MxLogger = MxLogger {};
+
+/// Mapping to `LibMoxaDebugLogNg_syslog`  
+/// The API will link to `lib_moxa_debug_log_ng` eventually.  
+pub fn lib_moxa_debug_log_ng_syslog(
+    module_list_id: &str,
+    level: LibMoxaDebugLogNgLogLevel,
+    intf: &str,
+    message: &str,
+) {
+    // print to file for debugging
+    let log_to_file = LOG_TO_FILE;
+    if log_to_file {
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+        {
+            let _ = writeln!(
+                file,
+                "{} {:?} [{}] {}",
+                Local::now().format("%Y/%m/%d-%H:%M:%S"),
+                level,
+                module_list_id,
+                message
+            );
+        }
+    }
+
+    // print to console for debugging
+    if level as i32 <= LibMoxaDebugLogNgLogLevel::Info as i32 {
+        println!(
+            "{} {:?} [{}] {}",
+            Local::now().format("%Y/%m/%d-%H:%M:%S"),
+            level,
+            module_list_id,
+            message
+        );
+    }
+
+    // print to syslog
+    let module_list_id_vec: Vec<&str> = module_list_id.split('.').filter(|s| &"" != s).collect();
+    // module_list_id has two layers at least
+    if module_list_id_vec.len() < 2 {
+        return;
+    }
+
+    let handle = match ffi::get_handle(module_list_id_vec[0]) {
+        0 => return,
+        t => t,
+    };
+
+    let module_list_id = match ffi::get_module_list_id(handle, &module_list_id_vec[1..].join(".")) {
+        t if t < 0 => {
+            ffi::release_handle(handle);
+            return;
+        }
+        t => t,
+    };
+
+    ffi::syslog(handle, module_list_id as u32, level as i32, intf, message);
+
+    ffi::release_handle(handle);
+
+    return;
+}
+
+/// `log` implementation for MxLogger
+impl log::Log for MxLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            let level: LibMoxaDebugLogNgLogLevel = match record.level() {
+                Level::Error => LibMoxaDebugLogNgLogLevel::Error,
+                Level::Warn => LibMoxaDebugLogNgLogLevel::Warn,
+                Level::Info => LibMoxaDebugLogNgLogLevel::Info,
+                Level::Debug => LibMoxaDebugLogNgLogLevel::Debug,
+                Level::Trace => LibMoxaDebugLogNgLogLevel::Debug,
+            };
+
+            let message = format!("{} - {}", record.target(), record.args());
+            lib_moxa_debug_log_ng_syslog("core", level, "", &message);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Macro to record function enter, level is LibMoxaDebugLogNgLogLevel::Debug
+#[macro_export]
+macro_rules! mx_fn_enter {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Debug,
+            "",
+            &format!("FN_ENTER::{}", $fn_name),
+        );
+    };
+}
+
+/// Macro to record function leave, level is LibMoxaDebugLogNgLogLevel::Debug
+#[macro_export]
+macro_rules! mx_fn_leave {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Debug,
+            "",
+            &format!("FN_LEAVE::{}", $fn_name),
+        );
+    };
+}
+
+/// Macro to debug
+#[macro_export]
+macro_rules! mx_debug {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Debug,
+            "",
+            $fn_name,
+        );
+    };
+}
+
+/// Macro to info
+#[macro_export]
+macro_rules! mx_info {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Info,
+            "",
+            $fn_name,
+        );
+    };
+}
+
+/// Macro to notice
+#[macro_export]
+macro_rules! mx_notice {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Notice,
+            "",
+            $fn_name,
+        );
+    };
+}
+
+/// Macro to warn
+#[macro_export]
+macro_rules! mx_warn {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Warn,
+            "",
+            $fn_name,
+        );
+    };
+}
+
+/// Macro to error
+#[macro_export]
+macro_rules! mx_error {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Error,
+            "",
+            $fn_name,
+        );
+    };
+}
+
+/// Macro to todo
+#[macro_export]
+macro_rules! mx_todo {
+    ($module_list_id:expr, $fn_name:expr) => {
+        lib_moxa_debug_log_ng_syslog(
+            $module_list_id,
+            LibMoxaDebugLogNgLogLevel::Error,
+            "",
+            &format!("TODO: {}", $fn_name),
+        );
+    };
+}
+
+/// Logger implementation initialization  
+pub fn init() -> Result<(), SetLoggerError> {
+    log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
+}
+
+/// LibMoxaDebugLogNg_exportFile
+pub fn export_file(export_filename: &mut Vec<u8>) -> i32 {
+    let mut export_filename = mem::take(export_filename);
+    export_filename.push(0);
+
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        ffi::LibMoxaDebugLogNg_exportFile(export_filename.as_ptr())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    ffi::LibMoxaDebugLogNg_exportFile(export_filename.as_ptr())
+}
+
+/// LibMoxaDebugLogNg_exportRam
+pub fn export_ram(export_filename: &mut Vec<u8>) -> i32 {
+    let mut export_filename = mem::take(export_filename);
+    export_filename.push(0);
+
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        ffi::LibMoxaDebugLogNg_exportRam(export_filename.as_ptr())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    ffi::LibMoxaDebugLogNg_exportRam(export_filename.as_ptr())
+}

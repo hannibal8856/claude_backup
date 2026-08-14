@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Probe which firmware partition the DUT is running, over SSH (not the serial
+# console - the serial wrapper deadlocks against moxash, see handoff section 4).
+# expect allocates a pty, so moxash is safe here; and a stuck SSH session costs
+# nothing because it is a separate channel from the console.
+set timeout 25
+log_user 1
+
+spawn ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+    admin@192.168.127.253
+
+expect {
+    -re {[Pp]assword:} { send "moxa\r" }
+    timeout { puts "\n@@RESULT: no password prompt"; exit 2 }
+    eof     { puts "\n@@RESULT: ssh closed early"; exit 2 }
+}
+
+# Which shell did we land in?
+expect {
+    -re {moxa#\s*$}      { puts "\n@@RESULT: moxash -> mainline partition"
+                           send "exit\r"; expect eof; exit 0 }
+    -re {[#$]\s*$}       { puts "\n@@RESULT: linux shell" }
+    timeout              { puts "\n@@RESULT: no prompt matched"; exit 2 }
+    eof                  { puts "\n@@RESULT: closed before prompt"; exit 2 }
+}
+
+send "cat /etc/moxa/version/BUILD_TIME\r"
+expect -re {[#$]\s*$}
+send "exit\r"
+expect eof

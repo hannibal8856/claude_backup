@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Wrap the in-master handler bodies of ies-auto-mibs setup files in
+#ifndef IES_AUTO_MIBS_TABLE_ONLY.
+
+Every one of these files has the same shape: handler bodies first, then a
+single *_MibEntry_setup() at the end that carries the flag setup. The guard
+opens before the first handler and closes before that function.
+"""
+import io
+import os
+import sys
+
+BASE = "/home/moxa/SNMP_PLAN_E/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs"
+
+OPEN = (
+    "/* Handler bodies are in-master only - see IES_AUTO_MIBS_TABLE_ONLY in\n"
+    " * snmp_tools/inc/ies_auto_mibs_handle.h. The entry setup below stays\n"
+    " * outside the guard: its flag setup is shared with the lookup table. */\n"
+    "#ifndef IES_AUTO_MIBS_TABLE_ONLY\n"
+    "\n"
+)
+CLOSE = "#endif /* IES_AUTO_MIBS_TABLE_ONLY */\n\n"
+
+# (file, 1-based line of first handler, 1-based line starting *_MibEntry_setup)
+TARGETS = [
+    ("net_mxGeneralInfo_setup.c", 21, 247),
+    ("net_mxOspfdb_setup.c", 12, 1273),
+    ("net_mxstaticroutedb_setup.c", 23, 1081),
+    ("net_mx_vlan_setup.c", 14, 472),
+    ("net_mxVrrpdb_setup.c", 22, 1268),
+    ("net_stdospfdb_setup.c", 21, 4750),
+    ("net_stdvladb_setup.c", 18, 883),
+    ("net_vrrp3db_setup.c", 22, 2225),
+    ("net_vrrpdb_setup.c", 22, 2547),
+]
+
+for name, open_ln, close_ln in TARGETS:
+    path = os.path.join(BASE, name)
+    with io.open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
+        lines = fh.readlines()
+
+    if "IES_AUTO_MIBS_TABLE_ONLY" in "".join(lines):
+        print("SKIP  %s (already guarded)" % name)
+        continue
+
+    # Sanity-check the anchors before touching anything.
+    if not lines[close_ln - 1].startswith("ies_handle_t"):
+        print("FAIL  %s: line %d is not the setup function: %r"
+              % (name, close_ln, lines[close_ln - 1][:60]))
+        sys.exit(1)
+
+    # Close first so the earlier insertion point keeps its index.
+    lines.insert(close_ln - 1, CLOSE)
+    lines.insert(open_ln - 1, OPEN)
+
+    with io.open(path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.writelines(lines)
+    print("OK    %s  guard %d..%d" % (name, open_ln, close_ln))

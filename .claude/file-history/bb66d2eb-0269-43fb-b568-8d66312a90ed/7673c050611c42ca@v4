@@ -1,0 +1,185 @@
+# ies-auto-mibs 的 iss_build 分列(2026-08-13,由原始碼統計)
+
+資料來源:`3rdparty_net_snmp/ies-auto-mibs/net_*.h` 的 `.oid_list` / `.iss_build` / `.uri`。
+OID root = 該檔所有 entry 的共同前綴;`.mib` 由 MODULE-IDENTITY 解出的 OID 與 root 實際比對。
+
+- **`iss_build == 1`** → 資料在 **ISS** 內部變數,由 ISS 服務
+- **`iss_build == 0`** → 保留給 **framework**(config / status layer)
+
+> ⚠️ **原屬 dlmod 的群組(`mxMms`、`mxFiberCheck`、`fiberCheckEvent`)一律列在最下方的 dlmod 表**,
+> 不列在下面兩表 —— 它們雖有 `net_*.h`,但來源是 dlmod 這條路,定位不同。
+
+
+## iss_build == 1 —— 由 ISS 服務
+
+**45 個檔 / 1391 個 entry**
+
+| net_*.h | entry | URI 前綴 | OID root | 對應 .mib |
+|---|---|---|---|---|
+| `net_stdrmodb.h` | 167 | `stdrmodb` | `1.3.6.1.2.1.16` | standard/RMON2-MIB.mib |
+| `net_stdospdb.h` | 115 | `stdospdb` | `1.3.6.1.2.1.14` | standard/OSPF-MIB.mib |
+| `net_stdipdb.h` | 78 | `stdipdb` | `1.3.6.1.2.1` | — |
+| `net_stdpnadb.h` | 77 | `stdpnadb` | `1.0.8802.1.1.1.1` | — |
+| `net_stdpnodb.h` | 76 | `stdpnodb` | `1.0.8802.1.1.2.1.5.3791.1` | — |
+| `net_stdvladb.h` | 58 | `stdvladb` | `1.3.6.1.2.1.17.7.1` | standard/BRIDGE-MIB.mib |
+| `net_stdbridb.h` | 55 | `stdbridb` | `1.3.6.1.2.1.17` | standard/BRIDGE-MIB.mib |
+| `net_stdladb.h` | 55 | `stdladb` | `1.2.840.10006.300.43.1` | — |
+| `net_stdllddb.h` | 48 | `stdllddb` | `1.0.8802.1.1.2.1` | — |
+| `net_ifmibdb.h` | 47 | `ifmibdb` | `1.3.6.1.2.1` | — |
+| `net_std1d1db.h` | 43 | `std1d1db` | `1.3.111.2.802.1.1.2.1` | — |
+| `net_stdsnmdb.h` | 41 | `stdsnmdb` | `1.3.6.1` | — |
+| `net_mxTcstdb.h` | 37 | `mxtcstdb` | `1.3.6.1.4.1.8691.603.5.4` | private/mxSwitching.mib |
+| `net_stdethdb.h` | 34 | `stdethdb` | `1.3.6.1.2.1.10.7` | — |
+| `net_vrrpdb.h` | 33 | `vrrpdb` | `1.3.6.1.2.1.68` | — |
+| `net_mxQosdb.h` | 29 | `mxqosdb` | `1.3.6.1.4.1.8691.603.2.9.1` | private/mxSwitching.mib |
+| `net_std1w1db.h` | 29 | `std1w1db` | `1.3.111.2.802.1.1.3.1` | — |
+| `net_mxRSTPdb.h` | 27 | `mxrstpdb` | `1.3.6.1.4.1.8691.603.3.2` | private/mxSwitching.mib |
+| `net_stdot3db.h` | 27 | `stdot3db` | `1.0.8802.1.1.2.1.5.4623.1` | — |
+| `net_vrrp3db.h` | 26 | `vrrp3db` | `1.3.6.1.2.1.207.1` | — |
+| `net_stdcipdb.h` | 23 | `stdcipdb` | `1.0.8802.1.1.2.1.5.8556.1` | — |
+| `net_stdbrgdb.h` | 22 | `stdbrgdb` | `1.3.6.1.2.1.17` | standard/BRIDGE-MIB.mib |
+| `net_mxPsmsdb.h` | 20 | `mxpsmsdb` | `1.3.6.1.4.1.8691.603.4.2` | private/mxSwitching.mib |
+| `net_mxOspfdb.h` | 19 | `mxospfdb` | `1.3.6.1.4.1.8691.605.2.4` | private/mxOspf.mib |
+| `net_mxPortdb.h` | 17 | `mxportdb` | `1.3.6.1.4.1.8691.603.1.1` | private/mxSwitching.mib |
+| `net_mxDot1xdb.h` | 16 ⚠️(檔內共 19) | `mxdot1xdb` | `1.3.6.1.4.1.8691.603.4.5` | private/mxSwitching.mib |
+| `net_mxIgmpdb.h` | 16 | `mxigmpdb` | `1.3.6.1.4.1.8691.603.7.2` | private/mxSwitching.mib |
+| `net_mxPsspdb.h` | 16 | `mxpsspdb` | `1.3.6.1.4.1.8691.603.4.1` | private/mxSwitching.mib |
+| `net_mxVrrpdb.h` | 15 | `mxvrrpdb` | `1.3.6.1.4.1.8691.605.3.1` | private/mxVrrp.mib |
+| `net_stdot1db.h` | 14 | `stdot1db` | `1.0.8802.1.1.2.1.5.32962.1` | — |
+| `net_mxDhcpSnpdb.h` | 11 | `mxdhcpsnpdb` | `1.3.6.1.4.1.8691.603.4.11.2` | private/mxSwitching.mib |
+| `net_mxDualdb.h` | 11 | `mxdualdb` | `1.3.6.1.4.1.8691.603.3.7` | private/mxSwitching.mib |
+| `net_mxLadb.h` | 11 | `fscfadb` | `1.3.6.1.4.1.8691.603.1.2` | private/mxSwitching.mib |
+| `net_mxMabdb.h` | 11 | `mxmabdb` | `1.3.6.1.4.1.8691.603.4.3` | private/mxSwitching.mib |
+| `net_mxMacsecdb.h` | 10 | `mxmacsecdb` | `1.3.6.1.4.1.8691.603.4.14.2` | private/mxSwitching.mib |
+| `net_mxRadiusdb.h` | 7 | `mxradiusdb` | `1.3.6.1.4.1.8691.603.4.9.1.1.1` | private/mxSwitching.mib |
+| `net_mxStaticRoutedb.h` | 7 | `mxstaticroutedb` | `1.3.6.1.4.1.8691.605.2.2.1.1.1` | private/mxStaticRoute.mib |
+| `net_mxTcdb.h` | 7 | `mxtcdb` | `1.3.6.1.4.1.8691.603.3.5` | private/mxSwitching.mib |
+| `net_mxTrackingdb.h` | 7 | `mxtrackingdb` | `1.3.6.1.4.1.8691.603.5.6.2.1.1` | private/mxSwitching.mib |
+| `net_mxUnicastRoutingTabledb.h` | 6 | `mxunicastroutingtabledb` | `1.3.6.1.4.1.8691.605.2.1.1.1.1` | private/mxUnicastRoutingTable.mib |
+| `net_mx_lldp.h` | 6 | `mxlldp` | `1.3.6.1.4.1.8691.603.5.1.1` | private/mxSwitching.mib |
+| `net_mx_vlan.h` | 6 | `fscfadb` | `1.3.6.1.4.1.8691.603.2.3.1` | private/mxSwitching.mib |
+| `net_mxArpdb.h` | 4 | `mxarpdb` | `1.3.6.1.4.1.8691.605.1.3` | private/mxArp.mib |
+| `net_mxRlpsdb.h` | 4 | `mxrlpsdb` | `1.3.6.1.4.1.8691.603.4.8.1` | private/mxSwitching.mib |
+| `net_mxStcldb.h` | 3 | `mxstcldb` | `1.3.6.1.4.1.8691.603.4.4.1.1.1` | private/mxSwitching.mib |
+
+## iss_build == 0 —— 保留給 framework
+
+**25 個檔 / 753 個 entry**
+
+| net_*.h | entry | URI 前綴 | OID root | 對應 .mib |
+|---|---|---|---|---|
+| `net_mx_event_switching.h` | 205 | `dhcpBootfileEvent` | `1.3.6.1.4.1.8691.602.7.1.3.1` | private/mxSwe.mib |
+| `net_mx_event_general.h` | 90 | `commonSystemEvent` | `1.3.6.1.4.1.8691.602.7.1.1.1` | private/mxGene.mib |
+| `net_mx_event_port.h` | 88 | `chainProtectEvent` | `1.3.6.1.4.1.8691.602.7.1.2.1` | private/mxPorte.mib |
+| `net_mx_event_routing.h` | 78 | `bfdEvent` | `1.3.6.1.4.1.8691.602.7.1.5.1` | private/mxRte.mib |
+| `net_mx_event_poe.h` | 54 | `poeEvent` | `1.3.6.1.4.1.8691.602.7.1.8.1` | private/mxPoee.mib |
+| `net_mx_dhcpSrv.h` | 44 | `dhcpServer` | `1.3.6.1.4.1.8691.602.2.2` | private/mxDhcpSvr.mib |
+| `net_mx_event_hardware.h` | 36 | `intelTempCtrlEvent` | `1.3.6.1.4.1.8691.602.7.1.10.1` | private/mxHwe.mib |
+| `net_mx_turboring_v2.h` | 29 | `config` | `1.3.6.1.4.1.8691.603.3.4` | private/mxSwitching.mib |
+| `net_mx_event_tracking.h` | 24 | `mxtrackingEvent` | `1.3.6.1.4.1.8691.602.7.1.11.1` | private/mxTrackinge.mib |
+| `net_mx_portmirror.h` | 18 | `portMirror` | `1.3.6.1.4.1.8691.603.5.5.1` | private/mxSwitching.mib |
+| `net_mx_email.h` | 11 | `email` | `1.3.6.1.4.1.8691.602.7.3.1` | private/mxEmailC.mib |
+| `net_mx_snmp.h` | 10 | `snmp` | `1.3.6.1` | — |
+| `net_mxIpIfdb.h` | 8 | `ipInterface` | `1.3.6.1.4.1.8691.605.1.1.1.1.1` | private/mxIpIf.mib |
+| `net_mx_device_io.h` | 8 | `io` | `1.3.6.1.4.1.8691.602.8.6.2` | private/mxDeviceIo.mib |
+| `net_mx_trap_notification.h` | 7 | `snmpTrap` | `1.3.6.1.4.1.8691.602.7.2.1` | private/mxTrapC.mib |
+| `net_mxLoginPolicy.h` | 6 | `loginPolicy` | `1.3.6.1.4.1.8691.602.1.5.1` | private/mxSysLoginPolicySvr.mib |
+| `net_mxPasswordPolicy.h` | 6 | `accountPasswordPolicy` | `1.3.6.1.4.1.8691.602.1.6.1` | private/mxSysPasswordPolicySvr.mib |
+| `net_mx_managementIP.h` | 6 | `managementIp` | `1.3.6.1.4.1.8691.602.2.1.1.1` | private/mxManagementIp.mib |
+| `net_mxGeneralInfo.h` | 5 | `generalInfo` | `1.3.6.1.4.1.8691.600.2.2` | private/mxGeneralInfo.mib |
+| `net_mx_eventLog.h` | 5 | `eventLog` | `1.3.6.1.4.1.8691.602.8.3` | private/mxEventLog.mib |
+| `net_mx_syslogServer.h` | 5 | `syslogServer` | `1.3.6.1.4.1.8691.602.8.2.1` | private/mxSyslog.mib |
+| `net_mx_trustAccess.h` | 5 | `trustedAccess` | `1.3.6.1.4.1.8691.602.1.4.1` | private/mxSysTrustAccessSvr.mib |
+| `net_mxDot1xdb.h` | 3 ⚠️(檔內共 19) | `mxdot1xdb` | `1.3.6.1.4.1.8691.603.4.5` | private/mxSwitching.mib |
+| `net_mx_RMON.h` | 1 | `rmon` | `1.3.6.1.4.1.8691.603.5.7.1.1` | private/mxSwitching.mib |
+| `net_mx_rc.h` | 1 | `mxrc` | `1.3.6.1.4.1.8691.602.7.4.1.1` | private/mxRelayC.mib |
+
+---
+
+## 合計(不含 dlmod)
+
+| | 檔案 | entry |
+|---|---|---|
+| `iss_build == 1` | 45 | **1391** |
+| `iss_build == 0` | 25 | **753** |
+| 合計 | 69 | **2144** |
+
+> **`iss_build == 1` 的 1,391 與 DUT 實測「ISS 服務 1391 個 OID」完全吻合。**
+
+> ⚠️ 混合檔只有 1 個:`net_mxDot1xdb.h`(1=16/0=3)
+
+---
+
+## dlmod —— 第四條路(獨立 plugin)
+
+dlmod 是獨立編譯的 `.so`,由 snmpd 以 `dlmod <name> /etc/moxa/netsnmp/plugin/*.so` 載入,
+自行向 net-snmp 註冊 OID。
+
+**OID root 取自 plugin 原始碼實際註冊的值**(2026-08-13 重查),不再由模組名推測:
+`.conf` 的 `dlmod` 行給出 `.so` 檔名 → 對應的 `plugin_snmp_*.c` / `snmp_*.c` →
+檔內的 `static oid s*Oid[]` 或 `.mOid = {...}`。`.mib` 欄以該 root 對 MODULE-IDENTITY
+的錨點反查驗證(如 `mxDai.mib` 的 `::= { layer2Security 13 }` → `603.4.13`)。
+
+### 模組一覽(36 個)
+
+`8691` 之後的部分以粗體標出。多個 root 者列出全部。
+
+「定義在哪個檔案」欄的路徑相對於 `~/mds4xgl3/buildroot/dl/`。
+
+| dlmod | OID root | 對應 .mib | 定義在哪個檔案 |
+|---|---|---|---|
+| `config_encryption` | `…8691.602.1.1.1`(表在 `.2`)| private/**mxSystemInfo.mib** ⚠️ | `plugin_moxa_config_encryption/snmp/snmp_config_encryption.c` |
+| `dai` | `…8691.603.4.13.1` | private/mxDai.mib | `plugin_moxa_dai/snmp/plugin_snmp_dai.c` |
+| `dhcprelay` | `…8691.602.2.3.1` | private/mxDhcpRelay.mib | `plugin_moxa_dhcp_relay/snmp/plugin_snmp_dhcp_relay.c` |
+| `dhcpsnp` | `…8691.603.4.11.1` | private/mxDhcpSnp.mib | `plugin_moxa_dhcpsnp/snmp/plugin_snmp_dhcpsnp.c` |
+| `eip` | `…8691.602.1.10.1` | private/mxEip.mib | `plugin_moxa_eip/snmp/snmp_eip.c` |
+| `fiber_check` | `…8691.603.5.3.1`(config)/ `.2`(status)| private/mxFiberCheck.mib | `plugin_moxa_fiber_check/snmp/plugin_snmp_fiber_check.c` |
+| `fiber_check_event` | `…8691.602.7.1.2.1` | private/mxPorte.mib | `plugin_moxa_fiber_check/snmp/plugin_snmp_fiber_check_event.c` |
+| `iec62439_2` | config 半邊**未註冊任何 OID**;status 半邊 `…8691.603.4.10.2` | private/**mxLp.mib** ⚠️ | `plugin_moxa_iec62439_2/snmp/config/plugin_snmp_iec62439_2.c`(無 OID)<br>`plugin_moxa_iec62439_2/snmp/status/plugin_snmp_status_iec62439_2.c` |
+| `ieee8021mstp` | `1.3.111.2.802.1.1.6.1` | 標準 MIB(IEEE8021-SPANNING-TREE)| `plugin_moxa_mstp/snmp/plugin_snmp_ieee8021mstp.c` |
+| `ipsg` | `…8691.603.4.12.1` | private/mxIpsg.mib | `plugin_moxa_ipsg/snmp/plugin_snmp_ipsg.c` |
+| `locator` | `…8691.602.8.5.1.1` | private/mxLocator.mib | `plugin_moxa_locator/snmp/plugin_snmp_locator_command.c` |
+| `macsec` | `…8691.603.4.14.1` | private/mxMacsec.mib | `plugin_moxa_macsec/snmp/plugin_snmp_macsec.c` |
+| `mms_setting` | `…8691.602.1.8.1` | private/mxMms.mib | `plugin_moxa_mms/snmp/plugin_snmp_mms_setting.c` |
+| `modbustcp` | `…8691.602.1.9.1` | private/mxModbusTcp.mib | `plugin_moxa_modbus_tcp/snmp/snmp_modbus_tcp.c` |
+| `moxa_1588` | `…8691.602.3.4.1.1`(config)/ `.2.1`(status)| private/mx1588.mib | `plugin_moxa_ptp/snmp/plugin_snmp_moxa_1588.c` |
+| `moxa_c37_238` | `…8691.602.3.6.1.1`(config)/ `.2.1`(status)| private/mxIeeeC37238Profile.mib | `plugin_moxa_ptp/snmp/plugin_snmp_moxa_c37_238.c` |
+| `moxa_iec61850` | `…8691.602.3.5.1.1`(config)/ `.2.1`(status)| private/mxIec6185093Profile.mib ⚠️ | `plugin_moxa_ptp/snmp/plugin_snmp_moxa_iec61850.c` |
+| `moxa_ptp` | `…8691.602.3.3.1.1` + `.2.2` / `.3.2` / `.4.2` / `.5.2` | private/mxPtp.mib | `plugin_moxa_ptp/snmp/plugin_snmp_moxa_ptp.c` |
+| `multicastrouting` | `…8691.605.4.1.1` | private/mxMulticastRouting.mib | `plugin_moxa_multicast_routing/snmp/plugin_snmp_multicast_routing.c` |
+| `mxMcp` | `…8691.603.3.8.1`(config)/ `.2`(status)| private/mxMcp.mib | `plugin_moxa_multicoupling/snmp/plugin_snmp_mxMcp.c` |
+| `mxgoosecheck` | `…8691.603.5.8.1.1` | private/mxGooseCheck.mib | `plugin_moxa_goose_check/snmp/plugin_snmp_moxa_goose_check.c` |
+| `mxlp` | `…8691.603.4.10.1` | private/mxLp.mib | `plugin_moxa_lp/snmp/plugin_snmp_mxlp.c` |
+| `mxmstp` | `…8691.603.3.3.1` | private/mxMstp.mib | `plugin_moxa_mstp/snmp/plugin_snmp_mxmstp.c` |
+| `poe` | `…8691.608.1.1` / `.1.2` / `.2.1` / `.2.2` | private/mxPoe.mib | `plugin_moxa_poe_agent/snmp/plugin_snmp_poe.c` |
+| `profinet` | `…8691.602.1.11.1`(config)/ `.2`(status)| private/mxProfinet.mib | `plugin_moxa_profinet/snmp/snmp_profinet.c` |
+| `ptpbase` | `1.3.6.1.2.1.241.1.2` | 標準 MIB(PTPBASE-MIB)| `plugin_moxa_ptp/snmp/plugin_snmp_ptpbase.c` |
+| `relay` | `…8691.602.7.4.1` | private/mxRelayC.mib | `plugin_moxa_relay/snmp/plugin_snmp_relay.c` |
+| `relay_command` | `…8691.602.7.4.1.1` | private/mxRelayC.mib | `plugin_moxa_relay/snmp/plugin_snmp_relay_command.c` |
+| `systemInformation` | `…8691.602.1.1.1`,只註冊 `.1.0` 與 `.6.0` 兩個 instance | private/mxSystemInfo.mib | `plugin_moxa_system_information/snmp_config/snmp_system_information.c` |
+| `systemUtilization` | `…8691.602.1.3.2`(`.1.0`–`.7.0` 共 7 個 instance)| private/mxSysUtilSvr.mib | `plugin_moxa_utilization/snmp/snmp_system_utilization.c` |
+| `mxlpStatus` | `…8691.603.4.10.2` | private/mxLp.mib | `plugin_moxa_lp/snmp/plugin_snmp_status_mxlp.c` |
+| `systemInformationStatus` | `…8691.602.1.1.2.2` / `.2.3` / `.2.4` | private/mxSystemInfo.mib | `plugin_moxa_system_information/snmp_status/plugin_snmp_status_system_information.c` |
+| `time_info` | `…8691.602.3.5.2` | private/mxTimeInfo.mib ⚠️ | `plugin_moxa_time/snmp/plugin_snmp_time_info.c` |
+| `time_setting` | `…8691.602.3.2.1` | private/mxTimeSetting.mib | `plugin_moxa_time/snmp/plugin_snmp_time_setting.c` |
+| `time_zone` | `…8691.602.3.1.1` | private/mxTimeZone.mib | `plugin_moxa_time/snmp/plugin_snmp_time_zone.c` |
+| `ui_service_management` | `…8691.602.5.1.1` | private/mxUiServiceMgmt.mib | `plugin_moxa_ui_service_management/snmp/snmp_ui_service_management.c` |
+
+### ⚠️ 查證時發現的三處問題
+
+**① `mxConfigEncryption.mib` 不存在。** 本表原本寫的是這支,但 `snmp_moxa_mib/private/`
+下沒有這個檔;`configEncryption` 實際定義在 **`mxSystemInfo.mib`**,與原始碼註冊的
+`602.1.1.1` 一致。這是「依模組名判定 `.mib`」產生錯誤答案的實例。
+
+**② `time_info` 與 `moxa_iec61850` 註冊在同一個子樹。** 兩支 `.mib` 的 MODULE-IDENTITY
+**都錨在 `::= { time 5 }`(= `602.3.5`)**:`mxTimeInfo.mib:33` 與
+`mxIec6185093Profile.mib:56`。原始碼也一致 —— `time_info` 註冊 `602.3.5.2`,
+`moxa_iec61850` 註冊 `602.3.5.2.1`,**後者落在前者底下**。
+這是 MIB 定義層級的重疊,不是本表的判讀問題。
+
+**③ `iec62439_2` 的 config 半邊沒有註冊任何 OID**,status 半邊註冊的是
+`sMxLpStatusOid`(`603.4.10.2`)—— 與 `mxlp` / `mxlpStatus` 同一個子樹,
+不是獨立的 IEC 62439-2 OID。原本標的「標準 MIB 或未對應」不正確。
+
+> **`mxMms` / `mxFiberCheck` / `fiberCheckEvent` 雖然有 `net_*.h`,仍列在本表** ——
+> 它們的來源是 dlmod 這條路,與上兩表「原生就在 `ies-auto-mibs`」的群組定位不同。

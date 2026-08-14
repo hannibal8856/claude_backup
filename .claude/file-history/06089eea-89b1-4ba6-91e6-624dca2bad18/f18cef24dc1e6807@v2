@@ -1,0 +1,19 @@
+---
+name: clippy-by-application-scan
+description: 2026-06-10 rollout of CLIPPY_LOCAL_PKGS by-application clippy scanning to all 19 Rust BIN packages
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 06089eea-89b1-4ba6-91e6-624dca2bad18
+---
+
+On 2026-06-10 the user changed the clippy-scan philosophy: BIN packages lint their whole **local dependency closure** (app + rust_moxa_common + lib_moxa_rust_*), not just their own crate. Implemented via a `CLIPPY_LOCAL_PKGS` make variable (awk over Cargo.lock: entries without `source =` are local path crates, emitted as `-p <name>` flags) appended to the `cargo clippy` lines in `rust_clippy_scan`.
+
+Facts:
+- 19 BIN crates / 16 Makefiles modified (uncommitted, each dl/<pkg> its own repo): 6 standalone app_moxa_* (root-level scan), rust_moxa_build (workspace, covers app_moxa_framework + app_moxa_iss_config_loader; closure appended after existing `-p ${PRJ_*}`), 8 plugin repos (`cd app|control|modify_stackcfg` style), plugin_moxa_md_type_detect (2 bins).
+- plugin_moxa_aide previously scanned ONLY framework/ — an app scan was ADDED (uses `${APP_PATH}`, NO `--target-dir` to match its build, json name `${APP}.json`).
+- plugin_moxa_firmware_update was the prototype; its framework/ scan lines were removed by the user (scan = app closure only).
+- `cargo clippy -p <path-dep>` works on non-workspace-members (verified); `--features` + non-member `-p` also accepted. dl/plugin_moxa_cli_export/app has no committed lock — fine, scan runs post-build in build tree where the lock exists.
+- framework/ scan lines in other plugins were left untouched (only firmware_update dropped it).
+
+Related: [[rust-clippy-scan-msrv-fix]], [[user-verifies-builds-himself]].

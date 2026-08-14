@@ -1,0 +1,28 @@
+fn generate_snmp_merge_mxlldp_port_table(
+    oput_file: &str,
+    oput_uptime: &str,
+    max_port_num: u32,
+) -> bool {
+    let oid_objs = vec![
+        TableOid {
+            name: "mxlldp/portTable/portIdSubtype".to_owned(),
+            iss_oid: "1.3.6.1.4.1.2076.158.2.3.1.1".to_owned(),
+            mod_oid: "1.3.6.1.4.1.8691.603.5.1.1.4.1.1".to_owned(),
+            dev_index_offset: 0,
+            trunk_port_support: false,
+        },
+        TableOid {
+            name: "mxlldp/portTable/portId".to_owned(),
+            iss_oid: "1.3.6.1.4.1.2076.158.2.3.1.2".to_owned(),
+            mod_oid: "1.3.6.1.4.1.8691.603.5.1.1.4.1.2".to_owned(),
+            dev_index_offset: 0,
+            trunk_port_support: false,
+        },
+        TableOid {
+            name: "mxlldp/portTable/vlanNameTxEnable".to_owned(),
+            iss_oid: "1.0.8802.1.1.2.1.5.32962.1.1.2.1.1".to_owned(),
+            mod_oid: "1.3.6.1.4.1.8691.603.5.1.1.4.1.3".to_owned(),
+            dev_index_offset: 1,
+            trunk_port_support: false,
+        },
+    ];

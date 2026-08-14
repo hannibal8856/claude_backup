@@ -1,0 +1,420 @@
+//! AgentX subagent task.
+//!
+//! Holds one AgentX session to snmpd, drives net-snmp's event loop from tokio,
+//! and serves the `mx_device_io` status columns out of the framework's own
+//! status layer.
+//!
+//! Threading: net-snmp is not thread-safe, so every call below has to happen on
+//! one and the same thread (design D5 / section 5.3). That is enforced rather
+//! than documented: `Session` is `!Send`, so this future can only be started
+//! with `spawn_local`, and `tokio::spawn` will not compile.
+//!
+//! Reconnection is net-snmp's job, not ours. Its subagent module already
+//! reconnects with its own alarm and ping; ISS paid for relearning that twice.
+
+use std::collections::HashMap;
+use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use lib_moxa_rust_debug_log_ng::{lib_moxa_debug_log_ng_syslog, LibMoxaDebugLogNgLogLevel};
+use lib_moxa_rust_debug_log_ng::{mx_error, mx_notice};
+use lib_moxa_rust_ies_auto_mibs as iesmap;
+use lib_moxa_rust_snmp_agentx::{Session, Value};
+use qstring::QString;
+use rust_moxa_common::user_info::{UserInfo, UserInfoRole};
+use rust_moxa_status_operation::StatusOperation;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
+
+use crate::MODULE_LIST_ID;
+
+/// Shorthand for the two halves of the status layer the subagent needs.
+type StatusPlugins = Arc<Mutex<plugins_moxa_framework::status::Plugins>>;
+
+/// The name snmpd sees for this subagent.
+const AGENTX_NAME: &str = "moxa-framework";
+
+/// Where snmpd listens for AgentX on this product.
+///
+/// It has to match the `agentXSocket` line that plugin_moxa_snmp writes into
+/// snmpd.conf - see config_moxa_snmp_control.c:794, which is where the value is
+/// decided. Getting it wrong is silent: net-snmp's compiled-in default is the
+/// unix socket /var/agentx/master, init succeeds either way, and the subagent
+/// then retries a connection that will never be accepted.
+const AGENTX_SOCKET: &str = "tcp:127.0.0.1:705";
+
+/// How often net-snmp pings the master, and how often it retries a connection
+/// that has not been made.
+///
+/// This must be non-zero. At zero net-snmp attempts the connection exactly
+/// once and never again, so losing the startup race to snmpd - which is what
+/// happens on a cold boot, where both start together - leaves the subagent
+/// permanently disconnected with nothing logged anywhere. Measured on this
+/// product: the framework connects on a manual restart and never on boot.
+///
+/// It also bounds how long after boot the session appears - which on this
+/// product is every boot, not just an unlucky one.
+///
+/// The ping is synchronous (agentx_synch_response) and runs on this same task,
+/// so while it is in flight nothing here answers a request. That is not only a
+/// problem when the master is gone, which is what this comment used to say - it
+/// costs latency while the master is up and healthy.
+///
+/// Measured on 2026-08-06 with mx_device_io registered, 100 rounds of a
+/// 7-varbind GET:
+///
+///     ping 5s    p50 114.5ms  p95 7014.6ms  two ~10s stalls in 31s
+///     ping 30s   p50 112.9ms  p95  159.6ms  none inside the run
+///
+/// The stalls are 10s because that is snmpd's own patience for a subagent:
+/// agentXTimeout 5 x (1 + agentXRetries 1) in this product's snmpd.conf. Every
+/// request that arrives inside one queues behind it, which is why the reported
+/// latencies come out as a descending staircase that all clears at one instant.
+/// At 5s a ping is nearly always in flight, so the cycle was 10s stalled + 5s
+/// working.
+///
+/// 30s is a trade, not a fix: it buys a clean tail at the cost of taking up to
+/// 30s to notice a master that has gone away. Chosen 2026-08-06 by the user
+/// over the previous 5s. The fix - not pinging from the thread that has to
+/// answer requests - is not available without leaving net-snmp's own subagent
+/// machinery.
+///
+/// A separate ~10s stall on the first request of a burst survives this change
+/// and is not explained; see snmpwalk/RESULT-phase3-task6.txt.
+const AGENTX_PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long to wait when net-snmp reports neither a descriptor to watch nor a
+/// deadline. That combination means there is nothing to wake us, so without a
+/// bound the task would sleep forever and the session would never recover.
+const IDLE_POLL: Duration = Duration::from_secs(1);
+
+/// The four `mx_device_io` tables, named by their **Table** node.
+///
+/// Not the Entry node below it: net-snmp's table helper appends the Entry's
+/// `.1` itself, so registering the Entry makes it ask for
+/// `Table.1.1.column.index` - one subidentifier too deep, at OIDs nobody asks
+/// about, while the real ones are rejected as not belonging to the table. That
+/// was the first run's failure, and it presented as the whole arc answering
+/// noSuchObject.
+///
+/// In `mxDeviceIo.mib` these are `deviceioStat{SystemPower,PoePower,Di,Relay}Table`;
+/// the Entry nodes are one below, and the columns one below that.
+const DEVICE_IO_TABLES: [&[u64]; 4] = [
+    &[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 1], // io/power/system/
+    &[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 2], // io/power/poe/
+    &[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 3], // io/di/
+    &[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 4], // io/relay/
+];
+
+/// The Entry subidentifier that sits between a Table and its columns.
+const ENTRY_SUBID: u64 = 1;
+
+/// The only column served, for all four tables.
+///
+/// Column 1 is the index, and `mxDeviceIo.mib` declares every one of them
+/// `not-accessible` (poe:168, relay:258) or `accessible-for-notify`
+/// (systemPower:125, di:211) - under SMI neither may be returned by GET or
+/// GETNEXT. `net_mx_device_io.h` disagrees, declaring all eight entries
+/// `HANDLER_CAN_RONLY`, which is why in-master answers a GET on the index
+/// columns today. The MIB wins; bounding the column range here is what makes
+/// that true without a special case, because a column outside the range is
+/// never asked for.
+const STATUS_COLUMN: i32 = 2;
+
+/// Registration priority.
+///
+/// Must be below 127: ISS registers at `SNX_DEF_REG_PRIORITY` (`snxdef.h:85`)
+/// and net-snmp's local default is `DEFAULT_MIB_PRIORITY` (`agent_registry.h:91`),
+/// both 127, and an equal OID, namelen and priority is
+/// `MIB_DUPLICATE_REGISTRATION` for whoever registers second. Section 4.2 says
+/// 100.
+const REGISTRATION_PRIORITY: i32 = 100;
+
+/// Reads the status layer in-process.
+///
+/// Not over HTTP and not through `ies_uri_handle_client` (D15): the fork+exec
+/// and the text-file hand-off are the cost Plan E exists to remove, and putting
+/// either back here would leave the Task 6 benchmark measuring nothing.
+struct StatusReader {
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: StatusPlugins,
+    userinfo: UserInfo,
+}
+
+impl StatusReader {
+    fn new(status_operation: Arc<Mutex<StatusOperation>>, plugins_status: StatusPlugins) -> Self {
+        StatusReader {
+            status_operation,
+            plugins_status,
+            // The status plugin trait's default check_permission() ignores the
+            // role and plugin_moxa_io does not override it, so this identity
+            // does not gate the read. It is `admin` rather than the
+            // least-privilege `user` because `user` is the one role the shared
+            // defaults in plugin_agent.rs and plugin_config.rs single out for
+            // refusal, and a future plugin refusing an SNMP read for that
+            // reason would be a confusing failure. The subagent cannot write
+            // whatever the role says: the arc is registered read-only and no
+            // SET is ever routed here.
+            userinfo: UserInfo {
+                username: "snmp".to_owned(),
+                role: UserInfoRole::admin,
+                nonce: String::new(),
+                from_ip: "127.0.0.1".to_owned(),
+            },
+        }
+    }
+
+    /// `None` covers both "no such path" and "could not take the locks"; the
+    /// caller turns either into noSuchObject, which is the honest answer when
+    /// no value was produced.
+    fn read(&self, path: &str) -> Option<serde_json::Value> {
+        let mut operation = self.status_operation.lock().ok()?;
+        let mut plugins = self.plugins_status.lock().ok()?;
+        operation
+            .get_status_from_path(&mut plugins, path, &self.userinfo, &no_query())
+            .ok()
+    }
+}
+
+/// An empty query string, which is all the subagent ever passes: paging and
+/// filtering belong to the HTTP callers.
+///
+/// The element type is spelled out because `QString::new(vec![])` cannot infer
+/// it from an empty vec - `S: Into<String>` has more than one candidate impl.
+fn no_query() -> QString {
+    QString::new(Vec::<(String, String)>::new())
+}
+
+/// Turn a status-layer string into the integer the MIB defines.
+///
+/// This mirrors `gen_value_io_*_status()` in `generate_uri_snmp_table`
+/// (`snmp_script_rust/generate_uri_snmp_table/src/main.rs:220-253`), which is
+/// the behaviour being reproduced. The numbers are the MIB's own enums -
+/// `off(0) on(1) notApplicable(2)` and `open(0) short(1)` - so the two agree by
+/// construction rather than by coincidence.
+///
+/// A value that is not a string, or a URI with no mapping, yields `None`: no
+/// value at all, never a default. Guessing here is exactly the failure that
+/// looks plausible and reads wrong.
+fn status_to_integer(uri: &str, status: &serde_json::Value) -> Option<i64> {
+    let text = status.as_str()?;
+    match uri {
+        "io/power/system/" | "io/power/poe/" => Some(match text {
+            "off" => 0,
+            "on" => 1,
+            _ => 2,
+        }),
+        "io/di/" | "io/relay/" => Some(i64::from(text != "open")),
+        _ => None,
+    }
+}
+
+/// Answer one GET, given the full instance OID.
+fn answer_get(reader: &StatusReader, oid: &[u64]) -> Value {
+    let Some(entry) = iesmap::lookup(oid) else {
+        return Value::NoSuch;
+    };
+
+    // Every entry reached through a table registration is indexed. A scalar
+    // here would mean the arc was registered as a table by mistake.
+    if entry.oid_index != 1 {
+        return Value::NoSuch;
+    }
+
+    // SNMP index N is JSON array element N-1 - the same `index--` in-master
+    // does at ies_auto_mibs.c:2794.
+    let Some(&row) = oid.last() else {
+        return Value::NoSuch;
+    };
+    if row < 1 {
+        return Value::NoSuch;
+    }
+    let path = format!("{}{}/{}", entry.uri, row - 1, entry.uri_index);
+
+    let Some(status) = reader.read(&path) else {
+        return Value::NoSuch;
+    };
+    match status_to_integer(&entry.uri, &status) {
+        Some(value) => Value::Integer(value),
+        None => Value::NoSuch,
+    }
+}
+
+/// How many rows of a table will actually answer.
+///
+/// Counting is deliberately `take_while` and not `filter`: the iterator hands
+/// out row numbers 1..=count, so the rows it names have to be the leading run.
+/// `io/relay/` is why this matters - the status layer returns
+/// `[{...}, {...}, null]`, and counting the null would leave a hole in the walk
+/// at row 3. in-master publishes an index value for that third row and no
+/// status; not serving the index column makes the asymmetry disappear rather
+/// than needing to be reproduced.
+fn count_rows(reader: &StatusReader, table_oid: &[u64]) -> i64 {
+    // Table -> Entry -> column, which is where the iesmap entry lives.
+    let mut column = table_oid.to_vec();
+    column.push(ENTRY_SUBID);
+    column.push(STATUS_COLUMN as u64);
+
+    let Some(entry) = iesmap::lookup(&column) else {
+        mx_notice!(MODULE_LIST_ID, "AgentX count_rows: no iesmap entry");
+        return -1;
+    };
+
+    // The entry URI names the table itself once the trailing slash is gone.
+    let Some(rows) = reader.read(entry.uri.trim_end_matches('/')) else {
+        mx_notice!(
+            MODULE_LIST_ID,
+            &format!("AgentX count_rows: status read failed for {}", entry.uri)
+        );
+        return -1;
+    };
+    let Some(rows) = rows.as_array() else {
+        mx_notice!(
+            MODULE_LIST_ID,
+            &format!("AgentX count_rows: not an array for {}: {rows}", entry.uri)
+        );
+        return -1;
+    };
+
+    rows.iter()
+        .take_while(|row| row.get("status").is_some_and(serde_json::Value::is_string))
+        .count() as i64
+}
+
+/// Run the subagent until it fails.
+///
+/// Returns only on error; the caller decides whether that is fatal. It is not:
+/// the framework's HTTP service is unaffected by the subagent being down, which
+/// is what makes this task reversible.
+pub async fn run_subagent(
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: StatusPlugins,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = Session::init(AGENTX_NAME, Some(AGENTX_SOCKET), AGENTX_PING_INTERVAL)?;
+    // "started", not "connected": init only enables subagent mode and asks
+    // net-snmp to connect. Whether the session is up is visible on the master
+    // (ss -tnp | grep 705), not from this return value.
+    mx_notice!(
+        MODULE_LIST_ID,
+        &format!(
+            "AgentX subagent {AGENTX_NAME} started, master {AGENTX_SOCKET}, \
+             ping {}s",
+            AGENTX_PING_INTERVAL.as_secs()
+        )
+    );
+
+    // Handlers before registrations: a table that registers without a
+    // row-count handler reports no rows, and net-snmp may ask as soon as the
+    // registration lands.
+    let reader = Arc::new(StatusReader::new(status_operation, plugins_status));
+
+    let get_reader = Arc::clone(&reader);
+    session.set_get_handler(move |request, oid| {
+        let value = answer_get(&get_reader, oid);
+        // A failed reply means the request was already answered or has been
+        // closed; there is nothing left to do about it here, and the C side
+        // has already fallen back to noSuchObject.
+        let _ = request.reply(value);
+    });
+
+    let count_reader = Arc::clone(&reader);
+    session.set_row_count_handler(move |entry_oid| count_rows(&count_reader, entry_oid));
+
+    // One registration per table, through net-snmp's table_iterator (4.2).
+    // Registering the bare arc instead would answer GET and vanish from
+    // GETNEXT, because a plain handler registration has nothing to traverse.
+    for table_oid in DEVICE_IO_TABLES {
+        session.register_iter_table(
+            table_oid,
+            STATUS_COLUMN,
+            STATUS_COLUMN,
+            REGISTRATION_PRIORITY,
+        )?;
+    }
+    mx_notice!(
+        MODULE_LIST_ID,
+        &format!(
+            "AgentX registered {} mx_device_io tables, column {} only, priority {}",
+            DEVICE_IO_TABLES.len(),
+            STATUS_COLUMN,
+            REGISTRATION_PRIORITY
+        )
+    );
+
+    // net-snmp's descriptor set changes when the AgentX session reconnects, so
+    // it is re-queried every iteration. The AsyncFd registrations are kept
+    // across iterations for the descriptors that did not change: tokio's epoll
+    // registration is edge-triggered, and dropping and recreating it on every
+    // wake-up can lose a readiness edge for data already sitting in the socket.
+    let mut registered: HashMap<RawFd, AsyncFd<RawFd>> = HashMap::new();
+
+    loop {
+        let info = session.select_info()?;
+
+        registered.retain(|fd, _| info.fds.contains(fd));
+        for &fd in &info.fds {
+            if !registered.contains_key(&fd) {
+                registered.insert(fd, AsyncFd::with_interest(fd, Interest::READABLE)?);
+            }
+        }
+
+        if registered.is_empty() {
+            // Nothing to watch. Honour net-snmp's deadline if it gave one, and
+            // otherwise come back shortly rather than blocking forever.
+            tokio::time::sleep(info.timeout.unwrap_or(IDLE_POLL)).await;
+            session.handle_timeout();
+            continue;
+        }
+
+        let ready_fd = wait_for_readable(&registered, info.timeout).await;
+
+        match ready_fd {
+            Some(fd) => session.handle_read(fd),
+            None => session.handle_timeout(),
+        }
+    }
+}
+
+/// Wait until one of the descriptors is readable, or the deadline expires.
+///
+/// Returns the descriptor that became readable, or `None` on timeout.
+async fn wait_for_readable(
+    registered: &HashMap<RawFd, AsyncFd<RawFd>>,
+    timeout: Option<Duration>,
+) -> Option<RawFd> {
+    let readable = async {
+        let waits = registered
+            .iter()
+            .map(|(&fd, async_fd)| Box::pin(async move { (fd, async_fd.readable().await) }));
+
+        let ((fd, guard), _, _) = futures_util::future::select_all(waits).await;
+
+        // Clearing readiness is what stops the next readable() returning
+        // immediately and spinning: snmp_read2() drains the socket, so the
+        // edge has been consumed by the time this returns.
+        if let Ok(mut guard) = guard {
+            guard.clear_ready();
+        }
+        fd
+    };
+
+    match timeout {
+        Some(deadline) => tokio::time::timeout(deadline, readable).await.ok(),
+        None => Some(readable.await),
+    }
+}
+
+/// Start the subagent on the current thread and keep the process running if it
+/// cannot start.
+///
+/// `spawn_local`, not `spawn`: the future is `!Send` because every net-snmp
+/// call has to stay on one thread. `#[actix_web::main]` already runs on a
+/// current-thread runtime with a LocalSet, so this needs no runtime of its own.
+pub fn spawn(status_operation: Arc<Mutex<StatusOperation>>, plugins_status: StatusPlugins) {
+    tokio::task::spawn_local(async move {
+        if let Err(e) = run_subagent(status_operation, plugins_status).await {
+            mx_error!(MODULE_LIST_ID, &format!("AgentX subagent stopped: {e}"));
+        }
+    });
+}

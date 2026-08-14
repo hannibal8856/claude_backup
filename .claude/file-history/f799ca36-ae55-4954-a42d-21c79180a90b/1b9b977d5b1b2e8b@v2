@@ -1,0 +1,472 @@
+# 北京地鐵 10 號線 SNMP 加速:Vincent proxy production case study
+
+> Source: `~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx`(28 slides)
+> Author: Yutzu(套用 Vincent 2022 proxy 方案)
+> Customer: 北京地鐵 10 號線 / 北交控
+> Outcome: production-deployed on NOS v5.x
+> Date analysed: 2026-05-29
+
+---
+
+## 1. 案例背景
+
+### 1.1 客戶要求
+
+| 欄位 | 內容 |
+|---|---|
+| 客戶 | 北京地鐵 10 號線(經北交控採購)|
+| 目標機型 | MDS-G4000-4XGS-L3 |
+| 部署 NOS | v5.x |
+| 核心要求 | **目標 OID 的 SNMP GET access time < 50 ms** |
+| 偶發超標容忍 | 「偶爾出現超過 50ms 是可以接受」 |
+
+### 1.2 「50 ms」歷史包袱
+
+從 slide 2 notes:
+
+> 為什麼從 100ms 改成 50ms — 原因是過去交控使用我們的交換機都是以這個數據當作告警要求,
+> 所以換成 NOS 後也堅持要維持。
+
+→ 不是技術上必須,是 customer 長期 SLA。
+
+### 1.3 Ticket
+
+| 系統 | 編號 |
+|---|---|
+| Jira(內部) | RDMDS42-32 |
+| Gitlab(buildsystem) | issue #3892 |
+| 對應 ISS 端 ticket | RDNOS-3253(ISS 啟動時 init SNMP agent on port 6161) |
+
+### 1.4 上線時程(slide 3)
+
+```
+2025-10-17 → 交付 FWR 給手測,使用交控 testbed,確認行為符合期望
+2025-11-21 → 交付 FWR 給自測(3 天測項) + MCN 小臣測試
+2025-11-28 → 交付 FWR 給 MCN
+```
+
+---
+
+## 2. Target OID 列表(slide 4)
+
+NMS 監控的 OID 完整清單,**全 RO**:
+
+```
+IF-MIB / ifTable
+  .1.3.6.1.2.1.2.2.1.8                ifOperStatus       (link UP/DOWN)
+  .1.3.6.1.2.1.2.2.1.10               ifInOctets         (流量統計)
+  .1.3.6.1.2.1.2.2.1.14               ifInErrors         (錯誤包數)
+
+IF-MIB / ifXTable
+  .1.3.6.1.2.1.31.1.1.1.15            ifHighSpeed        (端口帶寬)
+
+mxFiberCheck.mib
+  .1.3.6.1.4.1.8691.603.5.3.2.1.1.1.8 fiberCheckStatTxPower
+  .1.3.6.1.4.1.8691.603.5.3.2.1.1.1.9 fiberCheckStatRxPower
+
+MOXA-CVCOMMON.mib
+  .1.3.6.1.4.1.8691.7.999.1.1.2.0     cCPULoading
+  .1.3.6.1.4.1.8691.7.999.1.1.1.0     cSysDateTime
+```
+
+### 2.1 操作模式(關鍵,與 Vincent PoC 不同)
+
+從 slide 4 末段:
+
+- 使用 **SNMP v1**(不用 v2c / v3)
+- 僅使用 **GET**(沒 GETNEXT walk、沒 SET)
+- OID 末尾**帶 port index**,例如 `.1.3.6.1.2.1.2.2.1.10.1`(GET port 1 的 ifInOctets)
+- 用 v1 沒有 GETBULK,沒有 max-repetitions 問題
+
+→ 這是 Vincent proxy 方案的甜蜜點:**單 OID 命中 proxy 範圍,不跨邊界**。
+
+---
+
+## 3. Before:原始 NOS v5.0 表現
+
+來源:NOS v5.0 + MDS-G4028-L3-4XGS_v5.0_2025_0623_1125
+
+| Case | 方法 | 結果 |
+|---|---|---|
+| 1(slide 6)| v1 GET 同一 ifTable 底下 1–3 個 OID | **~600 ms** |
+| 2(slide 7)| v1 GET 跨 ifTable + ifXTable 2+ 個 OID | **~1200 ms** |
+| 3, 4(slide 8–9)| v3 同樣場景 | 數據未列(本案不採 v3)|
+
+### 3.1 為何原始路徑慢
+
+走 ies-auto-mibs cold cache 路徑:
+
+```
+client GET .1.3.6.1.2.1.2.2.1.10.1
+   ↓ snmpd 161
+   ↓ ies-auto-mibs handler
+   ↓ entry_handle_check_value_file (cache miss)
+   ↓ LibUtil_ExecShCmd("generate_uri_snmp_table uri fname uptime ports")
+       ↓ fork()                        ← 5–10 ms (ARM A9 800 MHz)
+       ↓ exec() Rust binary            ← 5–10 ms (Rust runtime init)
+       ↓ HTTP GET /api/v1/status/...   ← 5–20 ms (loopback)
+       ↓ JSON parse + 寫 fname_result  ← 2–5 ms
+       ↓ exit(0)                       ← 1–2 ms
+   ↓ LibUtil_ExecShCmd("/bin/mv fname_result fname")
+       ↓ fork() + exec() /bin/mv       ← 5–10 ms
+   ↓ open + read fname                 ← 1–3 ms
+   ↓ JSON parse → OID value
+   ↓ netsnmp_set_var_typed_value
+   ↓ SNMP Response
+```
+
+→ 單 GET 22–55 ms;loaded system 上 up to 150 ms;**跨 ifTable + ifXTable 多 OID** 一次 GET 累積到 600–1200 ms。
+
+完全達不到 50 ms 目標。
+
+---
+
+## 4. 採用 Vincent proxy 方案
+
+### 4.1 改 snmpd.conf(slide 14)
+
+```
+proxy -v 1 -c public 127.0.0.1:6161 .1.3.6.1.2.1.2.2
+proxy -v 1 -c public 127.0.0.1:6161 .1.3.6.1.2.1.31.1.1
+```
+
+兩條 directive:
+- 整段 `ifTable` 走 proxy
+- 整段 `ifXTable` 走 proxy
+
+backend:**ISS 內建 SNMP daemon,localhost:6161**。
+
+### 4.2 改 ISS 讓它在 6161 起 SNMP agent
+
+從 slide 13 notes:
+
+> 以 NOS 5.0 code base,default 狀態 snmpagent 是 enable 的。
+> 但仍無法在 shell 中,以 snmpd 的 command 直接向 ISS 存取 snmp。
+> 可先參考 https://jira-dc.moxa.com/browse/RDNOS-3253 的修改,
+> 使 ISS 在啟動時就可以直接 init snmpagent 在 port 6161 上。
+
+→ ISS 端要做 ticket `RDNOS-3253` 的修改才能 listen 6161。
+
+### 4.3 部署流程(slide 14 後段、15)
+
+```bash
+# 確認 snmpd 服務狀態
+systemctl status config_moxa_snmp
+systemctl status app_moxa_snmp_server
+
+# 改 snmpd.conf
+vi /moxa/run/snmp/snmpd.conf
+# (加 proxy directive)
+
+# 重啟讓 snmpd 讀新 conf
+systemctl restart app_moxa_snmp_server
+```
+
+config 鏈(slide 15):
+
+```
+plugin_moxa_snmp/app/config_moxa_snmp_control.c
+  → setup_snmpd_config / setup_snmpd_plugin_conf
+  → 生成 /moxa/run/snmp/snmpd.conf
+
+plugin_moxa_snmp/app/config_moxa_snmp_control.c
+  → _ControlIsSnmpd
+  → 觸發 /etc/moxa/config-moxa-snmp/init_snmpd.sh
+
+init_snmpd.sh
+  → snmpd -f -C -c snmpd.conf (其他 plugin .conf)
+```
+
+→ Beijing 的部署是 **runtime 手動改 conf + 重啟服務**,不是改 code(跟 Vincent PoC 一致)。
+
+---
+
+## 5. After:proxy 部署後的測量結果
+
+### 5.1 第一輪測試(slide 18)
+
+28 port × 100 GET per OID:
+
+| OID | 平均 | 最大 | 路徑 |
+|---|---|---|---|
+| ifOperStatus | **3 ms** | 59 ms | **Proxy → ISS** |
+| ifInOctets + ifInErrors + ifHighSpeed | **4 ms** | 52 ms | **Proxy → ISS** |
+| fiberCheckStatTxPower + RxPower | 15 ms | 122 ms | dlmod(沒走 proxy)|
+| cCPULoading + cSysDateTime | 17 ms | 32 ms | dlmod(沒走 proxy)|
+
+→ proxy 範圍 OID **從 600 ms 降到 3–4 ms,改善 ~150–200x**。
+
+### 5.2 PreTest FWR 5.0.3(slide 21)
+
+1 個 MDSXGL3,default config + SNMP enabled。
+
+| 測試項 | 平均 | 最大 | 最小 | >50 ms 比例 |
+|---|---|---|---|---|
+| cCPULoading × 10000 | 8 ms | 81 ms | 7 ms | 5/10000 = **0.05%** |
+| ifOperStatus × 28 × 400 | **2 ms** | 19 ms | 2 ms | 0/11200 = **0%** |
+| ifInOctets+Errors+HighSpeed × 28 × 400 | **3 ms** | 66 ms | 3 ms | 2/11200 = **0.02%** |
+| fiberCheckStatTx+RxPower × 28 × 400 | 12 ms | 81 ms | 10 ms | 6/11200 = **0.05%** |
+
+→ ifOperStatus **100% 達標**,其他都接近 100%。
+
+### 5.3 72 小時長測(slide 28)
+
+```
+版本: v5.0.4_2025_1121_1104
+拓樸: 3DUT TR2 + 16 fast VRRP
+迴圈: CPU → 28 port link → 28 port 流量帶寬錯誤包 → fiberCheck → delay 30s → loop
+跑 3 天,總 GET 數 ~715,445
+
+平均 7 ms
+最大 125 ms
+最小 2 ms
+超過 100 ms: 21 / 715445 = 0.003%
+超過 50 ms : 691 / 715445 = 0.1%
+```
+
+→ **99.9% 在 50 ms 內,99.997% 在 100 ms 內**。客戶接受。
+
+從 slide 28 結論:
+
+> 雖然整體時間又往下降,但 fiber check status 依然是需時較長的 OID
+
+(下一節說明 fiberCheck 後續怎麼處理)
+
+---
+
+## 6. 延遲分解(slide 24)
+
+開 debug log(`-Lo -Dproxy,snmp,transport,transports,snmp_api`),3DUT 拓樸下單 port 的時間分解:
+
+### 6.1 ifOperStatus(單 OID GET)
+
+| 階段 | 時間 |
+|---|---|
+| Snmp recv time | 12 ms |
+| **Proxy handle time** | **4 ms** |
+| Snmp send time | 0 ms |
+| **Total** | **16 ms** |
+
+定義(slide 24 notes):
+- Snmp recv:`transport:recv` → `snmp_agent: tp->start`
+- Proxy handle:第一個 `proxy: proxy handler starting` → 最後一個 `proxy: got response...`
+- Snmp send:`snmp_send: Building SNMPv2 message` → `transport:send`
+
+### 6.2 ifInOctets + ifInErrors + ifHighSpeed(單 GET 帶 3 OID)
+
+| 階段 | 時間 |
+|---|---|
+| Snmp recv time | 25 ms |
+| **Proxy handle time** | **8 ms** |
+| Snmp send time | 0 ms |
+| **Total** | **33 ms** |
+
+### 6.3 觀察
+
+- **proxy 自己只佔 4–8 ms**(包含 UDP loopback round-trip + ISS 回應)
+- 大頭是 snmpd recv 階段的時間(12–25 ms)
+- 每 GET 多帶一個 OID,proxy handle time 線性增加(4→8 ms),recv 也跟著增
+
+→ Vincent 2022 PoC slide 36 寫的「單 query proxied 確實快」**在 Beijing 案例被量化證實**(4–8 ms / OID)。
+
+---
+
+## 7. fiberCheck 後續優化(非 proxy,但同樣有用)
+
+fiberCheck 在第一輪結果(slide 18)是 15 ms / 122 ms max,**走 dlmod 不是 proxy**,但仍是瓶頸。
+
+### 7.1 原始路徑(slide 20)
+
+```
+SNMP GET fiberCheckStatTxPower.X
+   ↓ dlmod plugin_moxa_fiber_check
+   ↓ get_snmp_data_by_cli
+   ↓ _FiberEventHandler
+   ↓ If linkUp:
+   ↓   Get URI /api/v1/status/portStatus/portTable/<X>/linkStatus
+   ↓   檢查 FAKE_RX_POWER_WHEN_LINK_DOWN
+   ↓ Read mxfiberCheck.json (HTTP from framework)
+   ↓ Construct port table(包含所有 28 port 的 Rx/Tx Power 資料)
+```
+
+### 7.2 優化(slide 27)
+
+```
+Before:
+  plugin → mxfiberCheck.json (HTTP) → monitor → write port table → read
+
+After:
+  plugin → SHM (fiberCheck.stat) → 直接 read
+
+  + 移除 PHR check (MDSXG v5.0 不支援 PHR,可直接移除)
+  + 直接從 SHM 讀,不走 framework REST
+```
+
+### 7.3 效果(slide 27 末段)
+
+```
+Before: 18–38 ms
+After : 8 ms
+```
+
+→ 跟 Vincent 2026 PDF Tier 3 in-process cache 同精神:**直接讀 process / SHM 記憶體**,跳過 framework REST。
+
+---
+
+## 8. 限制(slide 12)— 為何 NOS v7.0 mainline 沒導入
+
+```
+1. snmpd 需事先設定特定要進行 proxy 的 OID 和 SNMP version
+   → 不能動態加新 OID
+
+2. 可以帶入 framework 的設定給 snmpd
+   → 設定路徑被綁死,只能單向
+
+3. client 不能直接用 column OID 進行 GET (若修改 ISS 可能可達成)
+   → 必須帶 index;walk 沒辦法
+
+4. Cannot access framework for read/write config
+   → proxy → ISS 完全繞過 framework,framework JSON 不知情
+```
+
+最終結論(slide 2 末行):
+
+> **目前解法因有限制,無法直接導回 NOS 7.0**
+
+→ Beijing 是 customer-specific fix,留在 NOS v5.x branch。
+
+---
+
+## 9. 為何同方案在 Vincent 2022 PoC「失敗」、北京案例「成功」
+
+| 維度 | Vincent 2022 PoC | 北京 |
+|---|---|---|
+| 測量方法 | `snmpwalk` 整顆樹(1.3.6.1.2 / 1.3.6.1.4) | 單 OID `snmpget` 帶 port index |
+| Walk 跨越 proxy/local 邊界 | ✅(觸發 longest-prefix gap)| ❌(每個 GET 只命中 proxy)|
+| 每次操作涵蓋 OID 數 | 1000+ | 1–3 |
+| ISS SNMP daemon 啟動 | 未明確處理 | 經 ticket RDNOS-3253 確保 listen 6161 |
+| 客戶需求 | (內部 PoC,沒外部需求)| 50 ms / GET,**清楚 SLA** |
+| ies-auto-mibs 修改 | 刪除 800 個 entry | **未刪**(只加 proxy directive)|
+| 路徑切換 | 強制走 proxy(entry 不見)| local + proxy 共存,client 選 |
+| 結果 | walk 慢 2x | GET 快 100–200x |
+| Decision | Not Yet | **採用** |
+
+### 關鍵技術差異
+
+1. **Beijing 沒改 ies-auto-mibs source**,只在 snmpd.conf 加 proxy directive。
+   → 意思是 ies-auto-mibs 的 entry 還在 dispatch tree。
+   → 但 client GET `.1.3.6.1.2.1.2.2.1.10.1` 時,**longest-prefix-match 仍會選 ies-auto-mibs(它的註冊深度更深)**。
+
+   ??? 等等,那 proxy 怎麼會生效?
+
+   **可能解釋**:
+   - 北京這版的 ies-auto-mibs 可能在 `iss_build=1` 那些 entry 內,某種原因沒實際 register 到那麼深的層次
+   - 或 longest-prefix-match 命中 ies-auto-mibs 後,handler 內部又有判斷把這 OID 丟回給 proxy
+   - 或 snmpd.conf 的 proxy directive priority 設得比 ies-auto-mibs 高
+
+   → **這個機制需進一步調查** Beijing 那個版本的實際 dispatch flow。
+
+   候選驗證:`/etc/moxa/config-moxa-snmp/init_snmpd.sh` 內可能有 `-Cn ""` 或 `-Pr <priority>` 之類控制 priority。
+
+2. **單 OID GET vs walk**:Beijing 從來不 walk,所以 longest-prefix gap 不會發生。
+
+3. **ISS 自己 listen 6161**:Vincent 2022 沒明確說 ISS 是否真有 listen。Beijing 透過 RDNOS-3253 確保。
+
+---
+
+## 10. 對 NOS v7.0 mainline / 我們現在工作的啟示
+
+### 10.1 三條路可並存
+
+```
+ifTable / ifXTable RO scalar      ─→ ISS via AgentX subagent (Plan C)
+                                  ─→ ISS via proxy directive (Beijing 模式)
+                                  ─→ ies-auto-mibs cold cache (legacy)
+
+選一條當 default,別條當 fallback,在 snmpd.conf 用 priority 控制
+```
+
+### 10.2 把 Beijing 方案搬回 v7 mainline 要過的坎
+
+| Slide 12 提到的限制 | NOS v7 mainline 要如何解 |
+|---|---|
+| snmpd 需事先設定 OID + version | 改 `config_moxa_snmp_control.c` 動態生成 proxy directive,從 `/etc/moxa/netsnmp/proxy_owned.list` 讀 |
+| 帶 framework 設定給 snmpd | 同上 |
+| client 不能直接用 column OID GET | 需要 ISS 端對 column-level OID 支援 GETNEXT walk(目前不行)|
+| 繞過 framework read/write | RO 不影響;RW 仍走 ies-auto-mibs(同 Plan C 設計)|
+
+→ 一旦解掉前 3 條,proxy 方案是 mainline-ready 的。
+
+### 10.3 跟 Plan C(AgentX)的比較
+
+| 面向 | Beijing proxy | Plan C AgentX |
+|---|---|---|
+| 啟動成本 | 改 snmpd.conf 1 行 + ISS listen 6161 | 改 snmpd.conf 4 行 + ISS subagent 啟動 + agentx_owned.list |
+| transport overhead | UDP loopback ~100 µs | AF_UNIX/TCP ~30 µs |
+| 單 OID GET latency | 4–8 ms (Beijing 量測)| 預期 < 5 ms (理論)|
+| Walk gap 風險 | 有(snmpwalk 全樹會掉 OID)| 無(整段 prefix 註冊)|
+| 動態加 OID | 改 conf 重啟 | 改 list 重啟 |
+| 對 NOS v7 mainline 友善度 | 4 個 blocker(slide 12)| 已實作 + commit + build 過 |
+
+→ **建議**:NOS v7 mainline 用 Plan C(AgentX),Beijing v5.x 維持 proxy(現有 production)。
+
+### 10.4 SCHED 議題
+
+Beijing PPT **沒提 SCHED_RR**,所以這版的 ISS SNMP daemon 還是 SCHED_OTHERS,卻仍達標。原因:
+
+- Beijing 流量輕(28 port × 4 OID × 30s 週期 ≈ 4 GET/s 平均)
+- 拓樸簡單(3DUT + 16 VRRP),CPU 不太競爭
+
+如果未來流量更大(更多 NMS 或加 walk 用戶),Vincent slide 42 提的 SCHED_RR for ISS 還是要做。
+
+---
+
+## 11. Quick Reference
+
+### 11.1 部署 checklist(借鑑 Beijing 模式)
+
+```
+[ ] ISS 端確保 SNMP agent 在 6161 listen(ticket RDNOS-3253)
+[ ] 改 snmpd.conf 加 proxy directive
+[ ] 重啟 app_moxa_snmp_server
+[ ] 驗證:snmpget -v1 -c public <DUT> .1.3.6.1.2.1.2.2.1.8.1
+       應 < 50 ms
+[ ] tcpdump -i lo udp port 6161 看 proxy → ISS 流量是否上來
+[ ] 跑 1000 次 snmpget 統計 P50/P99/超標比例
+```
+
+### 11.2 與 v7 Plan C 共存的可能架構
+
+```
+snmpd.conf:
+    master agentx
+    agentXSocket tcp:127.0.0.1:705
+    # ifTable RO/Walk 用 AgentX
+    # (沒寫 proxy directive)
+
+agentx_owned.list:
+    ifmibdb/
+    # 其他想 AgentX 化的 prefix
+
+# Beijing v5.x 維持原 proxy directive(不動)
+```
+
+兩種機制不衝突,因為 v7 跟 v5.x 是不同 branch。
+
+---
+
+## 12. Reference
+
+- 原始 PPT:`~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx`(28 slides,by Yutzu)
+- Vincent 2022 PoC:`~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx` + branch `289-read-oid-enhancement@3rdparty_net_snmp`
+- Vincent 2026 重構計畫:`~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung (董建隆) - Moxa Confluence.pdf`
+- AgentX vs Proxy 技術對照:`~/agentx_vs_proxy_truth.md`
+- 我們的 Plan C:`snmp-trace-time_diff` branch (3rdparty_net_snmp / plugin_moxa_snmp)
+- ISS 端對應 ticket:RDNOS-3253(ISS init SNMP agent on 6161)
+- 客戶端 ticket:Jira RDMDS42-32,Gitlab buildsystem #3892
+- pysnmp 客戶端腳本 reference:https://docs.lextudio.com/pysnmp/v7.1/docs/hlapi/v1arch/asyncio/manager/cmdgen/getcmd
+
+## Changelog
+
+- 2026-05-29:從北京地鐵 PPT 28 slides 整理成 case study,跟 Vincent 2022 PoC 對照,
+  說明同方案在 single-GET vs full-walk 下表現天差地遠。

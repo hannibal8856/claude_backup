@@ -1,0 +1,41 @@
+---
+name: iss-agentx-subagent-161-conflict
+description: Why ISS AgentX-enable crashed snmpd (standalone agent binds UDP 161) and the exact fix (disable snmpagent + enable snmpsubagent master 127.0.0.1:705)
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+---
+
+Plan C PoC (AgentX): enabling ISS SNMP the naive way crashes net-snmp snmpd in a restart loop.
+
+**Root cause (confirmed 2026-06-23 by branch bisection + manual):** ISS `snmp-trace-time_diff-3` branch enabled `SNMP_2_WANTED`/`SNMP_3_WANTED` in `app_moxa_iss_10_1_0/code/future/LR/myconfig.h`, which brings ISS up as a **standalone SNMP agent** — `gu4SnmpAgentControl` defaults to `SNMP_AGENT_ENABLE` (`snmpmain.c:36`). A standalone agent **binds UDP 161** — the same port net-snmp snmpd owns — so snmpd loses the bind and exits status 1, restart-looping (`app_moxa_snmp_server.service`, ExecStart `/etc/moxa/config-moxa-snmp/init_snmpd.sh` → `/bin/snmpd -f -C -c <conf-list>`). ISS `develop` has these flags off, so it doesn't crash.
+
+**The real runtime control = TWO independent globals (NOT a single mode enum).** The `SNX_SNMP_ACTIVE_AGENT`/`SNX_AGENTX_SUBAGENT` macros (`fssnmp.h:607-608`) are DEAD CODE — defined but never referenced anywhere. What actually matters (confirmed 2026-06-24):
+- `gu4SnmpAgentControl` (UINT4, `snmpmain.c:36`, default `SNMP_AGENT_ENABLE`=1) — standalone SNMP agent on/off; binds UDP 161 when ENABLE. `disable snmpagent` sets it `SNMP_AGENT_DISABLE`=2. **This is the key one for the 161 crash.**
+- `gi4SnmpAgentxSubAgtStatus` (INT4, `snxmain.c:131`, default `SNMP_AGENTX_DISABLE`=2) — AgentX subagent on/off; connects to master:705, binds nothing. `enable snmpsubagent` → `nmhSetSnmpAgentxSubAgentControl(SNMP_AGENTX_ENABLE)` → `SnxMainAgentxEnable()` (`snxcli.c`).
+- Macros: `SNMP_AGENT_ENABLE 1`/`_DISABLE 2`, `SNMP_AGENTX_ENABLE 1`/`_DISABLE 2` (`fssnmp.h:51-55`).
+
+**Mutual exclusion enforced in code** (`fssnmp3lw.c:84-85`): subagent ENABLE is rejected (`SNMP_ERR_INCONSISTENT_VALUE` / `CLI_AGENT_ENABLE_ERR`) while `gu4SnmpAgentControl == SNMP_AGENT_ENABLE`. That's why `disable snmpagent` MUST run before `enable snmpsubagent`. Manual ISSCLIum-Vol1 §11.1.1: `enable snmpsubagent` "executes only if snmp agent is disabled"; §11.1.3: SNMP agent enabled by default; AgentX master port default = 705.
+
+**The fix (verified working — snmpd stable, 705 session ESTABLISHED, 161 only snmpd):**
+```
+# ISS CLI (telnet localhost:6023):
+disable snmpagent
+enable snmpsubagent master ip4 127.0.0.1 port 705
+copy running-config startup-config
+```
+snmpd side = change B (`master agentx` + `agentXSocket tcp:127.0.0.1:705` in config_moxa_snmp_control.c). Subagent CONNECTS to master:705 (does NOT bind 705 or 161). Persists to **startup-config**, NOT `issnvram.txt` (issnvram.txt = early-boot params: default VLAN/bridge mode/MAC/SNMP engine id only).
+
+**GOTCHA — do NOT bake the mode in by flipping the global defaults (confirmed 2026-06-24).** In this ISS code the control variable and the socket side-effects are DECOUPLED, and the setters are EDGE-TRIGGERED (act only on a value *change*; both have an early-return equality guard: `nmhSetSnmpAgentControl` `fssnmp3lw.c:994`, `nmhSetSnmpAgentxSubAgentControl` `fssnmp3lw.c:109`). Pre-setting defaults `gu4SnmpAgentControl=SNMP_AGENT_DISABLE` + `gi4SnmpAgentxSubAgtStatus=SNMP_AGENTX_ENABLE` does NOTHING useful and snmpd STILL won't start, because:
+- 161 is bound UNCONDITIONALLY at boot: `SnmpMain()` `snmpmain.c:363` always calls `SNMPAgentInit()` → `SnmpSockInit(&gi4Socket)` binds UDP 161, NOT gated on `gu4SnmpAgentControl` (that var only gates PDU *handling*). So ISS still steals 161 → snmpd crash-loops. And `disable snmpagent` becomes a runtime no-op (equality guard) → `SNMPAgentDeInit()` never closes 161.
+- subagent connect to 705 (`SnxTransInit`) is reachable ONLY via `SnxMainAgentxEnable()`, whose ONLY caller is `nmhSetSnmpAgentxSubAgentControl()` on an ENABLE transition (`fssnmp3lw.c:115`). Default already ENABLE → no transition at boot, and `enable snmpsubagent` is a no-op → 705 never opened.
+Right ways: (1) keep defaults at factory values + drive CLI transition (the verified path above); or (2) to bake into firmware, change the SIDE EFFECT — gate the `SNMPAgentInit`/`SnmpSockInit` 161 bind at `snmpmain.c:363` on standalone-mode (cleanest, no 161 bind at all), or programmatically call the setters during init while vars still hold factory values so the edge fires (has a boot race window on 161, relies on snmpd Restart=always).
+
+**Bake-in progress (branch `snmp-agentx-default-agentx`, 2026-06-25):**
+- 路1 DONE: `snmpmain.c:364` now gates `SNMPAgentInit()` (the 161 bind) on `gu4SnmpAgentControl == SNMP_AGENT_ENABLE`; default `gu4SnmpAgentControl = SNMP_AGENT_DISABLE` (`snmpmain.c:36`) → no 161 bind at boot. Correct. (else-branch calls `SNMPAgentDeInit()` which always returns SUCCESS and is a no-op when gi4Socket==-1, so harmless at cold boot.)
+- Retry timer DONE (path A): added `SNX_RECONNECT_TIMER 3` / `SNX_RECONNECT_TIMEOUT 5` in `snxdef.h`; `SnxMainAgentxEnable()` (snxmain.c) now arms `TmrStart(SNX_RECONNECT_TIMER,5s)` when `SnxTransInit()` fails (master not yet on :705); `SnxProcessTmrExpiry()` has `case SNX_RECONNECT_TIMER:` that re-calls `SnxMainAgentxEnable()`. Reuses the shared `SnxTmr` block (idle while disconnected; ping timer only runs after session up — mutually exclusive). Does NOT touch `gi4SnmpAgentxSubAgtStatus` semantics. Limitation: during the retry-before-first-connect window status is still DISABLE so CLI `disable snmpsubagent` is a no-op (can't cancel) — fine for boot auto-enable.
+- 路2 STILL PENDING (retry timer is only a SAFETY NET; it never self-starts — only fires once `SnxMainAgentxEnable()` is invoked): (a) revert `snmpmain.c:39` default back to `SNMP_AGENTX_DISABLE`; (b) after `SnxMainProtoInit()` (snmpmain.c:382) add init block mirroring `SnxCliActivateAgentxSubagent`'s nmh sequence — `nmhSetSnmpAgentxMasterAgentAddr(127.0.0.1, len4)` (MUST set, else `SnxTransOpenTcpConnection` sees len!=4 and no-ops) + `nmhSetSnmpAgentxMasterAgentPortNo(705)` + `nmhSetSnmpAgentxContextName("")` + `nmhSetSnmpAgentxSubAgentControl(SNMP_AGENTX_ENABLE)`. Don't call SnxCliActivateAgentxSubagent directly (needs tCliHandle + parsed octet-string args).
+- Also: `snxtrans.c` has 3 leftover `printf("OO!...")` debug lines to remove before finalizing.
+
+**Still unverified:** reboot survival — whether startup-config's `disable snmpagent` applies before ISS binds 161 at boot. If snmpd crash-loops briefly after reboot, the 161 bind happens before config-restore → must change init default (don't enable snmpagent by default) instead of relying on startup-config. See [[build-order]] and the Plan C design at ~/plan-c-agentx-poc-design-2026-06-12.md.

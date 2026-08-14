@@ -1,0 +1,19 @@
+[moxa@3a703fb6a6dc ~/mds4xgl3/buildroot] (2023.02.11_develop) 17:31 $ history | tail -n 20
+   76  2026-07-16 13:42:42 make lib_moxa_snmp_agentx-rebuild
+   77  2026-07-16 13:42:54 make lib_moxa_ies_auto_mibs-rebuild
+   78  2026-07-16 13:43:16 make lib_moxa_rust_snmp_agentx-rebuild
+   79  2026-07-16 13:43:25 make lib_moxa_rust_ies_auto_mibs-rebuild
+   80  2026-07-16 13:43:34 make app_moxa_framework-rebuild
+   81  2026-07-16 13:43:43 make rust_moxa_build-rebuild
+   82  2026-07-16 13:48:19 make
+   83  2026-07-16 14:39:48 make plugin_moxa_system_information-rebuild
+   84  2026-07-16 14:39:59 make
+   85  2026-07-16 17:09:26 make lib_moxa_snmp_agentx-rebuild
+   86  2026-07-16 17:13:28 make lib_moxa_ies_auto_mibs-rebuild
+   87  2026-07-16 17:13:44 make 3rdparty_net_snmp-rebuild
+   88  2026-07-16 17:14:48 make plugin_moxa_snmp-rebuild
+   89  2026-07-16 17:15:04 make lib_moxa_rust_snmp_agentx-rebuild
+   90  2026-07-16 17:15:18 make lib_moxa_rust_ies_auto_mibs-rebuild
+   91  2026-07-16 17:15:32 make app_moxa_framework-rebuild
+   92  2026-07-16 17:15:48 make rust_moxa_build-rebuild
+   93  2026-07-16 17:20:26 make

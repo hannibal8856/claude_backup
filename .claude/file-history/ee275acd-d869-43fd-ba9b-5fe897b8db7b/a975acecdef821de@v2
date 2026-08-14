@@ -1,0 +1,139 @@
+# Plan C / D / E → EDS-G4000 搬移清單
+
+盤點日期:2026-08-10
+來源:`~/mds4xgl3/buildroot/dl/`(MDS-G4000-L3-4XGS 建置樹)
+判定方式:掃描每個 repo 的 `snmp-plan-*` / `snmp-agentx` / `snmp_50ms` / `snmp-trace-*` 分支,
+對各自的 base 分支取 `git diff --stat <base>...<tip>`。
+
+---
+
+## 總數
+
+**13 個 repo 帶有 Plan 分支,其中 12 個有實際淨變更。**
+
+- `lib_moxa_utility` 有 3 個 commit,但 **diff 為空**(debug writer 加了又移除)→ **不用搬**。
+- `moxabuild`(`~/mds4xgl3`)的 `snmp-plan-E` 只有 ADR 文件,**沒有 build 設定變更**。
+- `buildroot` repo 本身**沒有** Plan 分支 → **沒有 defconfig / package `.mk` 層級的改動**。
+
+---
+
+## A. 核心機制 —— 必搬,產品無關(6 個)
+
+這六個是 AgentX subagent 本體與其相依,沒有 MDS 專屬邏輯,可以整包搬。
+
+| # | repo | 分支 | commits | 檔案 | 淨變更 | 角色 |
+|---|---|---|---|---|---|---|
+| 1 | `lib_moxa_snmp_agentx` | `snmp-plan-E` | 13 | 2 | +407 | AgentX 協定層(C)。`src/agentx.c` + header |
+| 2 | `lib_moxa_rust_snmp_agentx` | `snmp-plan-E` | 15 | 2 | +227 | 上者的 Rust binding。含 `Cargo.lock` |
+| 3 | `lib_moxa_ies_auto_mibs` | `snmp-plan-E` | 31 | 9 | +1463 / −18 | OID↔URI 映射表、`table_col`/index-table 機制、`config_set.c`、`fiber_check.c`(資料處理)、`mapping_reuse.c` |
+| 4 | `lib_moxa_rust_ies_auto_mibs` | `snmp-plan-E` | 14 | 1 | +168 / −3 | 上者的 FFI(`src/lib.rs`) |
+| 5 | `app_moxa_framework` | `snmp-plan-E` | 37 | 4 | +1597 | **subagent 本體**。`src/snmp_subagent.rs`(1581 行)+ `main.rs` / `uri_service.rs` / `Cargo.toml` |
+| 6 | `3rdparty_net_snmp` | `snmp-plan-E` | 34 | 8 | +928 / −86 | in-master 註冊表(`ies_auto_mibs_setup.c` 的 13 行註解)、GET-forward、`net_*.h` 重用 |
+
+---
+
+## B. ISS 側 —— 必搬,但含 profile,不能直接套(1 個)
+
+| # | repo | 分支 | commits | 檔案 | 淨變更 |
+|---|---|---|---|---|---|
+| 7 | `app_moxa_iss_10_1_0` | `snmp-plan-E` | 20 | 25 | +443 / −71 |
+
+內容分兩類:
+
+- **可直接搬**:`code/future/snmpv3/`(AgentX 連線、reconnect、response-PDU varbind 編碼、
+  TCP 傳輸層 `snxtrans.c`)、`code/uri_ctrl_hook/`(URI remap)。這些是 bug fix 與機制。
+- **⚠️ 不能直接搬**:`code/future/LR/myconfig.h`(+142 行)、`LR/Makefile`、`LR/pkg/make.ent`、
+  頂層 `Makefile`。這是 **profile 的 compile switch**(`IGS=YES/NO` → `-DIGS_WANTED` 之類),
+  決定哪些 ISS 模組有編。EDS-G4000 的 profile 不同,**必須依 ADR-0019 重新確認**,
+  否則會出現「宣告了但模組沒編」的假陽性。
+
+---
+
+## C. 委派清單 —— 必搬檔案,但內容要在 EDS 上重新量(1 個)
+
+| # | repo | 分支 | commits | 檔案 | 淨變更 |
+|---|---|---|---|---|---|
+| 8 | `plugin_moxa_snmp` | `snmp-plan-E` | 13 | 3 | +100 |
+
+- `app/script/agentx_owned.list`(+42):**哪些 OID 委派給 ISS AgentX**。
+  這份清單是**在 MDS 硬體上量 walk latency 挑出來的**(ADR-0013),而且每筆都要通過
+  ADR-0015 / ADR-0019 的兩軸篩選(ISS 是否真的服務該 OID + 該模組是否有編)。
+  **EDS 必須重跑一次篩選,不可照抄** —— ADR-0015 的教訓是照抄會直接刪掉 OID。
+- `app/config_moxa_snmp_control.c`(+54)與 `Makefile`(+4):機制,可搬。
+- ⚠️ `agentx_owned.list` 的 parser 有已知地雷:長註解被 `fgets` 切半會變成假 prefix
+  (已於 `e605314` 修掉,搬移時要一起帶)。
+
+---
+
+## D. dlmod 退出 —— 逐 group,EDS 有沒有該 group 要先確認(4 個)
+
+搬遷機制:註解掉 plugin `.conf` 裡的 `dlmod` 行,OID 完全消失、無優先權競賽,
+再由 framework subagent 接手。
+
+| # | repo | 分支 | base | commits | 檔案 | 說明 |
+|---|---|---|---|---|---|---|
+| 9 | `plugin_moxa_mms` | `snmp-plan-E` | **`origin/2025.02.14_develop`** | 1 | `snmp/document/mms_setting.conf` | mxMms(4 個 scalar,ADR-0020)。**base 分支與其他 repo 不同** |
+| 10 | `plugin_moxa_fiber_check` | `snmp-plan-E` | `origin/develop` | 2 | `framework/src/status.rs`、`snmp/document/fiber_check.conf` | mxFiberCheck(兩張 per-port 表,ADR-0021) |
+| 11 | `app_moxa_fiber_check` | `snmp-plan-E` | `origin/develop` | 2 | `fiber_check_main.{c,h}`、`fiber_check_shm_api.c` | "Act A: Quick win" + bug fix,+28 行 |
+| 12 | `plugin_moxa_system_information` | `snmp-plan-E` | `origin/develop` | 1 | `snmp_config/document/snmpd_system_information.conf` | Plan D task 10c |
+
+⚠️ EDS-G4000 不一定有 mxMms / mxFiberCheck 這些 group。**搬之前先在 EDS 上跑
+`dlmod` 盤點**(以執行中 snmpd 的 `dlmod` 行為權威,不能看 repo 有沒有 `snmp/` 資料夾 —— 雙向假陽性)。
+
+---
+
+## E. 無淨變更 —— 不用搬
+
+| repo | 分支 | commits | 說明 |
+|---|---|---|---|
+| `lib_moxa_utility` | `snmp-plan-E` | 3 | `exec_sh_cmd_time` debug writer 加了(2 個 commit)又移除(1 個),**diff 為空** |
+
+---
+
+## 搬移方式的建議
+
+**用 squash diff,不要 cherry-pick 逐 commit。**
+
+這幾條分支的歷史裡有大量 revert 對(`Adopt Solution A` → `Revert Solution A`、
+`Implement IES_FLAG_SNMP_URI_STATUS` → `Revert ...`)、死路(`Failed`、`Try to fix it`、
+`BACKUP`)與 PoC 中間態。逐 commit 搬會把已經被推翻的設計一起帶過去。
+
+正確做法:
+
+```bash
+git diff <base>...snmp-plan-E > /tmp/<repo>.patch   # 每個 repo 一份合併後的淨差異
+```
+
+再依 EDS 的 base 逐一套用。
+
+**建置順序**(沿用 MDS 的既有順序):
+
+1. `3rdparty_net_snmp`(`ies_auto_mibs.c` 由它編)
+2. `plugin_moxa_snmp`
+3. `rust_moxa_build`
+4. `make app_moxa_framework-rebuild`
+5. 最後 `make`
+
+---
+
+## 搬過去之後一定要重做的四件事
+
+1. **`agentx_owned.list` 重新篩選**(ADR-0013 / 0015 / 0019)—— 在 EDS 硬體上量 latency、
+   確認 ISS 涵蓋範圍與 compile switch。照抄會刪掉 OID。
+2. **ISS profile 對齊**(`myconfig.h` 那組)—— EDS 的模組編譯開關不同。
+3. **dlmod 盤點**(以執行中 snmpd 的 `dlmod` 行為權威)—— 確認 D 組那幾個 group 存不存在。
+4. **完整性驗收**:以 **MIB 物件(欄位)集合**比對,不是比 varbind 數(ADR-0017)。
+   對 EDS mainline 不能少欄位;多出來的欄位要逐一確認是 `.mib` 有定義的物件。
+
+---
+
+## 尚未決議、會影響搬移內容的事
+
+- **ADR-0022(Proposed)**:MIB 與實作不符共六案(現為七案,見下),每案都是
+  「改 `.mib`」或「改 code」二選一,需產品側參與。其中 B-1 波及全部 35 個 dlmod 模組
+  (`lib_moxa_snmp_plugin/src/handler/scalar.c:126` 無條件以 `HANDLER_CAN_RWRITE` 註冊)。
+  ⚠️ 注意:`lib_moxa_snmp_plugin` **沒有** Plan 分支,目前未改動 —— 若 ADR-0022 決議改 code,
+  它會變成第 13 個要搬的 package。
+- **第七案(2026-08-10 SET 驗證時發現)**:`fiberCheckConfigResetToDefault` 寫入 `2`
+  會回 `commitFailed`,但 MIB 明寫「Any other operation on this object has no effect」。
+  這是忠實移植 dlmod 的行為,不是搬遷造成的 regression。

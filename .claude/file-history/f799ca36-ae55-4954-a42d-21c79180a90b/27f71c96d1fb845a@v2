@@ -1,0 +1,5 @@
+# Plan D (Design C): the system_information config OIDs are now owned by the
+# app_moxa_framework AgentX subagent (GET in-process via config_operation, SET
+# via the same loopback REST PATCH). The dlmod is disabled so the subagent is
+# the sole owner. Re-enable this line to fall back to the in-snmpd dlmod.
+# dlmod systemInformation /etc/moxa/netsnmp/plugin/plugin_snmp_system_information.so

@@ -1,0 +1,3 @@
+- [Never flash EDS-G4000 .swu to the attached DUT](no-flash-edsg4000-swu-to-mdsg4000-dut.md) — serial DUT is an MDS-G4000-L3, cross-model flash risk
+- [Plan E port to EDS-G4000 spans 13 repos](edsg4000-plan-e-port-scope.md) — branch snmp-plan-E-edsg4000-mainline; the moxa overlay and ISS are the easily-missed ones
+- [AgentX libs live in a personal GitLab namespace](agentx-libs-in-personal-gitlab-namespace.md) — Config.in's general/ URLs don't exist; blocks clean install.sh

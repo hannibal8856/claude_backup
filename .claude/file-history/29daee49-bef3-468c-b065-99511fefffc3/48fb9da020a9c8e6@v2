@@ -1,0 +1,23 @@
+#!/bin/sh
+T=$(cat /moxa/run/auto_mibs/s_token 2>/dev/null)
+echo "### config: port 0 row"
+curl -s -H "Authorization: $T" \
+  "http://127.0.0.1/api/v1/setting/data/mxfiberCheck/general/portTable/0" 2>/dev/null
+echo
+echo "### config: txPowerWarning of port 0"
+curl -s -H "Authorization: $T" \
+  "http://127.0.0.1/api/v1/setting/data/mxfiberCheck/general/portTable/0/txPowerWarning" 2>/dev/null
+echo
+echo "### status: port 0 row"
+curl -s -H "Authorization: $T" \
+  "http://127.0.0.1/api/v1/status/fiberCheckStatus/monitor/portTable/0" 2>/dev/null
+echo
+echo "### status: whole plugin root (first 400 chars)"
+curl -s -H "Authorization: $T" \
+  "http://127.0.0.1/api/v1/status/fiberCheckStatus" 2>/dev/null | head -c 400
+echo
+echo "### config portTable length"
+curl -s -H "Authorization: $T" \
+  "http://127.0.0.1/api/v1/setting/data/mxfiberCheck/general/portTable" 2>/dev/null | head -c 200
+echo
+echo "### DONE"

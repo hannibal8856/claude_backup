@@ -1,0 +1,20 @@
+---
+name: clippy-gitlab-mr-workflow
+description: Tooling + gotchas for mass-creating GitLab issues/branches/MRs for the clippy-scan-binary-packages-3 work
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 06089eea-89b1-4ba6-91e6-624dca2bad18
+---
+
+To merge the clippy-scan-binary-packages-3 work, each dl repo needs: GitLab issue (title "Clippy scan binaries only") → local branch `<iid>-clippy-scan-binary-packages` (forked from clippy-scan-binary-packages-3, commit amended to "Issue #<iid>: Clippy scan binaries only") → push → MR to NOS_v6.0_develop with description "Closes #<iid>".
+
+Scripts (host `~/`): `create_clippy_lib_mrs.sh` (libraries, env LIST_FILE/SLEEP/TOKEN_FILE/--go), `create_clippy_mrs.sh` (simpler app MR variant). Both DRY-RUN by default. **LIB phase DONE 2026-06-15: all 156 lib repos have issue+branch+MR** (vrrp was the single-repo test = issue#18/MR!26). APP phase (19 BIN repos) NOT yet done — user said handle separately (more complex).
+
+**Gotchas learned (all real, all hit):**
+- **Token**: `~/moxa_gitlab_scm_token` is `<label>glpat-<PAT>` (no usable colon) — extract with `grep -oE 'glpat-[A-Za-z0-9._-]+'`, use as `PRIVATE-TOKEN` header. It has API access (Developer/30 via group). **It LEAKED into session output once (curl -u prompt) — advise rotating.** (token2 file later disappeared.)
+- **`.git` suffix gotcha (the big one)**: ~34 dl repos' `git remote get-url origin` has NO `.git` suffix. A path regex requiring `\.git$` silently fails → leaves `git@gitlab.com:` prefix → malformed project path → API returns **404 "Project Not Found"** (looks like a permissions problem but isn't). Correct parse: `sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g'`. Both scripts fixed.
+- **Issue-creation rate-limit is real** on gitlab.com: rapid sequential POSTs get intermittent failures even with access. Use `SLEEP=3` between repos for retries. Idempotent re-run is safe (existing branch → EXISTS skip; existing same-title open issue → reuse its iid, no duplicate).
+- Project access via API ≠ SSH push access (SSH key broader than PAT membership in general — but here the 404s were the regex bug, not real permission gaps).
+
+Related: [[clippy-by-application-scan]], [[git-no-ext-diff]].

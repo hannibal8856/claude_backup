@@ -1,0 +1,14 @@
+# AgentX-owned URI prefixes.
+#
+# RO entries under these URI prefixes skip local netsnmp_register_*
+# in ies-auto-mibs and are served by the ISS subagent via AgentX
+# (consumed by mox_snmp_init_entry in 3rdparty_net_snmp).
+#
+# RW entries always stay local — they keep going through the
+# URI/framework REST path so JSON persistence stays the source of truth.
+#
+# Format: one URI prefix per line. '#' starts a comment. Blanks OK.
+# Add a trailing '/' on each prefix to avoid accidental partial matches
+# (e.g. "ifmibdb" would also match "ifmibdbExtra/...").
+
+ifmibdb/

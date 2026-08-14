@@ -1,0 +1,18 @@
+{
+  "claude-plugins-official": {
+    "source": {
+      "source": "github",
+      "repo": "anthropics/claude-plugins-official"
+    },
+    "installLocation": "/home/moxa/.claude/plugins/marketplaces/claude-plugins-official",
+    "lastUpdated": "2026-08-14T06:04:22.135Z"
+  },
+  "karpathy-skills": {
+    "source": {
+      "source": "github",
+      "repo": "forrestchang/andrej-karpathy-skills"
+    },
+    "installLocation": "/home/moxa/.claude/plugins/marketplaces/karpathy-skills",
+    "lastUpdated": "2026-05-18T03:13:47.776Z"
+  }
+}

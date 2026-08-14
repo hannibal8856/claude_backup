@@ -1,0 +1,18 @@
+---
+name: project_moduri_correlates_iss_owned
+description: "mod_uri groups (MIB URI≠config path) are almost all ISS-owned (iss_build==1); ISS shadows GET so they can't migrate to the framework subagent without an ISS-side change"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+---
+
+Investigated 2026-07-17 while trying to validate the mod_uri remap (Plan D B, Design C) by migrating mxDualdb to the framework AgentX subagent. Finding is structural, not incidental.
+
+**mod_uri exists to bridge OLD ISS MIB naming → NEW framework config naming.** Examples: `mxdualdb/dualhomingConfigEnable`→`mxL2Redundancy/dualhoming`; `mxdot1xdb/dot1xConfigGlobalEnable`→`mxpnac/globalEnable`; `mxRadiusdb/*`→`mxpnac/radiusServerTable/`. These old-MIB features (dual-homing, 802.1x/PNAC, radius, lldp, turbo-ring) are exactly the ones ISS owns → **nearly every mod_uri group is `iss_build==1`.**
+
+**Consequence:** an `iss_build==1` OID is registered by ISS directly as an AgentX subagent (ISS has the MIB in `app_moxa_iss_10_1_0/code/future/inc/oid_info/*.h`, e.g. `mxDualHomingon.h` = `.1.3.6.1.4.1.8691.603.3.7`). Commenting the ies-auto-mibs in-master `MOX_SNMP_INIT_ENTRY(<grp>)` AND stopping the framework subagent still leaves the OID served — by ISS. Proven on DUT: mxDualdb `.603.3.7.1.1.0`=2 still returned with framework stopped + registration commented (verified same libnetsnmpmibs.so md5 on DUT). So Design C (comment ies-auto-mibs + register in framework) does NOT redirect GET to the framework for iss_build==1; it just exposes ISS's own registration. Migrating these needs an ISS-side change (stop ISS registering the subtree).
+
+**The few iss_build==0 mod_uri entries are special-semantics, not plain config leaves:** mx_eventLog `logClear`→`eventLogClear` is a COMMAND (IES_FLAG_SNMP_URI_COMMAND/FIXED_VALUE); mx_eventLog `logStatLogEntryNum` is STATUS (my handler only reads running_config, not status). So no clean "iss_build==0 + config-leaf + mod_uri scalar" exists to demo mod_uri end-to-end on the subagent.
+
+**Takeaway for the migration roadmap:** the easy Design-C wins are `iss_build==0` groups whose MIB URI already == config path (system_information, portEvent — done). mod_uri groups are NOT easy wins. The mod_uri C mechanism is implemented in `lib_moxa_ies_auto_mibs/src/mapping_reuse.c` (per-group `ies_auto_mibs_setup_entry_flags_*` populates mod_uri, used as `mod_uri[0]?mod_uri:uri`) and is correct-by-construction, but shadowed by ISS on every real target. See [[project_plan_d_two_subagent_oid_reachability]] and [[project_plan_c_agentx_set_path_and_framing]].

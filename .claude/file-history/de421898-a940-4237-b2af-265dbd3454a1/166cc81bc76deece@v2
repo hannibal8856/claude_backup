@@ -1,0 +1,55 @@
+# Host build of the lookup test.
+#
+# The table under test is compiled from ies-auto-mibs with the same -D set the
+# target library uses, so what it proves about which entries exist and what
+# flags they carry carries over. Host and target differ only in the width of
+# net-snmp's oid typedef, which changes struct layout, not content.
+#
+# usage, from the Buildroot top directory:
+#   make -C dl/lib_moxa_ies_auto_mibs/test check \
+#        STAGING_DIR=output/staging \
+#        MOXA_DEFS="$(shell ...)"     # see below
+#
+# MOXA_DEFS must be snmpd's -D set. Get it with:
+#   make printvars VARS=3RDPARTY_NET_SNMP_CFLAGS
+# and keep only the -D entries.
+
+PWD          = $(shell pwd)
+TOP          = $(PWD)/..
+IES_SRC_DIR ?= $(TOP)/../3rdparty_net_snmp
+STAGING_DIR ?= $(TOP)/../../output/staging
+BUILD_PATH   = $(PWD)/build
+MOXA_DEFS   ?=
+
+# Only these header trees may come from the target sysroot. Pointing -I at
+# $(STAGING_DIR)/usr/include as a whole makes the host compiler pick up the
+# target libc headers and fail on gnu/stubs-soft.h.
+SYSROOT_HDRS = net-snmp libmoxa_util libmoxa_system parson
+HOST_INC     = $(BUILD_PATH)/include
+
+CFLAGS += -std=c99 -g -D_GNU_SOURCE \
+          -I$(TOP)/include \
+          -I$(IES_SRC_DIR)/snmp_tools/inc \
+          -I$(IES_SRC_DIR)/ies-auto-mibs \
+          -I$(HOST_INC) \
+          $(MOXA_DEFS)
+
+.PHONY: check clean
+
+check: $(BUILD_PATH)/test_iesmap
+	$<
+
+$(HOST_INC):
+	mkdir -p $(HOST_INC)
+	for d in $(SYSROOT_HDRS); do \
+	    if [ -e "$(STAGING_DIR)/usr/include/$$d" ]; then \
+	        ln -sfn "$(abspath $(STAGING_DIR))/usr/include/$$d" "$(HOST_INC)/$$d"; \
+	    fi; \
+	done
+
+$(BUILD_PATH)/test_iesmap: $(HOST_INC) test_iesmap.c host_stub.c $(TOP)/src/iesmap.c
+	mkdir -p $(BUILD_PATH)
+	$(CC) $(CFLAGS) -o $@ $(TOP)/src/iesmap.c test_iesmap.c host_stub.c
+
+clean:
+	rm -rf $(BUILD_PATH)

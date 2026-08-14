@@ -1,0 +1,45 @@
+#!/bin/bash
+# 確認 ~/edsg4000/buildroot/dl 底下所有 rust package(含 Cargo.toml 的 git repo)
+# 是否都有本地 branch clippy-scan-binary-packages-3,以及它是否領先 base。
+# 不使用 `git -C`(避免被 RTK hook 干擾);改用 cd 子shell。
+
+DL=${1:-$HOME/edsg4000/buildroot/dl}
+BR=clippy-scan-binary-packages-3
+
+[ -d "$DL" ] || { echo "找不到 $DL"; exit 1; }
+cd "$DL" || exit 1
+
+# 收集所有「含 Cargo.toml(非 target)」的頂層 repo
+repos=$(find . -maxdepth 4 -name Cargo.toml -not -path '*/target/*' 2>/dev/null \
+        | sed -E 's#^\./##; s#/.*##' | sort -u)
+
+total=0; has=0; missing=""; nogit=""
+for r in $repos; do
+    [ -d "$r" ] || continue
+    total=$((total+1))
+    if [ ! -d "$r/.git" ]; then nogit="$nogit $r"; continue; fi
+    (
+        cd "$r" || exit 9
+        if git rev-parse --verify -q "$BR" >/dev/null 2>&1; then
+            cur=$(git branch --show-current)
+            ahead=$(git rev-list --count "origin/NOS_v6.0_EDS_develop..$BR" 2>/dev/null)
+            echo "HAS|$r|on=${cur:-detached}|ahead=${ahead:-?}"
+        else
+            echo "MISSING|$r"
+        fi
+    )
+done > /tmp/eds_branch_check.txt
+
+has=$(grep -c '^HAS' /tmp/eds_branch_check.txt)
+miss=$(grep -c '^MISSING' /tmp/eds_branch_check.txt)
+echo "=== rust repo 總數: $total ==="
+echo "有 $BR : $has"
+echo "缺 $BR : $miss"
+[ -n "$nogit" ] && echo "非 git repo:$nogit"
+echo
+echo "--- 缺 branch 的 repo ---"
+grep '^MISSING' /tmp/eds_branch_check.txt | cut -d'|' -f2 | sed 's/^/  /' || echo "  (無)"
+echo
+echo "--- 有 branch 但 ahead 數異常(非1、非0)---"
+grep '^HAS' /tmp/eds_branch_check.txt | awk -F'|' '{split($4,a,"="); if(a[2]!="1"&&a[2]!="0") print "  "$2" ("$3", "$4")"}'
+echo "(以上空=有 branch 者 ahead 皆為 0 或 1)"

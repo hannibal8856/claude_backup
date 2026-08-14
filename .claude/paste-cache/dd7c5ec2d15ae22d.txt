@@ -1,0 +1,55 @@
+============================================================
+Repository: ../moxa
+============================================================
+Current branch: snmp-plan-D
+Current commit: 9ca72d440
+
+Working tree: clean
+
+============================================================
+Repository: 3rdparty_net_snmp
+============================================================
+Current branch: agentx_owned.list
+Current commit: 438e409
+
+Working tree: clean
+
+============================================================
+Repository: app_moxa_iss_10_1_0
+============================================================
+Current branch: agentx_owned.list
+Current commit: 6be1523ce
+
+Working tree: clean
+
+============================================================
+Repository: lib_moxa_utility
+============================================================
+Current branch: snmp-trace-time_diff
+Current commit: 7bca9d0
+
+Working tree: clean
+
+============================================================
+Repository: plugin_moxa_snmp
+============================================================
+Current branch: agentx_owned.list
+Current commit: 1be54b9
+
+Working tree: clean
+
+============================================================
+Repository: app_moxa_fiber_check
+============================================================
+Current branch: snmp-agentx
+Current commit: 630a991
+
+Working tree: clean
+
+============================================================
+Repository: plugin_moxa_fiber_check
+============================================================
+Current branch: snmp-agentx
+Current commit: d277473
+
+Working tree: clean

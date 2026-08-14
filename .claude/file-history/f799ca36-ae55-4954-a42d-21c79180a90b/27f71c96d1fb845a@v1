@@ -1,0 +1,1 @@
+dlmod systemInformation /etc/moxa/netsnmp/plugin/plugin_snmp_system_information.so

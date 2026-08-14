@@ -1,0 +1,43 @@
+---
+name: project_getfwd_probe_must_be_wire_verified
+description: GET-forward 規則的 probe 必須用 pcap 證實會產生 Get-PDU;『GET 回得到值』不是證據。mxPort 的 portConfig 側其實沒搬到 ISS
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 03565926-6fb8-4a69-a12c-4471723877ba
+  modified: 2026-08-07T11:06:02.426Z
+---
+
+2026-08-07 把 `mox_iss_get_forward_rules[]` 從 4 條(ifTable/ifXTable)推廣到 mxPort 的
+8 個 RW 欄,失敗兩輪才找到原因。
+
+**probe 的驗證方式:抓 lo:705 的 pcap,確認該 OID 產生 Get-PDU。**
+我當初只確認「`snmpget` 回得到值」就當作 probe 合格 —— 那完全不成立,in-master 也會回值。
+
+`mox_snmp_forward_get_to_iss()` 用 `netsnmp_subtree_find(probe_oid,…)` 定位 ISS 的
+reginfo。probe 若其實由 in-master 服務,它會找到**本地**的 subtree、卻仍回 0(當成成功),
+把 detached 的請求交給本地 handler → 症狀是:值型別錯(OCTET STRING 變 `INTEGER: 0`)、
+scalar 回 `No Such Instance`、GETNEXT 在該欄迴圈(`.2.12` 之後回 `.2.1`)導致
+`OID not increasing`,而且 **wire 上完全沒有 AgentX 流量**。整棵 mxPort walk 193 → 13。
+
+**mxPort 的 RO 欄歸屬是分裂的**(pcap 實測,2026_0807_1842):
+
+| RO 欄 | 誰服務 | 能當 probe |
+|---|---|---|
+| `portConfigTable` col 1 `.603.1.1.1.1.1.1` | in-master | ✗ |
+| `portConfigLinkUpDelayTable` col 1 `.603.1.1.1.3.1.1` | in-master | ✗ |
+| `portStatTable` col 1–5 `.603.1.1.2.1.1.*` | **ISS** | ✓ |
+| `portStatLinkUpDelayTable` col 1–2 `.603.1.1.2.2.1.*` | **ISS** | ✓ |
+
+所以 `mxportdb/` 的委派**實際上只有 status 側兩張表生效,config 側兩張表沒搬** ——
+那兩欄是 RO + `mxportdb/` 前綴、照規則該被 skip 卻仍由 in-master 回答,ADR-0012 沒記到。
+早期線索:連續 walk 的逐欄分佈裡 `1.1.1.1` / `1.3.1.1` 不出現,`2.1.1.1` / `2.2.1.1` 出現
+—— 我當時誤判成 ADR-0011 的 walk 缺陷而略過。
+
+**既有 4 條規則是健康的**(同日實測):ifTable 330 / ifXTable 285 完整走完,
+`ifAdminStatus` 與 `ifAlias` 值與型別正確且 pcap 證實走 ISS;`ifAdminStatus` 的
+SET→GET 讀回一致(SET 走本地、GET 走 ISS 不會不同步)。`ifAlias` SET 回 `badValue`,
+但 mainline 同樣如此 → 既有行為。四條裡實際 SET 得動的只有 `ifAdminStatus`。
+
+**How to apply:** 新增 forward 規則時,先對候選 probe 抓一次 pcap;沒看到 Get-PDU 就換一個。
+相關:[[project_iss_coverage_screen_before_delegating]]、[[project_snmp_walk_slow_diagnosis]]

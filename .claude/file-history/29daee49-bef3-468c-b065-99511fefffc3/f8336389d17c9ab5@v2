@@ -1,0 +1,19 @@
+#!/bin/sh
+P=$(pgrep -f '/bin/snmpd' | head -1)
+echo "### dlmod 載入狀況"
+printf '  %-28s maps=%s  (應為 0)\n' "plugin_snmp_fiber_check.so" \
+  "$(grep -c 'plugin_snmp_fiber_check\.so' /proc/$P/maps 2>/dev/null)"
+printf '  %-28s maps=%s  (應 > 0,未受影響)\n' "plugin_snmp_fiber_check_event" \
+  "$(grep -c 'plugin_snmp_fiber_check_event' /proc/$P/maps 2>/dev/null)"
+printf '  %-28s maps=%s  (應為 0,前一輪已搬遷)\n' "plugin_snmp_mms_setting.so" \
+  "$(grep -c 'plugin_snmp_mms_setting' /proc/$P/maps 2>/dev/null)"
+echo "### 仍載入的 dlmod .so 總數"
+grep -c 'netsnmp/plugin/.*\.so' /proc/$P/maps 2>/dev/null
+echo "### conf 現況"
+printf '  fiber_check.conf        dlmod 行=%s\n' "$(grep -c '^[[:space:]]*dlmod' /etc/moxa/netsnmp/config/fiber_check.conf)"
+printf '  fiber_check_event.conf  dlmod 行=%s\n' "$(grep -c '^[[:space:]]*dlmod' /etc/moxa/netsnmp/config/fiber_check_event.conf)"
+echo "### framework subagent"
+pgrep -l -f 'app_moxa_framew' | head -1
+echo "### /run 用量(debug writer 應已無)"
+df -h /run | tail -1
+echo "### DONE"

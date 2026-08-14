@@ -1,0 +1,33 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 17:34 $ /usr/bin/snmpwalk -v2c -c public -On 192.168.127.253 .1.3.6.1.4.1.8691.603.3.2.2.1.1.1
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.1 = INTEGER: 1
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.2 = INTEGER: 2
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.3 = INTEGER: 3
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.4 = INTEGER: 4
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.5 = INTEGER: 5
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.6 = INTEGER: 6
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.7 = INTEGER: 7
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.8 = INTEGER: 8
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.9 = INTEGER: 9
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.10 = INTEGER: 10
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.11 = INTEGER: 11
+.1.3.6.1.4.1.8691.603.3.2.2.1.1.1.12 = INTEGER: 12
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 10:23 $ for i in $(seq 1 20); do
+  /usr/bin/time -f %e /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.2.1.2.2.1.8.1 2>&1 >/dev/null
+done | sort -n | tail -1
+0.00
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 10:25 $ tools/capture_baseline.sh task345fix 192.168.127.253
+walking 1.3.6.1.2 ...
+  ok 1.3.6.1.2: 2606 OIDs
+walking 1.3.6.1.4.1.8691.600 ...
+  ok 1.3.6.1.4.1.8691.600: 5 OIDs
+walking 1.3.6.1.4.1.8691.602 ...
+  !! 1.3.6.1.4.1.8691.602: snmpwalk 失敗（exit 2）—— 此次擷取無效
+walking 1.3.6.1.4.1.8691.603 ...
+  !! 1.3.6.1.4.1.8691.603: snmpwalk 失敗（exit 1）—— 此次擷取無效
+walking 1.3.6.1.4.1.8691.605 ...
+  ok 1.3.6.1.4.1.8691.605: 47 OIDs
+walking 1.3.6.1.4.1.2021 ...
+  ok 1.3.6.1.4.1.2021: 109 OIDs
+walking 1.0.8802 ...
+^C
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 10:28 $

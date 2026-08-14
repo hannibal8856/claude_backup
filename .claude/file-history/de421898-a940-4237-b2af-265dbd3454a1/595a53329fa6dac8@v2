@@ -1,0 +1,220 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_stdladb_c
+#define _IES_AUTO_MIBS_FLAGS_net_stdladb_c
+
+
+
+/**
+ * @brief function body for set stdladb/dot3adAggPortTable/dot3adAggPortActorAdminKey
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+/* Handler bodies are in-master only - see IES_AUTO_MIBS_TABLE_ONLY in
+ * snmp_tools/inc/ies_auto_mibs_handle.h. The flag setup below stays outside
+ * the guard: it is shared with the lookup table. */
+#ifndef IES_AUTO_MIBS_TABLE_ONLY
+
+int32_t setEntryValue_stdladb_dot3adAggPortTable_dot3adAggPortActorAdminKey( netsnmp_agent_request_info    *reqinfo,
+                                                                             netsnmp_request_info          *request,
+                                                                             struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t                   ret     = (-1);
+    int32_t                   ifIndex = 0;
+    struct moxaSnmpSetBuffer  setBuf;
+    uint32_t                  u4AdminKey = 0;
+    JSON_Value               *jsonVal = NULL;
+    JSON_Object              *jsonObj = NULL;
+    char                      uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+
+    memset(&setBuf, 0, sizeof(setBuf));
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &ifIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get request OID index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : ifIndex(%d)\n",
+        __func__, __LINE__, ifIndex);
+
+    if ( moxaSnmpHandle_UtilSnmpGetSetBuffer(reqinfo, request, entry, &setBuf) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get set buffer\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    u4AdminKey = atoi(setBuf.valStrBuf);
+
+    if ( u4AdminKey == 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't set dot3adAggPortActorAdminKey to '0'\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH(MXCFG_GRP_mxla_portTable)"/%d",
+        MXCFG_INTERNAL_PORT_INDEX(ifIndex));
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    jsonObj = json_value_get_object(jsonVal);
+    if ( jsonObj == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonObj fro jsonVal\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    json_object_dotset_number (jsonObj, MXCFG_KEY_portAdminKey, u4AdminKey);
+
+    if ( moxaSnmpHandle_UtilCfgPatchURIConfig(uriPath, jsonVal) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't PatchURIConfig\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+
+    return ret;
+}
+
+#endif /* IES_AUTO_MIBS_TABLE_ONLY */
+
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_net_stdladb
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "stdladb/dot3adAggTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_INDEX_NOT_START_FROM_1, entry->flags);
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggActorSystemPriority") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAgg.dot3adAggTable.dot3adAggEntry.dot3adAggActorSystemPriority
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggActorAdminKey") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAgg.dot3adAggTable.dot3adAggEntry.dot3adAggActorAdminKey
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggCollectorMaxDelay") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAgg.dot3adAggTable.dot3adAggEntry.dot3adAggCollectorMaxDelay
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "stdladb/dot3adAggPortTable/") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortActorSystemPriority") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortActorSystemPriority
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortActorAdminKey") ) 
+        {
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_stdladb_dot3adAggPortTable_dot3adAggPortActorAdminKey) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerAdminSystemPriority") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortPartnerAdminSystemPriority
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerAdminSystemID") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortPartnerAdminSystemID
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortActorPortPriority") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortActorPortPriority
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerAdminPort") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortPartnerAdminPort
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerAdminPortPriority") ) 
+        {
+            //lagMIB.lagMIBObjects.dot3adAggPort.dot3adAggPortTable.dot3adAggPortEntry.dot3adAggPortPartnerAdminPortPriority
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortActorAdminState") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET,    entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_LA_REPLACE_BIT,    entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags);
+            snprintf(entry->mod_uri      , IES_MAX_URI,       "laSettings/portTable/");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortActorOperState") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags);
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerAdminState") ) 
+        {
+			IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags);
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "dot3adAggPortPartnerOperState") ) 
+        {
+			IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags);
+        }
+    }
+
+    
+    return IES_NOERR;
+}
+
+
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_stdladb_c

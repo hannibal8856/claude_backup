@@ -1,0 +1,169 @@
+# ies-auto-mibs 的 iss_build 分列(2026-08-13,由原始碼統計)
+
+資料來源:`3rdparty_net_snmp/ies-auto-mibs/net_*.h` 的 `.oid_list` / `.iss_build` / `.uri`。
+OID root = 該檔所有 entry 的共同前綴;`.mib` 由 MODULE-IDENTITY 解出的 OID 與 root 實際比對。
+
+- **`iss_build == 1`** → 資料在 **ISS** 內部變數,由 ISS 服務
+- **`iss_build == 0`** → 保留給 **framework**(config / status layer)
+
+> ⚠️ **原屬 dlmod 的群組(`mxMms`、`mxFiberCheck`、`fiberCheckEvent`)一律列在最下方的 dlmod 表**,
+> 不列在下面兩表 —— 它們雖有 `net_*.h`,但來源是 dlmod 這條路,定位不同。
+
+
+## iss_build == 1 —— 由 ISS 服務
+
+**45 個檔 / 1391 個 entry**
+
+| net_*.h | entry | URI 前綴 | OID root | 對應 .mib |
+|---|---|---|---|---|
+| `net_stdrmodb.h` | 167 | `stdrmodb` | `1.3.6.1.2.1.16` | standard/RMON2-MIB.mib |
+| `net_stdospdb.h` | 115 | `stdospdb` | `1.3.6.1.2.1.14` | standard/OSPF-MIB.mib |
+| `net_stdipdb.h` | 78 | `stdipdb` | `1.3.6.1.2.1` | — |
+| `net_stdpnadb.h` | 77 | `stdpnadb` | `1.0.8802.1.1.1.1` | — |
+| `net_stdpnodb.h` | 76 | `stdpnodb` | `1.0.8802.1.1.2.1.5.3791.1` | — |
+| `net_stdvladb.h` | 58 | `stdvladb` | `1.3.6.1.2.1.17.7.1` | standard/BRIDGE-MIB.mib |
+| `net_stdbridb.h` | 55 | `stdbridb` | `1.3.6.1.2.1.17` | standard/BRIDGE-MIB.mib |
+| `net_stdladb.h` | 55 | `stdladb` | `1.2.840.10006.300.43.1` | — |
+| `net_stdllddb.h` | 48 | `stdllddb` | `1.0.8802.1.1.2.1` | — |
+| `net_ifmibdb.h` | 47 | `ifmibdb` | `1.3.6.1.2.1` | — |
+| `net_std1d1db.h` | 43 | `std1d1db` | `1.3.111.2.802.1.1.2.1` | — |
+| `net_stdsnmdb.h` | 41 | `stdsnmdb` | `1.3.6.1` | — |
+| `net_mxTcstdb.h` | 37 | `mxtcstdb` | `1.3.6.1.4.1.8691.603.5.4` | private/mxSwitching.mib |
+| `net_stdethdb.h` | 34 | `stdethdb` | `1.3.6.1.2.1.10.7` | — |
+| `net_vrrpdb.h` | 33 | `vrrpdb` | `1.3.6.1.2.1.68` | — |
+| `net_mxQosdb.h` | 29 | `mxqosdb` | `1.3.6.1.4.1.8691.603.2.9.1` | private/mxSwitching.mib |
+| `net_std1w1db.h` | 29 | `std1w1db` | `1.3.111.2.802.1.1.3.1` | — |
+| `net_mxRSTPdb.h` | 27 | `mxrstpdb` | `1.3.6.1.4.1.8691.603.3.2` | private/mxSwitching.mib |
+| `net_stdot3db.h` | 27 | `stdot3db` | `1.0.8802.1.1.2.1.5.4623.1` | — |
+| `net_vrrp3db.h` | 26 | `vrrp3db` | `1.3.6.1.2.1.207.1` | — |
+| `net_stdcipdb.h` | 23 | `stdcipdb` | `1.0.8802.1.1.2.1.5.8556.1` | — |
+| `net_stdbrgdb.h` | 22 | `stdbrgdb` | `1.3.6.1.2.1.17` | standard/BRIDGE-MIB.mib |
+| `net_mxPsmsdb.h` | 20 | `mxpsmsdb` | `1.3.6.1.4.1.8691.603.4.2` | private/mxSwitching.mib |
+| `net_mxOspfdb.h` | 19 | `mxospfdb` | `1.3.6.1.4.1.8691.605.2.4` | private/mxOspf.mib |
+| `net_mxPortdb.h` | 17 | `mxportdb` | `1.3.6.1.4.1.8691.603.1.1` | private/mxSwitching.mib |
+| `net_mxDot1xdb.h` | 16 ⚠️(檔內共 19) | `mxdot1xdb` | `1.3.6.1.4.1.8691.603.4.5` | private/mxSwitching.mib |
+| `net_mxIgmpdb.h` | 16 | `mxigmpdb` | `1.3.6.1.4.1.8691.603.7.2` | private/mxSwitching.mib |
+| `net_mxPsspdb.h` | 16 | `mxpsspdb` | `1.3.6.1.4.1.8691.603.4.1` | private/mxSwitching.mib |
+| `net_mxVrrpdb.h` | 15 | `mxvrrpdb` | `1.3.6.1.4.1.8691.605.3.1` | private/mxVrrp.mib |
+| `net_stdot1db.h` | 14 | `stdot1db` | `1.0.8802.1.1.2.1.5.32962.1` | — |
+| `net_mxDhcpSnpdb.h` | 11 | `mxdhcpsnpdb` | `1.3.6.1.4.1.8691.603.4.11.2` | private/mxSwitching.mib |
+| `net_mxDualdb.h` | 11 | `mxdualdb` | `1.3.6.1.4.1.8691.603.3.7` | private/mxSwitching.mib |
+| `net_mxLadb.h` | 11 | `fscfadb` | `1.3.6.1.4.1.8691.603.1.2` | private/mxSwitching.mib |
+| `net_mxMabdb.h` | 11 | `mxmabdb` | `1.3.6.1.4.1.8691.603.4.3` | private/mxSwitching.mib |
+| `net_mxMacsecdb.h` | 10 | `mxmacsecdb` | `1.3.6.1.4.1.8691.603.4.14.2` | private/mxSwitching.mib |
+| `net_mxRadiusdb.h` | 7 | `mxradiusdb` | `1.3.6.1.4.1.8691.603.4.9.1.1.1` | private/mxSwitching.mib |
+| `net_mxStaticRoutedb.h` | 7 | `mxstaticroutedb` | `1.3.6.1.4.1.8691.605.2.2.1.1.1` | private/mxStaticRoute.mib |
+| `net_mxTcdb.h` | 7 | `mxtcdb` | `1.3.6.1.4.1.8691.603.3.5` | private/mxSwitching.mib |
+| `net_mxTrackingdb.h` | 7 | `mxtrackingdb` | `1.3.6.1.4.1.8691.603.5.6.2.1.1` | private/mxSwitching.mib |
+| `net_mxUnicastRoutingTabledb.h` | 6 | `mxunicastroutingtabledb` | `1.3.6.1.4.1.8691.605.2.1.1.1.1` | private/mxUnicastRoutingTable.mib |
+| `net_mx_lldp.h` | 6 | `mxlldp` | `1.3.6.1.4.1.8691.603.5.1.1` | private/mxSwitching.mib |
+| `net_mx_vlan.h` | 6 | `fscfadb` | `1.3.6.1.4.1.8691.603.2.3.1` | private/mxSwitching.mib |
+| `net_mxArpdb.h` | 4 | `mxarpdb` | `1.3.6.1.4.1.8691.605.1.3` | private/mxArp.mib |
+| `net_mxRlpsdb.h` | 4 | `mxrlpsdb` | `1.3.6.1.4.1.8691.603.4.8.1` | private/mxSwitching.mib |
+| `net_mxStcldb.h` | 3 | `mxstcldb` | `1.3.6.1.4.1.8691.603.4.4.1.1.1` | private/mxSwitching.mib |
+
+## iss_build == 0 —— 保留給 framework
+
+**25 個檔 / 753 個 entry**
+
+| net_*.h | entry | URI 前綴 | OID root | 對應 .mib |
+|---|---|---|---|---|
+| `net_mx_event_switching.h` | 205 | `dhcpBootfileEvent` | `1.3.6.1.4.1.8691.602.7.1.3.1` | private/mxSwe.mib |
+| `net_mx_event_general.h` | 90 | `commonSystemEvent` | `1.3.6.1.4.1.8691.602.7.1.1.1` | private/mxGene.mib |
+| `net_mx_event_port.h` | 88 | `chainProtectEvent` | `1.3.6.1.4.1.8691.602.7.1.2.1` | private/mxPorte.mib |
+| `net_mx_event_routing.h` | 78 | `bfdEvent` | `1.3.6.1.4.1.8691.602.7.1.5.1` | private/mxRte.mib |
+| `net_mx_event_poe.h` | 54 | `poeEvent` | `1.3.6.1.4.1.8691.602.7.1.8.1` | private/mxPoee.mib |
+| `net_mx_dhcpSrv.h` | 44 | `dhcpServer` | `1.3.6.1.4.1.8691.602.2.2` | private/mxDhcpSvr.mib |
+| `net_mx_event_hardware.h` | 36 | `intelTempCtrlEvent` | `1.3.6.1.4.1.8691.602.7.1.10.1` | private/mxHwe.mib |
+| `net_mx_turboring_v2.h` | 29 | `config` | `1.3.6.1.4.1.8691.603.3.4` | private/mxSwitching.mib |
+| `net_mx_event_tracking.h` | 24 | `mxtrackingEvent` | `1.3.6.1.4.1.8691.602.7.1.11.1` | private/mxTrackinge.mib |
+| `net_mx_portmirror.h` | 18 | `portMirror` | `1.3.6.1.4.1.8691.603.5.5.1` | private/mxSwitching.mib |
+| `net_mx_email.h` | 11 | `email` | `1.3.6.1.4.1.8691.602.7.3.1` | private/mxEmailC.mib |
+| `net_mx_snmp.h` | 10 | `snmp` | `1.3.6.1` | — |
+| `net_mxIpIfdb.h` | 8 | `ipInterface` | `1.3.6.1.4.1.8691.605.1.1.1.1.1` | private/mxIpIf.mib |
+| `net_mx_device_io.h` | 8 | `io` | `1.3.6.1.4.1.8691.602.8.6.2` | private/mxDeviceIo.mib |
+| `net_mx_trap_notification.h` | 7 | `snmpTrap` | `1.3.6.1.4.1.8691.602.7.2.1` | private/mxTrapC.mib |
+| `net_mxLoginPolicy.h` | 6 | `loginPolicy` | `1.3.6.1.4.1.8691.602.1.5.1` | private/mxSysLoginPolicySvr.mib |
+| `net_mxPasswordPolicy.h` | 6 | `accountPasswordPolicy` | `1.3.6.1.4.1.8691.602.1.6.1` | private/mxSysPasswordPolicySvr.mib |
+| `net_mx_managementIP.h` | 6 | `managementIp` | `1.3.6.1.4.1.8691.602.2.1.1.1` | private/mxManagementIp.mib |
+| `net_mxGeneralInfo.h` | 5 | `generalInfo` | `1.3.6.1.4.1.8691.600.2.2` | private/mxGeneralInfo.mib |
+| `net_mx_eventLog.h` | 5 | `eventLog` | `1.3.6.1.4.1.8691.602.8.3` | private/mxEventLog.mib |
+| `net_mx_syslogServer.h` | 5 | `syslogServer` | `1.3.6.1.4.1.8691.602.8.2.1` | private/mxSyslog.mib |
+| `net_mx_trustAccess.h` | 5 | `trustedAccess` | `1.3.6.1.4.1.8691.602.1.4.1` | private/mxSysTrustAccessSvr.mib |
+| `net_mxDot1xdb.h` | 3 ⚠️(檔內共 19) | `mxdot1xdb` | `1.3.6.1.4.1.8691.603.4.5` | private/mxSwitching.mib |
+| `net_mx_RMON.h` | 1 | `rmon` | `1.3.6.1.4.1.8691.603.5.7.1.1` | private/mxSwitching.mib |
+| `net_mx_rc.h` | 1 | `mxrc` | `1.3.6.1.4.1.8691.602.7.4.1.1` | private/mxRelayC.mib |
+
+---
+
+## 合計(不含 dlmod)
+
+| | 檔案 | entry |
+|---|---|---|
+| `iss_build == 1` | 45 | **1391** |
+| `iss_build == 0` | 25 | **753** |
+| 合計 | 69 | **2144** |
+
+> **`iss_build == 1` 的 1,391 與 DUT 實測「ISS 服務 1391 個 OID」完全吻合。**
+
+> ⚠️ 混合檔只有 1 個:`net_mxDot1xdb.h`(1=16/0=3)
+
+---
+
+## dlmod —— 第四條路(獨立 plugin)
+
+dlmod 是獨立編譯的 `.so`,由 snmpd 以 `dlmod <name> /etc/moxa/netsnmp/plugin/*.so` 載入,
+自行向 net-snmp 註冊 OID。OID root 取自對應 `.mib` 的 **MODULE-IDENTITY**。
+
+⚠️ **`.mib` 的對應依模組名判定,未逐一驗證** —— 與上兩表用 OID 實際比對不同,可信度較低。
+
+### 啟用中(32 個)
+
+| dlmod | OID root | 對應 .mib |
+|---|---|---|
+| `config_encryption` | — | private/mxConfigEncryption.mib |
+| `dai` | — | private/mxDai.mib |
+| `dhcprelay` | `1.3.6.1.4.1.8691.602.2.3` | private/mxDhcpRelay.mib |
+| `dhcpsnp` | — | private/mxDhcpSnp.mib |
+| `eip` | `1.3.6.1.4.1.8691.602.1.10` | private/mxEip.mib |
+| `iec62439_2` | — | 標準 MIB 或未對應 |
+| `ieee8021mstp` | — | 標準 MIB 或未對應 |
+| `ipsg` | — | private/mxIpsg.mib |
+| `locator` | `1.3.6.1.4.1.8691.602.8.5` | private/mxLocator.mib |
+| `macsec` | — | private/mxMacsec.mib |
+| `modbustcp` | `1.3.6.1.4.1.8691.602.1.9` | private/mxModbusTcp.mib |
+| `moxa_1588` | — | private/mx1588.mib |
+| `moxa_c37_238` | — | private/mxIeeeC37238Profile.mib |
+| `moxa_iec61850` | — | private/mxIec6185093Profile.mib |
+| `moxa_ptp` | `1.3.6.1.4.1.8691.602.3.3` | private/mxPtp.mib |
+| `multicastrouting` | `1.3.6.1.4.1.8691.605.4.1` | private/mxMulticastRouting.mib |
+| `mxMcp` | — | private/mxMcp.mib |
+| `mxgoosecheck` | — | private/mxGooseCheck.mib |
+| `mxlp` | — | private/mxLp.mib |
+| `mxmstp` | — | private/mxMstp.mib |
+| `poe` | `1.3.6.1.4.1.8691.608` | private/mxPoe.mib |
+| `profinet` | `1.3.6.1.4.1.8691.602.1.11` | private/mxProfinet.mib |
+| `ptpbase` | — | 標準 MIB 或未對應 |
+| `relay` | `1.3.6.1.4.1.8691.602.7.4` | private/mxRelayC.mib |
+| `relay_command` | `1.3.6.1.4.1.8691.602.7.4` | private/mxRelayC.mib |
+| `systemUtilization` | `1.3.6.1.4.1.8691.602.1.3` | private/mxSysUtilSvr.mib |
+| `mxlpStatus` | — | private/mxLp.mib |
+| `systemInformationStatus` | `1.3.6.1.4.1.8691.602.1.1` | private/mxSystemInfo.mib |
+| `time_info` | `1.3.6.1.4.1.8691.602.3.5` | private/mxTimeInfo.mib |
+| `time_setting` | `1.3.6.1.4.1.8691.602.3.2` | private/mxTimeSetting.mib |
+| `time_zone` | `1.3.6.1.4.1.8691.602.3.1` | private/mxTimeZone.mib |
+| `ui_service_management` | `1.3.6.1.4.1.8691.602.5.1` | private/mxUiServiceMgmt.mib |
+
+### 已停用 —— `.conf` 的 `dlmod` 行已註解(4 個)
+
+| dlmod | OID root | 對應 .mib | 現況 |
+|---|---|---|---|
+| `mms_setting` | `1.3.6.1.4.1.8691.602.1.8.1` | private/mxMms.mib | **已由 framework subagent 服務**;對映定義在 `net_mxMms.h`(4 entry,`iss_build=0`) |
+| `fiber_check` | `1.3.6.1.4.1.8691.603.5.3` | private/mxFiberCheck.mib | **已由 framework subagent 服務**;對映定義在 `net_mxFiberCheck.h`(22 entry,`iss_build=0`) |
+| `fiber_check_event` | `1.3.6.1.4.1.8691.602.7.1.2` | private/mxPorte.mib | **已由 framework subagent 服務**(2026-08-12);欄位併入 `net_mx_event_port.h` 的 group `.6` |
+| `systemInformation` | `1.3.6.1.4.1.8691.602.1.1` | private/mxSystemInfo.mib | ⚠️ **去向未確認** —— 不在 `g_reuse_srcs[]`,也不在 framework subagent 註冊清單 |
+
+> **`mxMms` / `mxFiberCheck` / `fiberCheckEvent` 雖然有 `net_*.h`,仍列在本表** ——
+> 它們的來源是 dlmod 這條路,與上兩表「原生就在 `ies-auto-mibs`」的群組定位不同。
+
+> ⚠️ **「模組數減少」不等於「子樹全部搬走」**:`systemInformation` 另有 `status_system_information.conf` 仍在載入,只搬了 config 半邊。

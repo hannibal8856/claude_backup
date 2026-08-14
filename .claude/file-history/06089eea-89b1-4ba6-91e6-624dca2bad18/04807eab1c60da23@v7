@@ -1,0 +1,113 @@
+SILENCE=@
+
+# common
+PWD=${shell pwd}
+APP_NAME=plugin_moxa_aide
+SYSTEMD_PATH?=/usr/lib/systemd/system
+MULTI_USER_WANTS_PATH?=/etc/systemd/system/multi-user.target.wants
+USR_SBIN_PATH=usr/sbin
+BUILD_PATH=${PWD}/build
+
+# cli
+CLI_PATH=${PWD}/cli
+CLI_PLUGIN_PATH?=/etc/moxa/app-moxa-cli/plugin/
+
+# document
+DOC_PATH=${PWD}/document
+DOC_CONF=aide.conf
+
+# app
+# Use DOCKER_VERSION to check if in docker or not
+DOCKER_VERSION := $(shell docker --version &>/dev/null)
+
+# Note: Must be in docker
+ifneq ("$(DOCKER_VERSION)","")
+$(error If you want to build for dut, please run the command in docker)
+endif
+
+TARGET?=armv7-unknown-linux-gnueabihf
+APP=app_moxa_aide
+APP_PATH=${PWD}/app
+APP_DOC_PATH=${PWD}/app/document
+APP_SERVICE=app_moxa_aide.service
+APP_UPDATE_SERVICE=app_moxa_aide_update.service
+
+# openssl
+OPENSSL_DIR := ${PWD}/../libopenssl-1.1.1zb
+export ARMV7_UNKNOWN_LINUX_GNUEABIHF_OPENSSL_INCLUDE_DIR := ${OPENSSL_DIR}/include/openssl
+export ARMV7_UNKNOWN_LINUX_GNUEABIHF_OPENSSL_LIB_DIR := ${OPENSSL_DIR}
+export ARMV7_UNKNOWN_LINUX_GNUEABIHF_OPENSSL_NO_VENDOR := y
+
+.PHONY: all install clean test app
+
+all: app \
+	${BUILD_PATH}/cli/plugin_cli_moxa_integrity.so \
+	rust_clippy_scan
+
+app:
+	cd ${APP_PATH} && cargo build --release --target=${TARGET}
+
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	${SILENCE}cd framework && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR}
+	${SILENCE}cd framework && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --message-format=json > ${PWD}/rust_clippy_scan_result/${APP_NAME}.json
+endif
+
+install:
+	# cli
+	${SILENCE}mkdir -m 740 -p ${DESTDIR}/${CLI_PLUGIN_PATH}
+	${SILENCE}install -m 755 ${BUILD_PATH}/cli/plugin_cli_moxa_integrity.so ${DESTDIR}/${CLI_PLUGIN_PATH}
+
+	# document
+	$(SILENCE)install -m 644 $(DOC_PATH)/${DOC_CONF} ${DESTDIR}/${USR_SBIN_PATH}
+
+	# app
+	cd ${APP_PATH} && cp target/${TARGET}/release/${APP} /tmp/.
+	cd ${APP_PATH} && install -m 550 target/${TARGET}/release/${APP} ${DESTDIR}/${USR_SBIN_PATH}/.
+
+	# app - document
+	${SILENCE}mkdir -p ${DESTDIR}/$(SYSTEMD_PATH)
+	$(SILENCE)install -m 644 ${APP_DOC_PATH}/${APP_SERVICE} $(DESTDIR)/$(SYSTEMD_PATH)/.
+	$(SILENCE)install -m 644 ${APP_DOC_PATH}/${APP_UPDATE_SERVICE} $(DESTDIR)/$(SYSTEMD_PATH)/.
+	
+	$(SILENCE)mkdir -m 740 -p $(DESTDIR)/$(MULTI_USER_WANTS_PATH)
+	$(SILENCE)ln -fs $(SYSTEMD_PATH)/${APP_SERVICE} $(DESTDIR)/$(MULTI_USER_WANTS_PATH)/.
+	$(SILENCE)ln -fs $(SYSTEMD_PATH)/${APP_UPDATE_SERVICE} $(DESTDIR)/$(MULTI_USER_WANTS_PATH)/.
+
+clean:
+	# document
+	$(SILENCE)rm -f ${DESTDIR}/${USR_SBIN_PATH}/${DOC_CONF}
+
+	# app
+	$(SILENCE)rm -f ${DESTDIR}/${USR_SBIN_PATH}/${APP}
+
+	# app - document
+	$(SILENCE)rm -f $(DESTDIR)/$(SYSTEMD_PATH)/${APP_SERVICE}
+	$(SILENCE)rm -f $(DESTDIR)/$(SYSTEMD_PATH)/${APP_UPDATE_SERVICE}
+	$(SILENCE)rm -f $(DESTDIR)/$(MULTI_USER_WANTS_PATH)/${APP_SERVICE}
+	$(SILENCE)rm -f $(DESTDIR)/$(MULTI_USER_WANTS_PATH)/${APP_UPDATE_SERVICE}
+
+test:
+
+
+${BUILD_PATH}/cli:
+	mkdir -p $@
+
+${BUILD_PATH}/cli/plugin_cli_moxa_integrity.so: ${BUILD_PATH}/cli \
+							${BUILD_PATH}/cli/cli_integrity.def.o \
+							${BUILD_PATH}/cli/cli_integrity.o
+	${CC} -shared -Wl,-soname,plugin_cli_moxa_integrity.so.1 -o $@ $(filter %.o,$^)
+
+${BUILD_PATH}/cli/cli_integrity.def.o: ${BUILD_PATH}/cli \
+							${BUILD_PATH}/cli/cli_integrity.def.c
+	${CC} ${CFLAGS} -c -fPIC -o $@ $(filter %.c,$^)
+
+${BUILD_PATH}/cli/cli_integrity.def.c: ${BUILD_PATH}/cli \
+							${CLI_PATH}/cli_integrity.def
+	cmdscan $(filter %.def,$^) $@ clicmds_plugin.h
+
+${BUILD_PATH}/cli/cli_integrity.o: ${BUILD_PATH}/cli \
+							${CLI_PATH}/cli_integrity.c
+	${CC} ${CFLAGS} -c -fPIC -o $@ $(filter %.c,$^)

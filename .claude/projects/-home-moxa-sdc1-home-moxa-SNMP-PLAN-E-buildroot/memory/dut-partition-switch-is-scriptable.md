@@ -1,0 +1,49 @@
+---
+name: dut-partition-switch-is-scriptable
+description: 切換 DUT partition 用 `printf 'Y\nY\n' | /moxa/fwr_change.sh`；mainline NOS 7 也進 Linux shell，所以兩邊都能用 dut-console 驅動
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: fd443d06-0324-4a72-8f27-783cc900eba7
+  modified: 2026-08-05T16:15:47.194Z
+---
+
+**切換 partition：在 DUT 上執行 `/moxa/fwr_change.sh`**。
+
+> **2026-08-06 更正**：腳本名是 `fwr_change.sh`，不是 `firmware_change.sh`；而且兩個
+> `Y` 是**互動 `read` 的答案，不是命令列參數**。非互動跑法：
+> `printf 'Y\nY\n' | /moxa/fwr_change.sh`。它 `fw_setenv fwrbootpart` 把 1↔2 對調後
+> reboot。壞掉時救援：`fw_setenv fwrbootpart 1`（或 2）。全文見
+> [[dut-swu-firmware-update-procedure]]。
+
+腳本在**執行期**的 `/moxa/` 下，不在 build 出來的 rootfs 裡（`output/target/moxa/`
+是空的掛載點），所以在主機端 build tree 裡找不到它是正常的。
+
+**兩個 partition 的登入行為不同 —— 這點 2026-08-05 實測更正過一次：**
+
+| partition | 登入後停在 | `dut-console` skill |
+|---|---|---|
+| Plan E（含 `admin_sh_develop`） | **Linux shell** | 可用 |
+| mainline（Build 2026_0805_1224） | **`moxash`**（`moxa#`） | **不可用，會卡死** |
+
+差異來自 `plugin_moxa_user_account` 的 `admin_sh_develop` 分支只在 Plan E build 裡，
+它把預設 shell 導到 `/bin/sh`。mainline 沒有這個改動。
+
+**所以切到 mainline 之後絕對不要對它跑 `dut-console`**——wrapper 會撞上 `moxash`
+的 prompt，重演 2026-08-04 那次卡死（救援要 expect 送 `\034`）。
+在 mainline 上要拿 Linux root：從 `moxash` 進 Linux（使用者用 `~/mmtech`），再 `su`。
+
+**Why 這件事重要：** 在此之前，「切 partition 抓對照組」被當成必須人工介入的昂貴步驟，
+plan 裡好幾處寫著 operator-only。實際上它是可腳本化的，代表：
+
+- 前後對比（同設定、換韌體）從「太貴所以退而求其次用兩個 partition 比」
+  變成可以常態執行 —— 而後者正是
+  [[snmpwalk-diff-confounded-by-dut-config]] 記的那個污染來源
+- benchmark 的 before/after 可以自動化成一支腳本，不必分兩次人工操作
+
+**How to apply:** 需要對照組時，用 `dut-console` 執行 ``printf 'Y\nY\n' | /moxa/fwr_change.sh``，
+等重開機（約 40 秒，用 SNMP 輪詢 sysUpTime 判斷回來了），跑量測，再切回去。
+切之前先確認現在在哪一版：`cat /etc/moxa/version/BUILD_TIME`。
+
+**注意**：`show running-config` 仍然需要 `moxash`（要真 TTY），這條沒有變，
+設定 snapshot 還是人工。見 [[dut-console-is-linux-shell-not-moxa-cli]]。

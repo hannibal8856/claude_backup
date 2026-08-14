@@ -1,0 +1,132 @@
+# SNMP Plan E:三棵表遷移 + framework 讀取路徑架構定論
+
+## TL;DR
+把 mxTrap 依 ADR-0006 遷到 Plan E(DUT 驗證通過);再嘗試 mxIpIf、mxTurboRingV2 時撞到同一道牆,最終挖出並釐清 **framework AgentX subagent 的 GET 資料讀取架構問題**,收斂成 **ADR-0007**:framework 的 GET 應**依 URI flag 三路分流**、忠實重用 in-master 既有的 REST 讀取路徑,而不是 in-process 讀那份不完整的 `running_config`。
+
+本 session 從「一張表的實作」一路做到「整個讀取層的架構決策」,是這條遷移路線的關鍵轉折點。下一步是實作 ADR-0007,讓 mxIpIf / mxTurboRingV2 真正生效,並讓未來每張表的遷移變成低成本。
+
+---
+
+## 背景與目標
+- **大方向**:把 iss0 的 SNMP OID 從 in-master(snmpd 內建 ies_auto_mibs)遷到 **app_moxa_framework 的 AgentX subagent**。
+- **Plan E 範式**(ADR-0004/0006):framework 用唯讀 `table_iterator` 服務 **GET**(快、live);**SET** 留 in-master,重用既有 C `readCreate_v2` 原子引擎(不重寫 rowStatus)。
+- **本 session 起點**:依 ADR-0006 實作 **mxTrap** 遷移(host table GET→iterator、rowStatus SET→in-master)。
+- **延伸目標**:把同一範式套到更多表(mxIpIf、mxTurboRingV2),並降低每張表的遷移 effort。
+
+這條路線的核心價值是「GET 快又 live、SET 用久經驗證的 C 引擎」,同時讓 framework 能對特殊型別(IP/MAC)做正確渲染。mxTrap 是第二張成功的表(第一張是前一 session 的 trustAccess)。
+
+---
+
+## 參考資料 / 來源
+- **ADR**(`~/mds4xgl3/.adr/`):ADR-0002(資料層)、ADR-0004(native dual-reg + table_iterator)、ADR-0005(iss0 end-state)、**ADR-0006(mxTrap→Plan E,本 session 實作)**、**ADR-0007(本 session 新建)**。
+- **關鍵原始碼**:`app_moxa_framework/src/snmp_subagent.rs`、`3rdparty_net_snmp/ies-auto-mibs/*`(net_mx_*.h、config_set.c、moxa_snmp_handle_util.c)、`lib_moxa_ies_auto_mibs/src/{mapping_reuse,config_set}.c`、`lib_moxa_framework_uri/`、`rust_moxa_config_layer/`。
+- **DUT**:MDS-G4000-L3-4XGS,192.168.127.253;mainline 對照組 NOS v7.0 Build 2026_0713_1621。
+- **pcap**(`~/pcap/`):agentx-mxIpIfdb.pcap、agentx-mxTurboRingV2*.pcap(AgentX 流量,手解 varbind)。
+- **MIB**:`snmp_moxa_mib/private/{mxIpIf,mxTrv2}.mib`。
+
+所有結論都以 DUT snmpwalk/snmpset/curl + pcap 手解為證,不靠靜態推測 —— 這是本專案一貫的實證方法。
+
+---
+
+## 討論脈絡
+
+### 1. mxTrap:問題 → 決定
+- **問題**:ADR-0001 曾在 framework 用 Rust 重寫 rowStatus createAndGo(脆弱、踩 ADR-0002 邊界)。
+- **決定(ADR-0006)**:host table GET 走 framework iterator、SET 收回 in-master 既有 C 引擎;2 個 scalar 維持 Plan D。→ 實作完成、**DUT 全綠**。
+
+### 2. mxIpIf:問題 → 診斷 → 擱置
+- **現象**:遷移後 walk 仍回舊值(col2=0),不是我 iterator 的值。
+- **診斷**:pcap 手解證實 framework iterator 回 **endOfMibView(0 列)** → in-master 在服務。
+- **根因**:framework in-process 讀 `ipInterface/l3VlanIfTable` = **空**(config 檔有、in-master 讀得到)。→ **Parked**,等更底層的修法。
+
+### 3. mxTurboRingV2:問題 → 發現不是 Plan E
+- **原以為**:MAC 型別修正。**實際**:MAC 全是 RONLY 狀態欄(designatedMaster)。
+- **現象**:framework ring 狀態表 0 列;mainline 有 2 列、designatedMaster=6-byte MAC。
+- **根因**:framework in-process status = `{ring1,ring2}` **物件**,SNMP 期望**陣列** index-table → 對不上。
+
+### 4. 收斂:兩個 blocker 是同一個病
+- **共同點**:framework 執行期讀到的(config 或 status)≠ in-master/mainline 能拿到的完整/正確資料。
+- **對照**:in-master 一律走 `LibFrameworkUri` HTTP GET 到 nginx:80,依 flag 去 `/api/v1/status` 或 `/api/v1/setting` —— 完整、對所有 module 一致。
+
+### 5. 「繞回 :80 是不是自我迴圈?」→ curl 實測定生死
+- **疑慮**::80 → nginx → 繞回 app_moxa_framework:9759,會不會拿到同一份不完整資料?
+- **實測**:`curl :80 /api/v1/setting/data/ipInterface/l3VlanIfTable` → **回完整 vlan1/vlan222**。→ config_layer 的 REST handler 比 subagent in-process 完整,**自我迴圈疑慮推翻**。
+- **副產物**:status endpoint 是 named-key(ring1/ring2),`.../ring` 回 "Invalid Request URI" → turboRing 是另一個 named-key vs 陣列的問題。
+
+每個轉折都由一個具體證據推動(pcap varbind、curl 回傳、mainline 對照),而非猜測;好幾次原本的假設被實測推翻(如「empty table 會 hang」「self-loop 無效」)。
+
+---
+
+## 結論與決策
+
+- **mxTrap → Plan E 完成**:因為 in-master C rowStatus 引擎現成,重用比 Rust 重寫省維護且原子正確。DUT 驗證 createAndGo/destroy + live GET。
+- **mxIpIf 擱置(Parked)**:iterator 是 no-op(讀不到 config),但沒破壞既有功能(GET/SET 仍 in-master);col2 選擇修正成真正 VLAN id(而非沿用 in-master 的 atoi bug=0)。
+- **mxTurboRingV2 MAC 修正在位但未生效**:val_type 0xf4 可辨識、render 對齊 in-master;但 status 表 0 列(形狀問題)使它觸發不到。
+- **ADR-0007(Accepted)= 根解**:framework GET **依 URI flag 三路分流**(FIXED_VALUE 本地 / URI_STATUS→`/api/v1/status` / 預設→`/api/v1/setting`),用既有 `LibFrameworkUri` handle+token,新增 `ies_config_get`/`ies_status_get` 對稱補齊(SET 早就走這條)。
+- **為什麼不是 in-process**:in-process 讀 `running_config`/raw status **正是** incompleteness(mxIpIf)與 shape-mismatch(turboRing)的病根;REST endpoint 完整(curl 已證)。
+- **效益**:未來遷移降為「註冊 OID + 依 flag REST 讀」= 低 effort;一次解 config 與 status 兩類。**代價**:GET 重新引入 HTTP loopback(不比 mainline 差)。
+
+核心的認知轉變是:把問題從「這張表為什麼空」提升到「framework 的 GET 讀取層本身該怎麼設計」—— 一旦看清 in-master 的三路 flag 模型,mxIpIf 與 turboRing 就成了同一個決策的兩個實例。
+
+---
+
+## 後續待辦 / 開放問題
+- **實作 ADR-0007**(下個 session 主任務):C `ies_config_get`/`ies_status_get`(config_set.c 範式)+ Rust wrapper + snmp_subagent GET 依 flag 分流。
+- **turboRing status named-key 收尾**:先 curl `/api/v1/status/turboringv2/ring1` 與 `/turboringv2` 確認可定址形式,決定 row→`ring<N>` 對映寫法。
+- **重驗**:ADR-0007 生效後,mxIpIf 解封(col2=VLAN id)、mxTurboRingV2(designatedMaster=6-byte)、並確認沒破壞 mxTrap/trustAccess。
+- **thread-safety**:`s_handle` 是 config_set.c lazy singleton,AgentX 自己的 thread 與 SET 共用要確認可重入或加鎖。
+- **開放**:hybrid(in-process 快取 + fallback REST)是否值得做為效能優化(uniform 為主決策,hybrid 選配)。
+- **commit 狀態**:本 session 所有改動**已 commit 在 branch `snmp-plan-E`**(四個 package sub-repo);外層 buildroot/dl 在 2023.02.11_develop。
+
+---
+
+## 附錄
+
+### A. DUT 驗證指令
+```bash
+# mxTrap host table (Plan E):GET 走 framework、SET 走 in-master
+snmpwalk -v2c -c public  192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+snmpset  -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 i 4   # createAndGo
+snmpset  -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 i 6   # destroy
+
+# mxIpIf / turboRing status
+snmpwalk -v2c -c public  192.168.127.253 .1.3.6.1.4.1.8691.605.1.1.1.1        # mxIpIf
+snmpwalk -v2c -c public  192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.2.1        # turboRing ring status
+
+# ADR-0007 關鍵驗證::80 config/status endpoint 完整性
+TOKEN=$(cat /moxa/run/auto_mibs/s_token)
+curl -s -H "Authorization: $TOKEN" "http://127.0.0.1/api/v1/setting/data/ipInterface/l3VlanIfTable"
+curl -s -H "Authorization: $TOKEN" "http://127.0.0.1/api/v1/status/turboringv2"
+```
+
+### B. in-master 三路讀取模型(`entry_handle_generate_uri_value_file()`)
+| flag | 路徑 |
+|---|---|
+| `IES_FLAG_SNMP_URI_FIXED_VALUE` | 本地取值,不走 nginx |
+| `IES_FLAG_SNMP_URI_STATUS`(或 uri `stat/` 前綴) | HTTP → nginx:80 → `/api/v1/status/<uri>` |
+| 預設 | HTTP → nginx:80 → `/api/v1/setting/data/<uri>` |
+
+### C. 兩條讀取路徑對照(架構核心)
+```
+in-master (完整):
+  SNMP → ies_auto_mibs → LibFrameworkUri(127.0.0.1:80) → nginx → /api/v1/{status|setting} → 完整 config/status
+
+framework subagent GET (窄，本 session 病根):
+  SNMP → snmpd → AgentX → framework → in-process config_operation/status_operation(configs.running_config)
+       → running_config 由 check_and_fix_config(plugins) 建構 = 較窄視圖 / raw status 形狀不符
+
+ADR-0007 決策:framework GET 改走 in-master 那條(依 flag → /api/v1/{status|setting}),取代 in-process
+```
+
+### D. 關鍵型別/常數
+- `SNMP_DATA_TYPE_MAC_ADDRESS = 0xf4`(distinct from OCTET 0x04 / IP 0x40 / INT 0x02),`MapEntry.val_type` 原封帶著 → framework 可辨識 MAC。
+- MAC 轉換(對齊 in-master `moxa_snmp_handle_util.c:845`):取字串前 6 組 colon hex,忽略多的組。
+- pcap AgentX varbind type:endOfMibView=0x82、noSuchObject=0x80、noSuchInstance=0x81(tshark 常標 Malformed,需手解)。
+
+### E. commit(branch `snmp-plan-E`)
+```
+app_moxa_framework:      d1183be Update mxTurboRingV2 / 109b8da mxIpIfdb & bug fix for ifVlanId / 35b2097 Move mxTrap
+lib_moxa_rust_snmp_agentx: bdd6ec4 Update mxTurboRingV2 (set_octet_bytes)
+3rdparty_net_snmp:       093971e Move mxTrap (INIT_ENTRY restore)
+lib_moxa_snmp_agentx:    72ec530 table_iterator (前 session)
+```

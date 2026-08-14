@@ -1,0 +1,14 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:36 $ /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.3.1.0
+iso.3.6.1.4.1.8691.603.3.4.3.1.0 = No Such Object available on this agent at this OID
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:36 $ /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.3.2.0
+iso.3.6.1.4.1.8691.603.3.4.3.2.0 = No Such Object available on this agent at this OID
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:36 $ /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.2.2.1.0
+iso.3.6.1.4.1.8691.603.3.4.2.2.1.0 = INTEGER: 1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:36 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4
+iso.3.6.1.4.1.8691.603.3.4.1.1.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.603.3.4.1.3.2.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.603.3.4.1.3.3.0 = INTEGER: 4
+iso.3.6.1.4.1.8691.603.3.4.1.4.1.0 = INTEGER: 0
+iso.3.6.1.4.1.8691.603.3.4.1.4.2.0 = INTEGER: 60
+iso.3.6.1.4.1.8691.603.3.4.2.2.1.0 = INTEGER: 1

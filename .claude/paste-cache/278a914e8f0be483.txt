@@ -1,0 +1,57 @@
+dlmod 動態載入 .so plugin
+
+  snmpd 透過 ucd-snmp/dlmod 模組,從 snmpd.conf 的 dlmod directive 載入 .so。每個 plugin 在自己的
+  init_*() 內呼叫 netsnmp_register_handler/scalar(透過 lib_moxa_snmp_plugin),把自己的 OID 註冊進 snmpd
+   dispatch tree。
+
+  掃到的 plugin_moxa_* 目錄(19 個,30 個 .c 檔):
+
+  ┌────────────────────────────────┐
+  │              目錄              │
+  ├────────────────────────────────┤
+  │ plugin_moxa_dai                │
+  ├────────────────────────────────┤
+  │ plugin_moxa_dhcp_relay         │
+  ├────────────────────────────────┤
+  │ plugin_moxa_dhcpsnp            │
+  ├────────────────────────────────┤
+  │ plugin_moxa_fiber_check        │
+  ├────────────────────────────────┤
+  │ plugin_moxa_goose_check        │
+  ├────────────────────────────────┤
+  │ plugin_moxa_iec62439_2         │
+  ├────────────────────────────────┤
+  │ plugin_moxa_ipsg               │
+  ├────────────────────────────────┤
+  │ plugin_moxa_locator            │
+  ├────────────────────────────────┤
+  │ plugin_moxa_lp                 │
+  ├────────────────────────────────┤
+  │ plugin_moxa_macsec             │
+  ├────────────────────────────────┤
+  │ plugin_moxa_mms                │
+  ├────────────────────────────────┤
+  │ plugin_moxa_mstp               │
+  ├────────────────────────────────┤
+  │ plugin_moxa_multicast_routing  │
+  ├────────────────────────────────┤
+  │ plugin_moxa_multicoupling      │
+  ├────────────────────────────────┤
+  │ plugin_moxa_poe_agent          │
+  ├────────────────────────────────┤
+  │ plugin_moxa_ptp                │
+  ├────────────────────────────────┤
+  │ plugin_moxa_relay              │
+  ├────────────────────────────────┤
+  │ plugin_moxa_system_information │
+  ├────────────────────────────────┤
+  │ plugin_moxa_time               │
+  └────────────────────────────────┘
+
+  ▎ snmpd.conf 內目前啟用的 dlmod(從 .conf 樣本 grep 出):
+  ▎ arpTable、email、systemInformation、systemUtilization、trust_access 等。實際載入的清單視 
+  ▎ BR2_PACKAGE_PLUGIN_MOXA_* 編譯設定而定。
+
+  每個 plugin 內部基本上都長同個樣子:
+  init_xxx() → LibSnmpPlugin_Init() → netsnmp_register_scalar/table
+  handler → LibFrameworkUri_GetUri/PostUri/PatchUri → HTTP → framework

@@ -1,0 +1,29 @@
+#!/bin/sh
+# usage: swap_fw.sh on|off
+# Shadow /usr/bin/app_moxa_framework with the freshly built one to test the Rust
+# side without a full flash. Non-destructive: bind mount only, reboot undoes it.
+BIN=/usr/bin/app_moxa_framework
+UNIT=$(systemctl list-units --type=service --no-legend 2>/dev/null | grep -o '[a-z_]*framework[a-z_]*\.service' | head -1)
+[ -z "$UNIT" ] && UNIT=app_moxa_framework.service
+echo "--- unit: $UNIT"
+
+systemctl stop "$UNIT"
+sleep 2
+grep -q "$BIN" /proc/mounts && umount "$BIN" 2>/dev/null
+
+if [ "$1" = "on" ]; then
+    chmod +x /tmp/app_moxa_framework
+    mount -o bind /tmp/app_moxa_framework "$BIN" || echo "!! BIND FAILED"
+fi
+echo "--- shadow:"; grep 'app_moxa_framework' /proc/mounts || echo "(none, shipped binary)"
+echo "--- md5 at $BIN:"; md5sum "$BIN"
+
+systemctl start "$UNIT"
+i=0
+while [ $i -lt 20 ]; do
+    /usr/bin/snmpget -v2c -c public -t 2 -r 1 127.0.0.1 .1.3.6.1.2.1.1.3.0 >/dev/null 2>&1 && break
+    i=$((i+1)); sleep 3
+done
+echo "--- snmpd responding after $((i*3))s"
+pgrep -l -f app_moxa_framew | head -2
+echo "### DONE"

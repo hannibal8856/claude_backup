@@ -1,0 +1,25 @@
+#!/bin/bash
+# walkmeasure.sh <label> [reps]
+# Captures PC-side SNMP traffic while walking mxPort, saves pcap to ~/pcap/.
+LABEL="$1"; REPS="${2:-5}"
+D=192.168.127.253
+OUT="$HOME/pcap/2026-08-08_mxPort_${LABEL}.pcap"
+mkdir -p "$HOME/pcap"
+
+sudo -n /usr/sbin/tcpdump -i eth3 -s0 -U -Z "$USER" -w "$OUT" "host $D and udp port 161" 2>"$OUT.tcpdump.log" &
+sleep 3
+pgrep -f "tcpdump -i eth3" >/dev/null || { echo "!! tcpdump 沒起來"; cat "$OUT.tcpdump.log"; exit 1; }
+
+echo "=== $LABEL : $REPS x snmpwalk .1.3.6.1.4.1.8691.603.1.1 ==="
+for i in $(seq 1 "$REPS"); do
+    S=$(date +%s.%N)
+    N=$(/usr/bin/snmpwalk -v2c -c public -On -t 5 "$D" .1.3.6.1.4.1.8691.603.1.1 2>/dev/null | wc -l)
+    E=$(date +%s.%N)
+    printf 'run %d: %6.3f s  %s varbinds\n' "$i" "$(echo "$E - $S" | bc)" "$N"
+    sleep 1
+done
+
+sleep 2
+sudo -n pkill -f "tcpdump -i eth3" 2>/dev/null
+sleep 1
+echo "pcap -> $OUT ($(stat -c%s "$OUT" 2>/dev/null) bytes)"

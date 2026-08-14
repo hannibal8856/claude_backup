@@ -1,0 +1,135 @@
+# ADR-0019: 補正 ADR-0015 的 gate 1 —— 「模組」身分從 `db.h` 路徑回推;「沒編進 image」的根因是 profile 的 compile switch
+
+Status:
+  **Accepted(2026-08-09)** —— 補正 **ADR-0015** 的 gate 1 判準敘述,並補上其根因。
+  **ADR-0015 的決策本身(兩道關卡、順序、以及據此得到的可委派/不可委派名單)完全成立、未被取代。**
+  依本專案慣例(ADR-0017 第 7 行)**不改寫 ADR-0015 的 Context / Decision / Alternatives**,
+  僅在其 Status 加一行指向本 ADR。
+
+Date: 2026-08-09
+
+Context:
+  2026-08-09,另一個 session(`snmp-plan-E-edsg4000`,把 Plan E port 到 EDS-G4000 /
+  am335x + Broadcom)依 ADR-0015 執行 gate 1,**三個代理指標全部失敗**,
+  且三個都無法區分 EDS 與 MDS 兩棵樹:
+
+  | 他試的指標 | 結果 |
+  |---|---|
+  | 以候選名 `<mod>db/` 去找 `<mod>*.o` | `stdethdb/`、`ifmibdb/` 湊巧成立,但 `mxportdb/`、`mxrstpdb/` **兩棵樹都找不到** |
+  | 盤點 `gen_output/net_*db.h` | EDS 178、MDS 178,**集合完全相同** |
+  | 盤點 `ISS.exe` 的 URI 字串 | EDS 178、MDS 178,**集合完全相同** |
+
+  但兩棵樹的 ISS 子系統確實不同(EDS 1388 個 `.o` vs MDS 1741),所以指標本身是壞的。
+
+  追下去發現 ADR-0015:28-31 的敘述有歧義:
+
+  > 比對該模組在 `net_*.h` 的 entry OID 與 ISS `<mod>db.h` 宣告的物件 OID,
+  > **且只採用有編進 image 的 ISS 模組** —— 判定方式是該模組目錄在
+  > `output/build/app_moxa_iss_10_1_0-custom/` 底下有沒有編出 `.o`。
+
+  「**該模組目錄**」沒有定義是怎麼決定的。原作者心裡是「宣告該 OID 的 `db.h` 所在的模組」,
+  但讀者自然會理解成「候選名 `<mod>db/` 對應的目錄」—— 兩者毫無對應關係。
+
+Decision:
+  補正兩件事。
+
+  **① 模組身分一律從 `db.h` 的路徑回推,不從候選名推**
+
+  候選名 `<mod>db/` 是 **mod_uri 前綴**,既不是檔名也不是目錄名。可執行判斷式:
+
+  ```
+  候選 <mod>db/:
+    1. 蒐集 ISS 宣告來源,只用這個 pattern:
+         find dl/app_moxa_iss_10_1_0/code/future -ipath '*/inc/*db.h'
+       ⚠️ 必須排除 code/uri_tools/iss_uri_snmp_oct_table_*db.h
+          —— 那是 URI 工具產生的超集(本樹 464 - 430 = 34 份),與有沒有編進 image 無關。
+          上面指標 2、3 命中的就是這種超集,所以跨產品比較當然一樣。
+    2. 對每個 header H:
+         moddir = dirname(dirname(H))        # 去掉 /inc/<file>
+         built  = output/build/app_moxa_iss_10_1_0-custom/<moddir> 底下有沒有 *.o
+    3. 只保留 built 模組宣告的物件 OID
+    4. 涵蓋率 = 候選 entry 欄位 OID ∩ 上述集合 / 全部 entry 欄位 OID
+  ```
+
+  **比的是 OID,不是名字。** 本樹實測,這正是名稱比對為何失敗:
+
+  | header | 所屬模組目錄 | `.o` |
+  |---|---|---|
+  | `mxPortdb.h` | `code/future/ISS/common/system` | 32 |
+  | `mxRSTPdb.h` | `code/future/stp/rstp` | 45 |
+  | `ifmibdb.h` | `code/future/cfa2` | 70 |
+  | `stdethdb.h` | `code/future/cfa2` | 70 |
+  | `mxIgmpdb.h` | `code/future/snooping/snpcore` | **0** |
+  | `fsladb.h` | `code/future/la` | 28 |
+
+  `mxPortdb` 的 obj 全在 `ISS/common/system/obj/`,裡面**沒有任何 `mxport*.o`**;
+  `ifmibdb` 與 `stdethdb` **共用同一個模組** `cfa2`。名稱比對必然失敗。
+
+  **② 0% 有兩種成因,不可混為一談**
+
+  - **模組沒編**:`mxigmpdb/`。`mxIgmpdb.h` 在 `snooping/snpcore/`,該目錄只有 `inc/`
+    和 `src/`、**沒有 `obj/`**。(注意 `code/future/igmp/` 有 50 個 `.o`,但那是
+    **另一個模組**,宣告的是 `fsigmpdb.h` 標準 IGMP,不是 `mxIgmpdb.h`。
+    「igmp 沒編」這個說法是錯的,正確說法是「宣告 mxIgmp 的 `snooping/` 沒編」。)
+  - **模組有編但 OID 不涵蓋**:`fsladb/` / `fscfadb/` / `fsvlandb/`。
+    `code/future/la` 有 28 個 `.o`,是 **step 4** 的 OID 比對否決的,與 build 無關。
+
+  → gate 1 的兩個 step **都要跑**,只跑一個會漏掉另一種。
+
+  **③ 根因:`.o` 只是代理指標,真正的決定者是 profile 的 compile switch**
+
+  已核實的鏈路:
+
+  ```
+  <profile> 設定            IGS = YES / NO
+        ↓
+  LR/make.rule:1048-1049    ifeq (${IGS}, YES)
+                            SYSTEM_COMPILATION_SWITCHES += -DIGS_WANTED
+        ↓
+  LR/Makefile:730, 1626     ifeq (${IGS}, YES)  → 決定 snooping/ 要不要進 build
+        ↓
+  code/future/snooping/{igs,mlds,snpcore}   三個目錄全部 0 個 .o
+        ↓
+  snpcore/inc/mxIgmpdb.h 宣告的 OID 沒有人服務
+        ↓
+  委派 mxigmpdb/ 會直接刪掉 16 個 OID
+  ```
+
+  `LR/pkg/make.stack` 有 `IGS = NO` / `MLDS = NO` 的實例,`make.metx` 則是 `YES`,
+  可見這是產品層級的開關而非偶然。
+
+  → **對其他產品線做 gate 1 時,查 profile 的 switch 比事後數 `.o` 更直接、更早、
+  且不需要先跑一次完整 build。** `.o` 檢查仍然有效(它是結果),但只能事後做。
+
+Consequences:
+  - ADR-0015 的**結論與名單不變**:可委派 36、部分 2、不可委派 4
+    (`mxigmpdb/`、`fsladb/`、`fscfadb/`、`fsvlandb/`)。本 ADR 只改「怎麼算出來」的敘述。
+  - `code/uri_tools/iss_uri_snmp_oct_table_*db.h` **不得**用於 gate 1 的任何判定。
+  - ADR-0015:87「『有編進 image』的判定依賴 `output/build/` 是當次建置的產物;
+    換 defconfig 要重算」**依然成立且更強**:換產品線等於換 profile,整組 switch 都會變。
+  - 跨產品線 port 時,gate 1 應**先**比對 profile 的 switch 差異,再跑 OID 涵蓋比對。
+
+Open / Unknown（不要當成已知）:
+  - **`IGS` 這個變數在本次 build 中的值從哪裡來,尚未查明。**
+    `code/future/LR/` 底下**沒有任何 `IGS` 的賦值**;`LR/pkg/make.*` 那批檔案
+    **只在註解裡被提到、沒有被任何 Makefile `include`**,所以它們看起來是參考範本
+    而非本次 build 的實際輸入。實際值可能來自
+    `app_moxa_iss_10_1_0.mk:97` 傳進去的幾十個 `MOXA_*=${BR2_*}`、
+    也可能根本未定義(未定義時 `ifeq (${IGS}, YES)` 為假,結果同樣是不編)。
+    **追這一層之前,不要對外宣稱「是某個 `BR2_*` 選項關掉了 snooping」。**
+  - 另注意:`LR/myconfig.h:92` 有 `#define IGS_WANTED`。它與 Makefile 的 `IGS` 變數
+    是**兩件事**(前者影響其他模組怎麼編,後者決定 `snooping/` 目錄進不進 build),
+    看到它不等於 snooping 有編 —— 本樹就是 `myconfig.h` 有定義、但 0 個 `.o`。
+  - ADR-0015 寫的「收緊前 464 份、收緊後 228 份」**重現不出來**。用本 ADR 的 pattern
+    本樹是 **178 built / 218 not built / 396**。原始篩選是一次性 shell/awk、腳本沒留下
+    (ADR-0015:82 自己有記)。**那兩個數字不得用於對帳。**
+
+Alternatives considered:
+  - **直接改寫 ADR-0015 的 Decision** —— 最好讀,但違反本專案「不改寫已 Accepted ADR 的
+    Decision」的慣例(ADR-0017:7 明文遵守過)。否決。
+  - **寫進 ADR-0017** —— ADR-0017 的主題是「第 1 欄消失 / 完整性以 MIB 物件集合判定」,
+    補正對象是 ADR-0011,與候選篩選、編譯開關無關;併入會讓它同時談兩件不相干的事。否決。
+
+Related ADRs:
+  補正 **ADR-0015**(未取代);ADR-0013(被 ADR-0015 取代)、ADR-0010、ADR-0016。
+  慣例依據:ADR-0017。

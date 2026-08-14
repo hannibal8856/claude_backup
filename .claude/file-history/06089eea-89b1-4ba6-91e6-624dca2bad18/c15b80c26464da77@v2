@@ -1,0 +1,84 @@
+#!/bin/bash
+# EDS moxa stage A:建 branch + 清 lib .mk + defconfig _REV(不 commit,先驗證)
+set -u
+M=$HOME/edsg4000/buildroot/moxa
+BR=clippy-scan-binary-packages-3
+BASE=NOS_v6.0_EDS_develop
+cd "$M" || exit 1
+
+# 19 app keep 清單
+cat > /tmp/eds_app_keep.txt <<'EOF'
+3rdparty_net_snmp
+app_moxa_email_notification
+app_moxa_new_moxa_command_broadcast_search
+app_moxa_system_monitor
+app_moxa_token_and_user_status_daemon
+app_moxa_token_module
+app_moxa_trap_notification
+plugin_moxa_aide
+plugin_moxa_arp_table
+plugin_moxa_cli_export
+plugin_moxa_firmware_update
+plugin_moxa_hardware_interface
+plugin_moxa_locator
+plugin_moxa_md_type_detect
+plugin_moxa_mms
+plugin_moxa_relay
+plugin_moxa_user_account
+rust_moxa_build
+rust_moxa_set_iss_management_ip
+EOF
+
+# 工作樹 tracked 檔須乾淨
+if [ -n "$(git status --porcelain | grep -v '^??')" ]; then echo "ABORT: tracked 檔有未提交改動"; exit 1; fi
+git rev-parse --verify -q "origin/$BASE" >/dev/null 2>&1 || { echo "ABORT: 無 origin/$BASE"; exit 1; }
+
+git checkout -q -B "$BR" "origin/$BASE" || { echo "ABORT: checkout 失敗"; exit 1; }
+echo "branch=$(git branch --show-current)"
+
+# 清 lib .mk
+python3 - <<'PY'
+import re,glob,os
+keep=set(l.strip() for l in open('/tmp/eds_app_keep.txt'))
+pat=re.compile(r'RUST_TARGET_DIR=\$[({]BR2_MOXA_RUST_TARGET_DIR[)}]')
+ch=0
+for mk in glob.glob("package/*/*/*.mk"):
+    pkg=os.path.basename(os.path.dirname(mk))
+    txt=open(mk).read()
+    if 'rust_clippy_scan_result' not in txt or pkg in keep: continue
+    lines=txt.split("\n");out=[];i=0;n=len(lines)
+    while i<n:
+        ln=lines[i]
+        if '@if [ "${RUST_CLIPPY_SCAN_CONFIG}"' in ln:
+            blk=[ln];j=i+1
+            while j<n and lines[j].strip()!="fi": blk.append(lines[j]); j+=1
+            if j<n: blk.append(lines[j])
+            if 'rust_clippy_scan_result' in "\n".join(blk): i=j+1; continue
+        if pat.search(ln):
+            s=pat.sub('',ln).strip()
+            if s in ('','\\'):
+                if s=='' and out and out[-1].rstrip().endswith('\\'): out[-1]=out[-1].rstrip().rstrip('\\').rstrip()
+                i+=1; continue
+            ln=pat.sub('',ln).rstrip()
+        out.append(ln); i+=1
+    open(mk,"w").write("\n".join(out)); ch+=1
+print("lib .mk 清理:",ch)
+PY
+
+# defconfig _REV
+F=configs/edsg4000_defconfig
+cp "$F" /tmp/eds_defconfig.bak
+find dl -maxdepth 1 2>/dev/null  # noop
+# rust repo 清單(從 dl 取)
+ls "$HOME/edsg4000/buildroot/dl" > /tmp/eds_dl_dirs.txt
+chg=0
+while read r; do
+  key="BR2_PACKAGE_$(echo "$r" | tr 'a-z' 'A-Z')_REV"
+  grep -q "^${key}=" "$F" && { sed -i "s|^${key}=.*|${key}=\"${BR}\"|" "$F"; chg=$((chg+1)); }
+done < /tmp/eds_rust_repos_for_rev.txt
+echo "defconfig _REV 改: $chg 行"
+
+echo "--- 驗證 ---"
+echo "剩餘含 scan_result 的 .mk(應=19 app): $(git grep -l rust_clippy_scan_result -- 'package/**/*.mk' 2>/dev/null | wc -l)"
+echo "defconfig _REV=$BR 行數: $(grep -c "_REV=\"${BR}\"" "$F")"
+echo "工作樹改動檔數: $(git status --porcelain | grep -v '^??' | wc -l)"

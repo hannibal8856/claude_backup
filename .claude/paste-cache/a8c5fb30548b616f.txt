@@ -1,0 +1,27 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 10:26 $ bash tools/mxportdb_provenance.sh 192.168.127.253 all | tee -a snmpwalk/RESULT-phase2-task1.txt
+--- signal (a): watch for iss_snmp_makeup_index during a column-1 GET ---
+Run this on the DUT console (separate terminal, Linux shell) BEFORE the next step:
+  while :; do ps -eo comm | grep -q iss_snmp_makeup_index && echo CAUGHT; sleep 0.05; done
+Press enter once the watcher above is running on the DUT... 
+
+--- signal (b): 30x GET latency, column 1 vs column 2 (portconfig) ---
+  1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1
+    p50=0.007s p100=0.009s
+  1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1
+    p50=0.008s p100=0.009s
+
+--- signal (b): 30x GET latency, column 1 vs column 2 (linkupdelay) ---
+  1.3.6.1.4.1.8691.603.1.1.1.3.1.1.1
+    p50=0.007s p100=0.009s
+  1.3.6.1.4.1.8691.603.1.1.1.3.1.2.1
+    p50=0.008s p100=0.010s
+
+Interpretation:
+  [portconfig] 1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1 vs 1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1
+  [linkupdelay] 1.3.6.1.4.1.8691.603.1.1.1.3.1.1.1 vs 1.3.6.1.4.1.8691.603.1.1.1.3.1.2.1
+  - watcher printed CAUGHT during a column-1 loop -> that column is LOCAL. FAIL.
+  - watcher stayed silent AND column 1's p50/p100 are in the same ballpark as
+    column 2's (both low-single-digit-ms range) -> that column is FORWARDED. PASS.
+  - watcher silent but column 1 is an order of magnitude slower than column 2
+    -> ambiguous; run Step 5 (ISS stop) for a definitive answer.
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 10:26 $ 

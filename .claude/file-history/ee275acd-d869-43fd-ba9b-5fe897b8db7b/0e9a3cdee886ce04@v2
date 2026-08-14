@@ -1,0 +1,27 @@
+#!/bin/bash
+# How many commits on each snmp-plan-E branch carry the Claude trailers,
+# and is the local branch ahead of / equal to origin?
+DL=/home/moxa/mds4xgl3/buildroot/dl
+REPOS="3rdparty_net_snmp app_moxa_fiber_check app_moxa_framework app_moxa_iss_10_1_0
+lib_moxa_ies_auto_mibs lib_moxa_rust_ies_auto_mibs lib_moxa_rust_snmp_agentx
+lib_moxa_snmp_agentx lib_moxa_utility plugin_moxa_fiber_check plugin_moxa_mms
+plugin_moxa_snmp plugin_moxa_system_information"
+
+printf "%-32s %-8s %-8s %-6s %-6s %s\n" REPO BASE-AHEAD WITH-TRAILER LOCAL ORIGIN SYNC
+for name in $REPOS; do
+    d="$DL/$name"
+    git -C "$d" rev-parse --verify -q snmp-plan-E >/dev/null || continue
+    best=""; bestn=999999
+    for base in $(git -C "$d" for-each-ref --format='%(refname:short)' refs/remotes/origin \
+                  | grep -Ei 'develop|_v5\.0|master|main$' | grep -viE 'snmp'); do
+        n=$(git -C "$d" rev-list --count "$base..snmp-plan-E" 2>/dev/null) || continue
+        [ -z "$n" ] && continue
+        if [ "$n" -lt "$bestn" ] && [ "$n" -gt 0 ]; then bestn=$n; best=$base; fi
+    done
+    [ -z "$best" ] && { echo "$name  (no base)"; continue; }
+    tr=$(git -C "$d" log --format='%B' "$best..snmp-plan-E" | grep -cE '^(Co-Authored-By: Claude|Claude-Session:)')
+    loc=$(git -C "$d" rev-parse --short snmp-plan-E)
+    org=$(git -C "$d" rev-parse --short origin/snmp-plan-E 2>/dev/null || echo "-")
+    sync=$([ "$loc" = "$org" ] && echo same || echo DIFFER)
+    printf "%-32s %-10s %-12s %-6s %-6s %s\n" "$name" "$bestn" "$tr" "$loc" "$org" "$sync"
+done

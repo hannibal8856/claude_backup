@@ -1,0 +1,14 @@
+#!/bin/bash
+# Inventory every dl/ repo that carries a Plan C/D/E branch.
+DL=/home/moxa/mds4xgl3/buildroot/dl
+for d in "$DL"/*/; do
+    [ -d "$d/.git" ] || continue
+    name=$(basename "$d")
+    br=$(git -C "$d" for-each-ref --format='%(refname:short)' \
+            refs/heads refs/remotes/origin 2>/dev/null \
+         | grep -Ei 'snmp[-_](plan|agentx|50ms|trace)' | sort -u | tr '\n' ' ')
+    [ -n "$br" ] || continue
+    cur=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    echo "### $name  [HEAD=$cur]"
+    echo "    branches: $br"
+done

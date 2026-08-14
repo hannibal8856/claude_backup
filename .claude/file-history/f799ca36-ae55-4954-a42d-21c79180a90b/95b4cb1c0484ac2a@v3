@@ -1,0 +1,349 @@
+#ifndef _ISS_SNMP_URI_REMAP_MXIGMPDB_C_
+#define _ISS_SNMP_URI_REMAP_MXIGMPDB_C_
+
+remapper_tableOid_t                mxigmpdb_igmpsnpConfigVlanTable_oid     [] = {1,3,6,1,4,1,8691,603,7,2,1,2,1};
+
+struct remapper_tableEntryHandler  mxigmpdb_igmpsnpConfigVlanTable_handler [] = 
+{
+    {
+        .entry_uri = "igmpsnpConfigVlanRouterPortList",
+        .entry_oid = 6,
+    },
+};
+
+remapper_tableOid_t                mxigmpdb_igmpsnpStatusVlanMulticastForwardTable_oid     [] = {1,3,6,1,4,1,8691,603,7,2,2,3,1};
+
+struct remapper_tableEntryHandler  mxigmpdb_igmpsnpStatusVlanMulticastForwardTable_handler [] = 
+{
+    {
+        .entry_uri = "igmpsnpStatusVlanMulticastForwardPortList",
+        .entry_oid = 4,
+    },
+};
+
+
+/****************************************************************************
+ Description        : 
+
+    這個 table 的 read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_read_mxigmpdb_igmpsnpStatusVlanMulticastForwardTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_PBMP_TABLE( 
+            mxigmpdb_igmpsnpStatusVlanMulticastForwardTable_handler,  
+            mxigmpdb_igmpsnpStatusVlanMulticastForwardTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    這個 table 的 read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_read_mxigmpdb_igmpsnpConfigVlanTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_PBMP_TABLE( 
+            mxigmpdb_igmpsnpConfigVlanTable_handler,  
+            mxigmpdb_igmpsnpConfigVlanTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_update_mxigmpdb_igmpsnpConfigVlanTable
+(
+    u8           *iputURI,
+    u8           *oputURI,
+    u8           *iputFile,
+    u8           *oputFile
+)
+{
+    
+    char          uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN] = {0x0};
+    int           uri_col_idx                                       =  0;
+    FILE         *iput_fp                                           = NULL;
+    FILE         *oput_fp                                           = NULL;
+    char          iput_buf[IES_MAX_FILE]                            = {0x0};
+    char          oput_buf[IES_MAX_FILE]                            = {0x0};
+    ies_handle_t  ret                                               = IES_ERR;
+    int           i = 0;
+
+    snprintf((char *)oputURI, IES_MAX_URI,"%s", iputURI);
+    
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    
+    {
+        for ( i = 0; i <= uri_col_idx; i++ )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d buf \'%s\'\n", __func__, __LINE__, uri_col_buf[i] );
+        }
+    }
+
+    if ( 0 == REMAPPER_UTIL_SNMP_CHECK_TRANSFER_BY_URI(
+        mxigmpdb_igmpsnpConfigVlanTable_handler, 
+        uri_col_buf[uri_col_idx]) )
+    {
+        LibUtil_ExecShCmd( NULL, NULL, 0, "/bin/mv %s %s", iputFile, oputFile );
+        return IES_NOERR;
+    }
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_handle_pbmap_entry_update(
+        iput_buf, strlen(iput_buf), 
+        oput_buf, sizeof(oput_buf) ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    fprintf(oput_fp,"%s", oput_buf);
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    update remapper for stdvladb
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_mxigmpdb_update
+(
+    u8 *iputURI,
+    u8 *oputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        
+        {
+            .uri     = "mxigmpdb/igmpsnpConfigVlanTable/",
+            .update  = remapper_handle_update_mxigmpdb_igmpsnpConfigVlanTable,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_update(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, oputURI, iputFile, oputFile );
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    read remapper for stdvladb
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_mxigmpdb_read
+(
+    u8 *iputURI, 
+    u8 *iputFile, 
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        {
+            .uri   = "mxigmpdb/igmpsnpConfigVlanTable/",
+            .read  = remapper_handle_read_mxigmpdb_igmpsnpConfigVlanTable,
+        },
+        {
+            .uri   = "mxigmpdb/igmpsnpStatusVlanMulticastForwardTable/",
+            .read  = remapper_handle_read_mxigmpdb_igmpsnpStatusVlanMulticastForwardTable,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_read(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, iputFile, oputFile );
+}
+
+
+
+#endif // _ISS_SNMP_URI_REMAP_MXIGMPDB_C_

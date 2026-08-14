@@ -1,0 +1,1805 @@
+#ifndef _MOXA_SNMP_HANDLE_UTILITY_C_
+#define _MOXA_SNMP_HANDLE_UTILITY_C_
+
+struct LibFrameworkUri_Handle  *gUriHandle   = NULL;
+
+/**
+ * @brief function body for table Entry list head
+
+ * @param[in]    handleType      MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_CREATE / MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_DUMP
+ * @param[out]   retListHead     return free moxaSnmpTableEntry_listHead;
+
+ * @returns      0 means success, others fail.
+ */
+int32_t __UtilUriTableEntryHandle( int32_t                              handleType,
+                                   struct moxaSnmpTableEntry_listHead **retListHead  )
+{
+#define MAX_SNMP_TABLE_LIST_HEAD  1024
+
+static struct moxaSnmpTableEntry_listHead     bufTblEntryListHead[MAX_SNMP_TABLE_LIST_HEAD]  = {0x0};
+static int                                    cntTblEntryListHead                            = 0;
+
+
+    struct moxaSnmpTableEntry_listHead *listHead;
+
+    if ( handleType == MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_CREATE )
+    {
+        listHead = &bufTblEntryListHead[cntTblEntryListHead];
+        cntTblEntryListHead++;
+
+        if ( cntTblEntryListHead >= MAX_SNMP_TABLE_LIST_HEAD )
+        {
+           LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+           return (-1);
+        }
+
+        memset(listHead, 0, sizeof(*listHead));
+        *retListHead = listHead;
+
+        return 0;
+    }
+    else
+    if ( handleType == MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_DUMP )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d dump <<< \n", __func__, __LINE__);
+        for ( int i = 0; i < cntTblEntryListHead; i++ )
+        {
+            struct ies_auto_mibs_entry  *entry = NULL;
+            int                          index = 0;
+
+            listHead = &bufTblEntryListHead[i];
+
+            entry    = LIST_FIRST(listHead);
+            index    = 0;
+
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "\n");
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "listHead [%02d] %s\n", i, entry->uri);
+            LIST_FOREACH(entry, listHead, listNode)
+            {
+                index++;
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "[%02d] %s\n", index, entry->uri_index);
+            }
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "\n");
+        }
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d dump >>> \n", __func__, __LINE__);
+        return 0;
+    }
+
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    return (-1);
+
+#undef MAX_SNMP_TABLE_LIST_HEAD
+}
+
+
+/**
+ * @brief get new list-head for table Entry list head
+
+ * @param[out]   retListHead     return new avaliable listHead;
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryGetNewListHead( struct moxaSnmpTableEntry_listHead **retListHead  )
+{
+    return __UtilUriTableEntryHandle(MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_CREATE, retListHead);
+}
+
+/**
+ * @brief dump list-head content for table Entry list head
+
+ * @param        N/A
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryDumpListHead( void )
+{
+    return __UtilUriTableEntryHandle(MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_DUMP, NULL);
+}
+
+/**
+ * @brief create list-head entry for uri Mib Table entry
+          needed for creating uri-MIB-table oid-value-file
+
+ * @param[in]    entry        moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryCreateListHead( struct ies_auto_mibs_entry  *entry )
+{
+    static struct ies_auto_mibs_entry  *indexEntry = NULL;
+    struct moxaSnmpTableEntry_listHead *listHead   = NULL;
+
+    if ( moxaSnmpHandle_UtilMibEntryCheckFromUri(entry)          &&
+         moxaSnmpHandle_UtilMibEntryCheckSingleIndexTable(entry) )
+    {
+        if ( 1 == moxaSnmpHandle_UtilMibEntryGetTableEntryOID(entry) )
+        {
+            indexEntry = entry;
+            if ( moxaSnmpHandle_UtilUriTableEntryGetNewListHead(&listHead) != 0 )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return (-1);
+            }
+            indexEntry->listHead = listHead;
+        }
+    }
+    else
+    {
+        indexEntry = NULL;
+    }
+
+    if ( indexEntry != NULL )
+    {
+         if ( 0 == MOXA_SNMP_COMPARE_URI(indexEntry->uri, entry->uri) )
+         {
+             entry->listHead = indexEntry->listHead;
+             listHead        = indexEntry->listHead;
+             LIST_INSERT_TAIL_FOR_MOXA_SNMP_ENTRY(listHead, entry, listNode);
+         }
+    }
+    return 0;
+}
+
+
+/**
+ * @brief create index-entry for moxa snmp entry
+
+ * @param[in]    entry        moxa snmp entry
+ * @param[out]   retEntry     return index-entry for moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCreateIndexEntry( struct ies_auto_mibs_entry  *entry,
+                                                     struct ies_auto_mibs_entry **retEntry )
+{
+    struct ies_auto_mibs_entry *entryIndex = NULL;
+
+    entryIndex = (struct ies_auto_mibs_entry *) malloc ( sizeof(*entry) );
+
+    if ( entryIndex == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return (-1);
+    }
+    memcpy(entryIndex, entry, sizeof(*entry));
+
+    entryIndex->oid_list[entryIndex->oid_len - 1] = 1;
+    entryIndex->val_type                          = SNMP_DATA_TYPE_INTEGER;
+    entryIndex->mode                              = HANDLER_CAN_RONLY;
+
+    memcpy(entryIndex->flags, entry->flags, sizeof(entry->flags));
+    snprintf(entryIndex->name,      IES_MAX_URI_INDEX, "%s", "index");
+    snprintf(entryIndex->uri_index, IES_MAX_URI_INDEX, "%s", "index");
+
+    *retEntry = entryIndex;
+    return 0;
+}
+
+
+/**
+ * @brief register moxa snmp entry into netSNMP
+
+ * @param[in]    entry        moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryRegisterToNetSNMP( struct ies_auto_mibs_entry  *entry )
+{
+    netsnmp_handler_registration       *reginfo    = NULL;
+
+    if ( moxaSnmpHandle_UtilUriTableEntryCreateListHead(entry) != 0 )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+            __func__, __LINE__);
+        return (-1);
+    }
+
+    reginfo = netsnmp_create_handler_registration(
+        entry->uri,
+        mox_snmp_handle_entry,
+        entry->oid_list,
+        entry->oid_len,
+        entry->mode);
+
+
+    if ( reginfo == NULL  )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+            __func__, __LINE__);
+        return (-1);
+    }
+
+
+    reginfo->my_reg_void  = (void *) entry;
+
+    if ( moxaSnmpHandle_UtilMibEntryCheckScalar(entry) )
+    {
+        if ( MIB_REGISTERED_OK != netsnmp_register_scalar(reginfo) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+                __func__, __LINE__);
+            return (-1);
+        }
+    }
+    else
+    {
+        reginfo->handler->flags |= MIB_HANDLER_AUTO_NEXT;
+        if ( MIB_REGISTERED_OK != netsnmp_register_handler(reginfo) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+                __func__, __LINE__);
+            return (-1);
+        }
+    }
+
+    if ( cnt_reginfo >= MAX_BUF_REGINFO )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+            __func__, __LINE__);
+        return (-1);
+    }
+    buf_reginfo[cnt_reginfo] = reginfo;
+    cnt_reginfo++;
+    return 0;
+}
+
+/**
+ * @brief check wether this is scalar entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckScalar( struct ies_auto_mibs_entry *entry )
+{
+    return ( 0 == entry->oid_index ) ? 1 : 0;
+}
+
+/**
+ * @brief check wether this is ISS mib entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckFromIss( struct ies_auto_mibs_entry *entry )
+{
+    return ( 1 == entry->iss_build ) ? 1 : 0;
+}
+
+/**
+ * @brief check wether this is URI mib entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckFromUri( struct ies_auto_mibs_entry *entry )
+{
+    return ( 0 == entry->iss_build ) ? 1 : 0;
+}
+
+/**
+ * @brief check wether this is single index mib table entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, others no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckSingleIndexTable( struct ies_auto_mibs_entry *entry )
+{
+    if ( MOXA_SNMP_ENTRY_FLAGS_CHK(IES_FLAG_SNMP_MULTIPLE_INDEX_TABLE,  entry->flags) )
+    {
+        return 0;
+    }
+    return ( 1 == entry->oid_index ) ? 1 : 0;
+}
+
+/**
+ * @brief get table entry oid
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns     table entry oid
+ */
+int32_t moxaSnmpHandle_UtilMibEntryGetTableEntryOID( struct ies_auto_mibs_entry *entry )
+{
+    return entry->oid_list[entry->oid_len - 1];
+}
+
+/**
+ * @brief auto generate table-index-entry
+          following is the reason for this function.
+          1. coz for most of the case, there is no table-index-entry in the db-file generated 
+             from iss.
+
+          2. when generate db for None-ISS MIB entry.
+             With this function, No need to generate table-index-entry.
+
+          3. NetSNMP need table-index-entry to hadle SNMP request from table-index-entry.
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry( struct ies_auto_mibs_entry *entry )
+{
+    static char                          tableURI[IES_MAX_URI] = {0x0};
+
+    if ( 1 == moxaSnmpHandle_UtilMibEntryCheckSingleIndexTable(entry) &&
+         0 == MOXA_SNMP_ENTRY_FLAGS_CHK(IES_FLAG_SNMP_INDEX_NOT_START_FROM_1, entry->flags) &&
+         0 == MOXA_SNMP_ENTRY_FLAGS_CHK(IES_FLAG_SNMP_INDEX_NOT_IN_ORDER,     entry->flags) &&
+         0 == MOXA_SNMP_ENTRY_FLAGS_CHK(IES_FLAG_SNMP_ISS_REMAP_MERGE_TABLE,  entry->flags)   )
+    {
+        if ( 1 == moxaSnmpHandle_UtilMibEntryGetTableEntryOID(entry) )
+        {
+            snprintf(tableURI, sizeof(tableURI), "%s", entry->uri);
+        }
+        else
+        if ( 0 != MOXA_SNMP_COMPARE_URI(tableURI, entry->uri) )
+        {
+            struct ies_auto_mibs_entry  *indexEntry  = NULL;
+            if ( moxaSnmpHandle_UtilMibEntryCheckFromIss(entry) )
+            {
+                IES_FLAG_BITS_SET(IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS, entry->flags);
+            }
+            if ( 2 == moxaSnmpHandle_UtilMibEntryGetTableEntryOID(entry) )
+            {
+                if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS, entry->flags) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d : MAKEUP_INDEX_FOR_ISS \n", __func__, __LINE__);
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "uri   : %s \n", entry->uri);
+                }
+                if ( moxaSnmpHandle_UtilMibEntryCreateIndexEntry(entry, &indexEntry) != 0 )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    return (-1);
+                }
+                if ( moxaSnmpHandle_UtilMibEntryRegisterToNetSNMP(indexEntry) != 0 )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    return (-1);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief use select for usleep
+
+ * @param[in]    usec           microsecond
+
+   use select for useleep function which is more
+   accurate than use usleep directly.
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUSleep( unsigned long usec )
+{
+    struct timeval tv;
+
+    memset(&tv, 0, sizeof(tv));
+    tv.tv_sec  = 0;
+    tv.tv_usec = usec;
+    select(0, NULL, NULL, NULL, &tv);
+
+    return 0;
+}
+
+
+/**
+ * @brief handle snprint format string into buf
+
+ * @param[in]    buf           buffer for snprintf
+ * @param[in]    bufLen        buffer total len for snprintf
+ * @param[out]   bufPosition   buffer current position for snprintf
+ * @param[in]    fmtString     format string for snprintf
+ * @param[in]    ...           format string parameter for snprintf
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringSnprintf(char   *buf,
+                                         int      bufLen,
+                                         int     *bufPosition,
+                                         char    *fmtString,
+                                                  ... )
+{
+    char   *bufIndex;
+    int     bufRemainLen;
+    int     len;
+    va_list ap;
+
+    bufRemainLen = bufLen - *bufPosition;
+    bufIndex     = &buf[*bufPosition];
+
+    va_start(ap, fmtString);
+    len = vsnprintf(bufIndex, bufRemainLen, fmtString, ap);
+    va_end(ap);
+
+    bufRemainLen -= len;
+    if (bufRemainLen > 0 )
+    {
+        *bufPosition += len;
+        return 0;
+    }
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+    return (-1);
+}
+
+/**
+ * @brief handle transfer object-id-string to oid
+
+ * @param[in]    buf           object-id-string buffer
+ * @param[in]    bufLen        object-id-string buffer len
+ * @param[out]   retOID        return oid buffer
+ * @param[out]   retOIDLen     return oid buffer len
+ * @param[in]    retOIDMaxLen  return oid buffer max len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToObjectID( const char *buf,
+                                             int         bufLen,
+                                             oid        *retOID,
+                                             size_t     *retOIDLen,
+                                             int         maxOidBufLen )
+{
+    char *end           = buf + bufLen;
+    char *token         = NULL;
+    int   oidBufIndex   = 0;
+    char  tmpOidStr[32] = {0x0};
+    int   tmpOidStrLen  = 0;
+
+    for ( token = (char *) buf; buf < end; buf++ )
+    {
+        if ( *buf == ',' || *buf == '.' || *buf == '\'' )
+        {
+            tmpOidStrLen = buf - token;
+            if ( tmpOidStrLen >= sizeof(tmpOidStr) )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return (-1);
+            }
+            memcpy(tmpOidStr, token, tmpOidStrLen);
+            token = buf + 1;
+            retOID[oidBufIndex] = atoi(tmpOidStr);
+            oidBufIndex++;
+            if ( oidBufIndex >= maxOidBufLen )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return (-1);
+            }
+        }
+    }
+    *retOIDLen = oidBufIndex;
+    return 0;
+}
+
+
+
+/**
+ * @brief handle transfer string to hex-value
+
+ * @param[in]    buf     hex string buffer
+ * @param[in]    bufLen  hex string buffer Len
+
+ * @returns      parsing result
+ */
+char moxaSnmpHandle_UtilStringToHexValue( const char *buf,
+                                          int         bufLen )
+{
+    char *end      = buf + bufLen;
+    char  retToken = 0;
+    int   count    = 0;
+
+    while ( buf < end )
+    {
+        if ( *buf >= '0' && *buf <= '9' )
+        {
+            count = *buf - '0';
+        }
+        else
+        if ( *buf >= 'a' && *buf <= 'f' )
+        {
+            count = *buf - 'a' + 10;
+        }
+        else
+        if ( *buf >= 'A' && *buf <= 'F' )
+        {
+            count = *buf - 'A' + 10;
+        }
+        else
+        {
+            count = 0;
+        }
+        retToken  = ( ( retToken << 4 ) & 0xf0 );
+        retToken |= ( count & 0x0f );
+        buf++;
+    }
+    return retToken;
+}
+
+/**
+ * @brief handle transfer ip-string to ipv4-value
+
+ * @param[in]    buf     ip string buffer
+ * @param[in]    bufLen  ip string buffer len
+ * @param[in]    retVal  return value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToIPv4Value( const char   *buf,
+                                              int           bufLen,
+                                              unsigned int *retVal )
+{
+    char        *end = (char *)buf + bufLen;
+    unsigned int val, tmp;
+    int          i;
+
+    val = 0;
+    for ( i = 0; i < 4; i++ )
+    {
+        tmp   = 0;
+        val <<= 8;
+        while ( buf < end )
+        {
+            if ( *buf >= '0' && *buf <= '9' )
+            {
+                tmp *= 10;
+                tmp += *buf - '0';
+            }
+            else
+            if ( '.' == *buf ||
+                '\'' == *buf ||
+                '"'  == *buf ||
+                '-'  == *buf )
+            {
+                buf++;
+                break;
+            }
+            else
+            {
+                return (-1);
+            }
+            buf++;
+        }
+        if ( tmp > 0xff )
+        {
+            return (-1);
+        }
+        val |= tmp;
+    }
+
+    *retVal = ntohl(val);
+    return 0;
+}
+
+
+/**
+ * @brief handle transfer u64string to counter64 value
+
+ * @param[in]    buf        u64string buf
+ * @param[in]    bufLen     u64string buf len
+ * @param[in]    retC64Val  return counter64 value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToCount64Value( const char          *buf,
+                                                 int                  bufLen,
+                                                 struct counter64    *retC64Val )
+{
+    unsigned long long cal = 0;
+
+    for ( int i = 0; i < bufLen; i++, buf++)
+    {
+        if ( *buf >= '0' && *buf <= '9')
+        {
+            cal = *buf - '0' + cal * 10;
+        }
+        else
+        {
+            /* only process 0 ~ 9 */
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+
+    }
+    retC64Val->high = ( cal >> 32 ) & 0x00000000ffffffff;
+    retC64Val->low  = ( cal )       & 0x00000000ffffffff;
+    return 0;
+}
+
+
+/**
+ * @brief strchr within bufLen
+
+ * @param[in]    buf      buffer
+ * @param[in]    bufLen   buffer len
+ * @param[in]    token    token to parse
+
+ * @returns      a pointer to the first occurrence of the character c in the string s.
+                 NULL means fail
+ */
+char * moxaSnmpHandle_UtilStringStrchr( char *buf,
+                                        int   bufLen,
+                                        char  token  )
+{
+    char *end = buf + bufLen;
+
+    while( buf < end )
+    {
+        if( token == *buf )
+        {
+            return buf;
+        }
+        buf++;
+    }
+    return NULL;
+}
+
+
+/**
+ * @brief handle transfer snmp hex OctString to bitValue
+
+ * @param[in]    request          netsnmp request
+ * @param[out]   setBuffer        return value buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpRequestToBitValue( netsnmp_request_info       *request ,
+                                                  struct moxaSnmpSetBuffer   *setBuffer )
+{
+#define CHECK_MOXA_SNMP_BITS_ENABLE(index, indexBuff)   ( ((indexBuff)[(index)/8]) & ( 0x01 << ( 8 - (( index % 8 ) + 1)) ) )
+    char *buf;
+    int   reqBitLen = 0;
+    int   i;
+
+    reqBitLen = request->requestvb->val_len * 8;
+    buf       = request->requestvb->val.string;
+
+    if ( reqBitLen > MOXA_SNMP_MAX_BIT_VALUE_LEN )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+
+    for ( i = 0; i < reqBitLen; i++ )
+    {
+        setBuffer->valBitBuf[i] = ( CHECK_MOXA_SNMP_BITS_ENABLE(i, buf) ) ?
+            MOXA_SNMP_BIT_ENABLE : MOXA_SNMP_BIT_DISABLE;
+    }
+    setBuffer->valBitBufLen = reqBitLen;
+
+    return 0;
+#undef CHECK_MOXA_SNMP_BITS_ENABLE
+}
+
+
+/**
+ * @brief get snmp-set-buffer
+
+ * @param[in]    reqinfo   netsnmp register handle
+ * @param[in]    request   netsnmp request
+ * @param[in]    entry     moxa snmp entry
+ * @param[out]   setBuffer moxa snmp set value buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpGetSetBuffer( netsnmp_agent_request_info *reqinfo,
+                                             netsnmp_request_info       *request,
+                                             struct ies_auto_mibs_entry *entry,
+                                             struct moxaSnmpSetBuffer   *setBuffer  )
+{
+
+    switch(entry->val_type)
+    {
+        case SNMP_DATA_TYPE_INTEGER32:
+        // case SNMP_DATA_TYPE_INTEGER: same as SNMP_DATA_TYPE_INTEGER32
+        case SNMP_DATA_TYPE_TIME_TICKS:
+        case SNMP_DATA_TYPE_COUNTER32:
+        //case SNMP_DATA_TYPE_COUNTER: same as SNMP_DATA_TYPE_COUNTER32
+        case SNMP_DATA_TYPE_UNSIGNED32:
+        //case SNMP_DATA_TYPE_GAUGE32: same as SNMP_DATA_TYPE_UNSIGNED32
+        //case SNMP_DATA_TYPE_GAUGE:   same as SNMP_DATA_TYPE_UNSIGNED32
+            setBuffer->valStrBufLen = snprintf(setBuffer->valStrBuf, MOXA_SNMP_MAX_STR_VALUE_LEN,
+                "%d", *request->requestvb->val.integer);
+            setBuffer->type = MOXA_SNMP_VALUE_STR_BUF;
+            break;
+        case SNMP_DATA_TYPE_IP_ADDR_PRIM:
+            {
+                unsigned  char *ipStr = NULL;
+
+                ipStr = ( unsigned char * ) request->requestvb->val.string;
+                setBuffer->valStrBufLen = snprintf(setBuffer->valStrBuf, MOXA_SNMP_MAX_STR_VALUE_LEN,
+                    "%d.%d.%d.%d",
+                    ipStr[0], ipStr[1], ipStr[2], ipStr[3]);
+                setBuffer->type = MOXA_SNMP_VALUE_STR_BUF;
+            }
+            break;
+        case SNMP_DATA_TYPE_MAC_ADDRESS:
+            {
+                unsigned  char *macStr = NULL;
+
+                macStr = ( unsigned char * ) request->requestvb->val.string;
+                setBuffer->valStrBufLen = snprintf(setBuffer->valStrBuf, MOXA_SNMP_MAX_STR_VALUE_LEN,
+                    "%2.2x:%2.2x:%2.2x:%2.2x:%2.2x:%2.2x",
+                    macStr[0], macStr[1], macStr[2], macStr[3], macStr[4], macStr[5]);
+                setBuffer->type = MOXA_SNMP_VALUE_STR_BUF;
+            }
+            break;
+        case SNMP_DATA_TYPE_OCTET_PRIM:
+        case SNMP_DATA_TYPE_OPAQUE:
+            {
+                int reqValLen = request->requestvb->val_len;
+                if ( entry->oct_type == IES_URI_SNMP_OCT_STRING_ASCII )
+                {
+                    if ( reqValLen >= ( MOXA_SNMP_MAX_STR_VALUE_LEN - 1 ) )
+                    {
+                        return (-1);
+                    }
+                    memcpy(setBuffer->valStrBuf, request->requestvb->val.string, reqValLen);
+                    setBuffer->valStrBuf[reqValLen] = '\0';
+                    setBuffer->valStrBufLen         = reqValLen;
+                    setBuffer->type                 = MOXA_SNMP_VALUE_STR_BUF;
+                }
+                else
+                {
+                    if ( moxaSnmpHandle_UtilSnmpRequestToBitValue(request, setBuffer) != 0 )
+                    {
+                        return (-1);
+                    }
+                    setBuffer->type = MOXA_SNMP_VALUE_BIT_BUF;
+                }
+            }
+            break;
+        case SNMP_DATA_TYPE_OBJECT_ID:
+            {
+                oid *valOid       =  request->requestvb->val.objid;
+                int  valOidLen    = (request->requestvb->val_len) / 4;
+                int  valStringLen = 0;
+                int  valOidIndex  = 0;
+                for ( valOidIndex = 0; valOidIndex < valOidLen; valOidIndex++ )
+                {
+                    if ( moxaSnmpHandle_UtilStringSnprintf((char *)setBuffer->valStrBuf, MOXA_SNMP_MAX_STR_VALUE_LEN,
+                            &valStringLen, "%d.", (unsigned int) valOid[valOidIndex]) != 0 )
+                    {
+                        return (-1);
+                    }
+                }
+                valStringLen --; // skip last `.`
+                setBuffer->valStrBuf[valStringLen] = '\0';
+                setBuffer->valStrBufLen            = valStringLen;
+                setBuffer->type                    = MOXA_SNMP_VALUE_STR_BUF;
+            }
+            break;
+        default:
+            /* not support */
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+    }
+    return 0;
+}
+
+
+/**
+ * @brief update snmp-get-request
+
+ * @param[in]    reqinfo    netsnmp register handle
+ * @param[in]    request    netsnmp request
+ * @param[in]    entry      moxa snmp entry
+ * @param[in]    valStr     value string
+ * @param[in]    reqOid     request oid
+ * @param[in]    reqOidLen  request oid len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpUpdateGetRequest( netsnmp_agent_request_info *reqinfo,
+                                                 netsnmp_request_info       *request,
+                                                 struct ies_auto_mibs_entry *entry,
+                                                 char                       *valStr,
+                                                 oid                        *reqOid,
+                                                 int                         reqOidLen )
+{
+    unsigned int u32Value = 0x0;
+
+    switch(entry->val_type)
+    {
+        case SNMP_DATA_TYPE_INTEGER32:
+        // case SNMP_DATA_TYPE_INTEGER: same as SNMP_DATA_TYPE_INTEGER32
+            u32Value = atoi(valStr);
+            snmp_set_var_typed_value(request->requestvb, ASN_INTEGER,
+                (u_char *)&u32Value, sizeof(u32Value));
+            break;
+        case SNMP_DATA_TYPE_TIME_TICKS:
+            u32Value = atoi(valStr);
+            snmp_set_var_typed_value(request->requestvb, ASN_TIMETICKS,
+                (u_char *)&u32Value, sizeof(u32Value));
+            break;
+        case SNMP_DATA_TYPE_GAUGE32:
+        //case SNMP_DATA_TYPE_GAUGE:
+        //case SNMP_DATA_TYPE_UNSIGNED32:
+            u32Value = atoi(valStr);
+            snmp_set_var_typed_value(request->requestvb, ASN_GAUGE,
+                (u_char *)&u32Value, sizeof(u32Value));
+            break;
+        case SNMP_DATA_TYPE_COUNTER32:
+        //case SNMP_DATA_TYPE_COUNTER: same as SNMP_DATA_TYPE_COUNTER32
+            u32Value = atoi(valStr);
+            snmp_set_var_typed_value(request->requestvb, ASN_COUNTER,
+                (u_char *)&u32Value, sizeof(u32Value));
+            break;
+        case SNMP_DATA_TYPE_IP_ADDR_PRIM:
+            if ( strlen(valStr) == 0 )
+            {
+                u32Value = 0;
+            }
+            else
+            if ( moxaSnmpHandle_UtilStringToIPv4Value(valStr, strlen(valStr), &u32Value) != 0 )
+            {
+                return (-1);
+            }
+            snmp_set_var_typed_value(request->requestvb, ASN_IPADDRESS,
+                (u_char *)&u32Value, sizeof(u32Value));
+            break;
+        case SNMP_DATA_TYPE_MAC_ADDRESS:
+            {
+                char  macAddr [6] = {0x0};
+                char *tmp         = NULL;
+                int   i           = 0;
+
+                if ( strlen(valStr) == 0 )
+                {
+                    memset(macAddr, 0, sizeof(macAddr));
+                }
+                else
+                {
+                    for ( i = 0, tmp = valStr; i < 6; i++ )
+                    {
+                        macAddr[i] = moxaSnmpHandle_UtilStringToHexValue(tmp, 2);
+                        tmp += 2;
+                        if ( ':' == *tmp )
+                        {
+                            tmp++;
+                        }
+                    }
+                }
+                snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                    (u_char *)macAddr, sizeof(macAddr));
+            }
+            break;
+        case SNMP_DATA_TYPE_OCTET_PRIM:
+        case SNMP_DATA_TYPE_OPAQUE:
+            {
+                char binValue[128] = {0x0};
+                int  binValueLen;
+
+                if ( entry->oct_type == IES_URI_SNMP_OCT_STRING_ASCII )
+                {
+                    snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                        (u_char *)valStr, strlen(valStr));
+                }
+                else
+                {
+                    binValueLen = strlen(valStr) / 2;
+                    if ( binValueLen >= sizeof(binValue)  )
+                    {
+                        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                        return (-1);
+                    }
+                    for ( int i = 0; i < binValueLen; i++ )
+                    {
+                        binValue[i] = moxaSnmpHandle_UtilStringToHexValue(&valStr[i * 2], 2);
+                    }
+                    snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                        (u_char *)binValue, binValueLen);
+                }
+            }
+            break;
+        case SNMP_DATA_TYPE_OBJECT_ID:
+            {
+                oid     oidValue[MAX_OID_LEN] = {0x0};
+                size_t  oidValueLen;
+
+                if ( strlen(valStr) == 0 )
+                {
+                    memset(oidValue, 0, 1);
+                    oidValueLen = 1;
+                }
+                else
+                if ( moxaSnmpHandle_UtilStringToObjectID(
+                        valStr, strlen(valStr),
+                        oidValue, &oidValueLen, MAX_OID_LEN ) != 0 )
+                {
+                    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return (-1);
+                }
+                snmp_set_var_typed_value( request->requestvb, ASN_OBJECT_ID,
+                    (const u_char *)oidValue, oidValueLen * sizeof(oid));
+            }
+            break;
+        case SNMP_DATA_TYPE_COUNTER64:
+            {
+                struct counter64   c64Value = {0x0};
+
+                if ( moxaSnmpHandle_UtilStringToCount64Value(valStr, strlen(valStr), &c64Value) != 0 )
+                {
+                    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return (-1);
+                }
+                snmp_set_var_typed_value(request->requestvb, ASN_COUNTER64,
+                    (u_char *)&c64Value, sizeof(c64Value));
+            }
+            break;
+        default:
+            /* not support */
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+    }
+    snmp_set_var_objid(request->requestvb, reqOid, reqOidLen);
+    return 0;
+}
+
+
+/**
+ * @brief get oid-index for singl-oid-index-table
+
+ * $param[in]    netsnmp_request_info   netsnmp request
+ * @param[in]    entry                  moxa snmp entry
+ * @param[out]   oidIndex               oid-index for table-entry
+
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpGetOIDIndex( netsnmp_request_info       *request,
+                                            struct ies_auto_mibs_entry *entry,
+                                            int                        *oidIndex )
+{
+    oid *reqOid    = NULL;
+    int  reqOidLen = 0;
+
+    reqOid    = (oid *)request->requestvb->name;
+    reqOidLen = request->requestvb->name_length;
+    if ( reqOidLen < entry->oid_len )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+    if ( entry->oid_index != 1 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+    *oidIndex = reqOid[entry->oid_len];
+    return 0;
+}
+
+
+/**
+ * @brief check oidIndex to tell this is normal-port or port-channel-port
+          and return internal-interface-port-number
+
+ * $param[in]    oidIndex   oid table index
+ * @param[out]   ifaceType  LA_NORMAL_PORT / LA_PORT_CHANNEL
+ * @param[out]   ifacePort  internal interface port
+
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPortGetIfacePort( int32_t   oidIndex,
+                                             int32_t  *ifaceType,
+                                             int32_t  *ifacePort   )
+{
+
+    int32_t  ret  = (-1);
+    int32_t  minPortInDevice;
+    int32_t  maxPortInDevice;
+    int32_t  maxPortNumber;
+
+    minPortInDevice = 0;
+    maxPortInDevice = gMaxPortInDevice - 1;
+    maxPortNumber   = gMaxPortInDevice + gMaxPortChannel;
+
+    if ( oidIndex >= minPortInDevice && oidIndex <= maxPortInDevice )
+    {
+        *ifaceType = LA_NORMAL_PORT;
+        *ifacePort = oidIndex;
+    }
+    else
+    if ( oidIndex > maxPortInDevice && oidIndex < maxPortNumber )
+    {
+        *ifaceType = LA_PORT_CHANNEL;
+        *ifacePort = oidIndex - gMaxPortInDevice;
+    }
+    else
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+    return 0;
+}
+
+
+/**
+ * @brief set runnin config to startup config and sleep
+
+ * @param[in]    entry                  moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgSetRunningToStartupConfigAndSleep( struct ies_auto_mibs_entry *entry )
+{
+    ies_handle_t ret        = -1;
+    JSON_Value  *jsonValRet = NULL;
+    char         uriPath[IES_MAX_URI] = {0x0};
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    snprintf(uriPath, sizeof(uriPath), "%s",  MOXA_SNMP_URI_ACTION_PATH("save"));
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d :\n", __func__, __LINE__ );
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "uriPath ='%s'\n", uriPath);
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+
+    if ( LibFrameworkUri_PostUri(gUriHandle, uriPath, security_token, NULL, &jsonValRet) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        goto config_end;
+    }
+
+    sleep(MOXA_SNMP_MAX_SET_DELAY);
+
+    ret = 0;
+
+config_end:
+    if ( jsonValRet != NULL )
+    {
+        json_value_free(jsonValRet);
+        jsonValRet = NULL;
+    }
+    return ret;
+}
+
+/**
+ * @brief get uri-config from uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     return jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgGetURIConfig( char        *uriPath,
+                                            JSON_Value **jsonVal )
+{
+    const char *uriDataPath = NULL;
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d :\n", __func__, __LINE__ );
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "uriPath ='%s'\n", uriPath);
+
+    uriDataPath = uriPath;
+    if ( LibFrameworkUri_GetUri(gUriHandle, uriDataPath, security_token, jsonVal) != 0)
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( *jsonVal != NULL )
+    {
+        char *debugJsonStr = json_serialize_to_string(*jsonVal);
+        if ( debugJsonStr != NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "jsonVal='%s'\n", debugJsonStr);
+            json_free_serialized_string(debugJsonStr);
+        }
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+    return 0;
+}
+
+
+/**
+ * @brief get uri-config string from uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     return jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgGetURIConfigString( char        *uriPath,
+                                                  char        *configStr,
+                                                  int32_t      configStrMax )
+{
+    JSON_Value *jsonVal    = NULL;
+    char       *jsonValStr = NULL;
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't UtilCfgGetURIConfig\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+    jsonValStr = json_serialize_to_string(jsonVal);
+    if ( jsonValStr == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't json_serialize_to_string\n",
+            __func__, __LINE__ );
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        return (-1);
+    }
+    snprintf(configStr, configStrMax, "%s", jsonValStr);
+    json_free_serialized_string(jsonValStr);
+    json_value_free(jsonVal);
+    jsonVal = NULL;
+    return 0;
+}
+
+/**
+ * @brief post uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     json set value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgPostURIConfig( char      *uriPath,
+                                            JSON_Value *jsonVal )
+{
+    const char *uriDataPath    = NULL;
+    JSON_Value *jsonVal_setRet = NULL;
+    char       *message        = NULL;
+    int32_t     ret            = (-1);
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    moxaSnmpHandle_UtilDumpJsonVal(__func__, __LINE__, uriPath, jsonVal);
+
+    uriDataPath = uriPath;
+    if ( LibFrameworkUri_PostUri(gUriHandle, uriDataPath, security_token, jsonVal, &jsonVal_setRet) != 0 )
+    {
+        message = json_serialize_to_string(jsonVal_setRet);
+        if ( message != NULL  )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d message = %s\n", __func__, __LINE__, message );
+            json_free_serialized_string(message);
+        }
+        goto config_end;
+    }
+
+    moxaSnmpHandle_UtilUSleep(MOXA_SNMP_MAX_CFG_DELAY);
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal_setRet != NULL )
+    {
+        json_value_free(jsonVal_setRet);
+        jsonVal_setRet = NULL;
+    }
+    return ret;
+}
+
+
+/**
+ * @brief patch uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     json set value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgPatchURIConfig( char     *uriPath,
+                                            JSON_Value *jsonVal )
+{
+    const char *uriDataPath    = NULL;
+    JSON_Value *jsonVal_setRet = NULL;
+    char       *message        = NULL;
+    int32_t     ret            = (-1);
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    moxaSnmpHandle_UtilDumpJsonVal(__func__, __LINE__, uriPath, jsonVal);
+
+    uriDataPath = uriPath;
+    if ( LibFrameworkUri_PatchUri(gUriHandle, uriDataPath, security_token, jsonVal, &jsonVal_setRet) != 0 )
+    {
+        message = json_serialize_to_string(jsonVal_setRet);
+        if ( message != NULL  )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d message = %s\n", __func__, __LINE__, message );
+            json_free_serialized_string(message);
+        }
+        goto config_end;
+    }
+
+    moxaSnmpHandle_UtilUSleep(MOXA_SNMP_MAX_CFG_DELAY);
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal_setRet != NULL )
+    {
+        json_value_free(jsonVal_setRet);
+        jsonVal_setRet = NULL;
+    }
+    return ret;
+}
+
+
+
+/**
+ * @brief del uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgDelURIConfig( char *uriPath )
+{
+    const char *uriDataPath    = NULL;
+    JSON_Value *jsonVal_delRet = NULL;
+    char       *message        = NULL;
+    int32_t     ret            = (-1);
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get gUriHandle\n",
+                __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    uriDataPath = uriPath;
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : uriPath('%s')\n",
+        __func__, __LINE__, uriPath );
+
+    if ( LibFrameworkUri_DeleteUri(gUriHandle, uriDataPath, security_token, &jsonVal_delRet) != 0 )
+    {
+        message = json_serialize_to_string(jsonVal_delRet);
+        if ( message != NULL  )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d message = %s\n", __func__, __LINE__, message );
+            json_free_serialized_string(message);
+        }
+        goto config_end;
+    }
+
+    moxaSnmpHandle_UtilUSleep(MOXA_SNMP_MAX_CFG_DELAY);
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal_delRet != NULL )
+    {
+        json_value_free(jsonVal_delRet);
+        jsonVal_delRet = NULL;
+    }
+    return ret;
+}
+
+
+/**
+ * @brief 1. trigger command by cmdPath
+          2. strcmp  cmdString for checking command is success or not
+
+ * $param[in]    uriPath     uri path
+ * $param[in]    jsonVal     jsonVal
+ * $param[in]    cmdString   checking command is success or not
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgTriggerURICommand( char       *cmdPath,
+                                                 JSON_Value *jsonVal,
+                                                 char       *cmdString )
+{
+    int32_t      ret                               = (-1);
+    const char  *uriDataPath                       = NULL;
+    char         uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+    JSON_Value  *jsonValCmdResult                  = NULL;
+    char        *jsonValCmdString                  = NULL;
+    char        *debugMessage                      = NULL;
+    char        *tmp                               = NULL;
+    JSON_Value  *jsonValResult                     = NULL;
+    JSON_Object *jsonObjResult                     = NULL;
+    char        *jsonStrResult                     = NULL;
+
+
+
+    if ( gUriHandle == NULL )
+    {
+        gUriHandle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+        if ( gUriHandle == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return (-1);
+        }
+    }
+
+    // trigger command
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_COMMAND_PATH("%s"), cmdPath);
+
+    moxaSnmpHandle_UtilDumpJsonVal(__func__, __LINE__, uriPath, jsonVal);
+
+    uriDataPath = uriPath;
+    if ( LibFrameworkUri_PostUri(gUriHandle, uriDataPath, security_token, jsonVal, &jsonValCmdResult) != 0 )
+    {
+        debugMessage = json_serialize_to_string(jsonValCmdResult);
+        if ( debugMessage != NULL  )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d debugMessage = %s\n",
+                __func__, __LINE__, debugMessage );
+            json_free_serialized_string(debugMessage);
+        }
+        goto config_end;
+    }
+
+    sleep(2); // let command run !!
+
+    moxaSnmpHandle_UtilDumpJsonVal(__func__, __LINE__, uriPath, jsonValCmdResult);
+
+    // get command result part 1 : random number for command result
+    jsonValCmdString = json_serialize_to_string(jsonValCmdResult);
+    if ( jsonValCmdString == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't json_serialize_to_string\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    /* remove " " around result */
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_COMMAND_PATH("%s"), jsonValCmdString + 1 );         /* remove first <"> */
+    tmp = moxaSnmpHandle_UtilStringStrchr(uriPath, strlen(uriPath), '\"'); /* remove last <">  */
+    if ( tmp == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't remove last `\"` \n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+    *tmp = '\0';
+
+    // get command result part 2 : result string from command result
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonValResult) != 0 )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't UtilCfgGetURIConfig \n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    jsonObjResult = json_value_get_object(jsonValResult);
+    if ( jsonObjResult == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't get jsonObjResult \n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    jsonStrResult = json_object_dotget_string(jsonObjResult, (const char *)"output");
+    if ( jsonStrResult == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't json_object_dotget_string \n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    // get command result part 3 : check result string
+    if ( 0 != strncmp(jsonStrResult, cmdString, strlen(cmdString)) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d jsonStrResult=('%s') cmdString('%s') \n",
+            __func__, __LINE__, jsonStrResult, cmdString);
+        goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+
+    if ( jsonValCmdString != NULL )
+    {
+        json_free_serialized_string(jsonValCmdString);
+    }
+
+    if ( jsonValResult != NULL )
+    {
+        json_value_free(jsonValResult);
+        jsonValResult = NULL;
+    }
+
+    if ( jsonValCmdResult != NULL )
+    {
+        json_value_free(jsonValCmdResult);
+        jsonValCmdResult = NULL;
+    }
+
+    return ret;
+}
+
+
+/**
+ * @brief get uri pBMP from uriPath
+
+ * $param[in]    uriPath     uri path
+ * $param[out]   setBuf      snmp set buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPBMP_GetURIConfig( char                     *uriPath,
+                                              struct moxaSnmpSetBuffer *setBuf   )
+{
+    int32_t             ret        = (-1);
+    JSON_Value         *jsonVal    = NULL;
+    JSON_Array         *jsonArray  = NULL;
+    int32_t             count      = 0;
+    int32_t             jsonBoolen = 0;
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal ) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal from uriPath('%s')\n",
+            __func__, __LINE__, uriPath );
+        goto config_end;
+    }
+
+    if ( json_value_get_type(jsonVal) == JSONNull )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        return 0;
+    }
+
+    jsonArray = json_value_get_array(jsonVal);
+    if ( jsonArray == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonArray from jsonVal\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    count = json_array_get_count(jsonArray);
+
+    setBuf->type         = MOXA_SNMP_VALUE_BIT_BUF;
+    setBuf->valBitBufLen = count;
+
+    for ( int i = 0; i < count; i++ )
+    {
+        jsonBoolen = json_array_get_boolean( jsonArray, i );
+        if ( jsonBoolen == MOXA_SNMP_JSON_INVALID )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonBoolen from jsonArray('%d')\n",
+                __func__, __LINE__, i );
+            goto config_end;
+        }
+        setBuf->valBitBuf[i] = ( jsonBoolen == MOXA_SNMP_JSON_TRUE ) ?
+            MOXA_SNMP_BIT_ENABLE : MOXA_SNMP_BIT_DISABLE;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+    return ret;
+}
+
+
+
+/**
+ * @brief set setBuf into uriPath for Port BitMap format
+
+ * $param[in]    uriPath     uri path
+ * $param[out]   setBuf      snmp set buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPBMP_SetURIConfig( char                     *uriPath,
+                                              struct moxaSnmpSetBuffer *setBuf   )
+{
+    int32_t             ret         = (-1);
+    JSON_Value         *jsonVal     = NULL;
+    JSON_Array         *jsonArray   = NULL;
+    int32_t             jsonBoolen  = 0;
+    int32_t             maxPortNo      = 0;
+    int32_t             maxPortChannel = 0;
+    int32_t             maxPortList    = 0;
+
+    jsonVal = json_value_init_array();
+    if ( jsonVal == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't init jsonVal\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    jsonArray = json_value_get_array(jsonVal);
+    if ( jsonArray == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonArray from jsonVal\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    LibSystem_GetMaxPortNumInSystem(&maxPortNo);
+    LibSystem_GetMaxPortChannelNumInSystem(&maxPortChannel);
+    maxPortList    = maxPortNo + maxPortChannel;
+
+    if ( setBuf->valBitBufLen > maxPortList )
+    {
+        setBuf->valBitBufLen = maxPortList;
+    }
+
+    for ( int i = 0; i < setBuf->valBitBufLen; i++ )
+    {
+        jsonBoolen = ( setBuf->valBitBuf[i] == MOXA_SNMP_BIT_ENABLE ) ?
+            MOXA_SNMP_JSON_TRUE : MOXA_SNMP_JSON_FALSE ;
+
+        if ( json_array_append_boolean(jsonArray, jsonBoolen) != JSONSuccess )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% can't append boolen for jsonArray('%d')\n",
+                __func__, __LINE__, i );
+        }
+    }
+
+    if ( moxaSnmpHandle_UtilCfgPatchURIConfig( uriPath, jsonVal ) != 0 )
+    {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d : can't PatchURIConfig('%s')\n",
+                __func__, __LINE__, uriPath );
+            goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+    return ret;
+}
+
+
+/**
+ * @brief get json table count
+
+ * $param[in]    uriPath     uri path for json table
+ * @param[out]   tableCount  json table count
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilJsonGetTableCnt( char     *uriPath,
+                                            int32_t  *tableCount )
+{
+    int32_t      ret       = (-1);
+    JSON_Value  *jsonVal   = NULL;
+    JSON_Array  *jsonArray = NULL;
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't get jsonVal on uriPath(%s)\n",
+            __func__, __LINE__ , uriPath );
+        return (-1);
+    }
+
+    jsonArray = json_value_get_array(jsonVal);
+    if( jsonArray == NULL )
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d can't get jsonArray from jsonVal\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    *tableCount = json_array_get_count(jsonArray);
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+
+    return ret;
+}
+
+/**
+ * @brief generate uri snmp-oid-value file
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   retFp       file pointer for output file
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilURISnmpTable( char                         *uriPath,
+                                         struct ies_auto_mibs_entry   *entry,
+                                         FILE                        **retFp    )
+{
+    JSON_Value  *jsonVal = NULL;
+    char         MibTableEntryOid[MOXA_SNMP_MAX_OID] = {0x0};
+    int          MibTableEntryOidLen = 0;
+    int          oidEntry            = 0;
+    FILE        *fp                  = NULL;
+    int32_t      ret                 = (-1);
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return (-1);
+    }
+
+    // generate table oid
+    for ( int i = 0; i < ( entry->oid_len - 1 ) ; i++ )
+    {
+        moxaSnmpHandle_UtilStringSnprintf((char *)MibTableEntryOid, sizeof(MibTableEntryOid),
+            &MibTableEntryOidLen, "%d.", (unsigned int) entry->oid_list[i]);
+    }
+
+    // open snmp-oid-value-file
+    fp = fopen( MOXA_SNMP_PATH "uriTableFile", "w+");
+    if ( fp == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+    return ret;
+}
+
+/**
+ * @brief dump json val
+
+ * @param[in]    functionName  function Name
+ * @param[in]    functionLine  function line
+ * @param[in]    uriPath       uriPath
+ * @param[in]    jsonVal       jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilDumpJsonVal( char        *functionName,
+                                        int          functionLine,
+                                        char        *uriPath,
+                                        JSON_Value  *jsonVal       )
+{
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d :\n", functionName, functionLine );
+    if ( uriPath != NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "uriPath ='%s'\n", uriPath);
+    }
+    if ( jsonVal != NULL )
+    {
+        char *debugJsonStr = json_serialize_to_string(jsonVal);
+        if ( debugJsonStr != NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "jsonVal='%s'\n", debugJsonStr);
+            json_free_serialized_string(debugJsonStr);
+        }
+    }
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "\n" );
+    return 0;
+}
+
+/**
+ * @brief Get L3 IpIfTable json val
+
+ * @param[in]    ifIndex       ifIndex of IFMIB
+ * @param[in]    ipIfValue_p   pointer of jason value
+
+ * @returns      > 0 means success, = 0 means not found, and others are fail.
+ */
+int32_t moxaSnmpHandle_UtilGetIpIfInfo(uint32_t ifIndex,
+                                            JSON_Value     **ipIfValue_p)
+{
+    JSON_Value *jsonVal    = NULL;    
+    FILE    *fp;
+    int     rv = 0, len = 0;
+    char    cmd[80] = {0};
+    char    outbuf[128] = {0};
+    
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : ifIndex=%d\n", __func__, __LINE__, ifIndex);
+    snprintf(cmd, sizeof(cmd), "python3 /usr/bin/get_ip_iftable.py -i %d", ifIndex);
+    fp = popen(cmd, "r");
+    if (fp == NULL)
+    {
+        return -1;
+    }
+        
+    if (fgets(outbuf, sizeof(outbuf), fp) != NULL)
+    {
+        len = strlen(outbuf);
+    }
+    else
+    {
+        len = 0;
+    }    
+    
+    rv = pclose(fp);
+    if (rv == -1)
+    {  /* Error reported by pclose() */
+        return -1;
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "len=%d, outbuf='%s'\n", len, outbuf);
+    if (len > 0)
+    {
+        /* char *testStr = "{\"ifName\": \"vlan60\"}"; */
+        *ipIfValue_p = json_parse_string(outbuf);
+        if(*ipIfValue_p == NULL) 
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : json_parse_string failed\n", __func__, __LINE__);
+            return -1;
+        }
+    }
+    
+    return len;
+}
+
+#endif //_MOXA_SNMP_HANDLE_UTILITY_C_
+

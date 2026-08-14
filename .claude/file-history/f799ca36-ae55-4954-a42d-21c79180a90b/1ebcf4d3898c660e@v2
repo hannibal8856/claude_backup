@@ -1,0 +1,23 @@
+---
+name: project_snmp_framework_subagent_migration
+description: "SNMP_50ms Plan D — migrating iss_build==0 config OID groups to the app_moxa_framework AgentX subagent (in-process GET). Roadmap A→B→C→mxDot1xdb, capabilities, current state, gotchas."
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+---
+
+**Goal**: move iss_build==0 *config* OIDs off the in-master ies-auto-mibs REST loopback onto the app_moxa_framework AgentX subagent (in-process `config_operation::get_config_from_path` GET ~4ms; SET stays REST PATCH via `ies_config_set*`). Measured win: REST 16.8ms vs AgentX 12.5ms → ~4.3ms/OID. The customer "50ms" is ifTable/ifXTable, already served natively by ISS — separate from this. Decided AGAINST the "move all ies-auto-mibs into framework" pivot (Option A spike: `init_ies_auto_mibs` has snmpd-coupled side-effects — rm/mkdir /moxa/run/auto_mibs, s_token mgmt — and dual fetch LibFrameworkUri+iss_uri_read_inplace). Staying with per-group reuse.
+
+**How it works** (`dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c`): `#include`s the canonical `net_*.h` arrays + product -D flags; `g_reuse_srcs[]` (REUSE_SRC macro) lists migrated groups; each group's `MOX_SNMP_INIT_ENTRY` is commented in `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c` (needs `make 3rdparty_net_snmp-dirclean`). Filters `iss_build != 0` (serve iss0 only). `ies_map_entry.table_col`: 0=scalar, 1=portsPbmp index (→port), 2=portsPbmp value (flat bool array[port-1], N from `LibSystem_GetMaxPortNumInSystem`), 3=index-table value (path `<uri><row-1>/<column>` via get_config_from_path, register 1..REUSE_MAX_TABLE_ROWS=16, noSuchInstance past array end), 4=index-table index (existence check → row). Index-table only for groups with setup==NULL (turboring has a setup fn → its tables stay special). Handler `app_moxa_framework/src/snmp_subagent.rs`. portsPbmp SET = whole-array read-modify-write (`ies_config_set_json`); index-table SET = path-addressable `config_set*`.
+
+**Roadmap**: A = pure config-scalar groups (no new code). B = generic index-table handler (DONE) → unlocks trap/portmirror/trustAccess/ipIfdb/device_io/snmp. C = turboringv2 (needs status layer `rust_moxa_status_operation::get_status_from_path` + named-key ring table, biggest). mxDot1xdb = mixed group (3 iss0 localDatabase at `.603.4.5.2.2` + 16 iss1 at ISS `.5.1.x`; split works cleanly — disjoint OIDs, no priority games; needs iss_build filter [done] + B + password mask).
+
+**Current state (code written, PENDING build+verify)**: A migrated 8 groups (event_switching/general/poe/routing/tracking, email, loginPolicy, passwordPolicy, RMON) — verified working except see gotcha. B: index-table handler done + syslog wired as first B group (root `.8691.602.8.2`). Already verified earlier: system_information, portEvent (+portsPbmp GET/SET), event_general, event_port, turboringv2 scalars, chainProtectEvent fix.
+Next: build+verify generalInfo revert + syslog; then batch-add remaining B groups; then C; then mxDot1xdb.
+
+**GOTCHAS / lessons**:
+- Only migrate groups whose data is truly in `running_config` (has a config plugin). **generalInfo was a bad pick** — device/system info (port#/MAC/serial/model/version), NOT config (no `generalInfo` config plugin), uses Counter32/MAC_ADDRESS types the handler doesn't do → reverted to in-master (still on REST). To move it needs bespoke `lib_moxa_rust_system` LibSystem calls + Counter32/MAC types in the agentx wrapper.
+- chainProtectEvent-style name drift (net_*.h URI ≠ plugin config key) → fix at source (rename), not mod_uri. Walk each migrated group to catch drift (noSuchInstance).
+- Product `#if` guards: skip groups not compiled (dhcpSrv/event_hardware/managementIP absent; event_routing needs INCLUDE_MOXA_L3, event_tracking needs MOXA_TRACKING — both present, wrapped in #if in mapping_reuse).
+- SET (all iss0 + iss1) stays REST by design (rare + reuses full setting_write pipeline) — fine.

@@ -1,0 +1,17 @@
+#!/bin/sh
+echo "### framework subagent 裡有沒有新的 fiber check 程式碼"
+B=$(ls /usr/*bin/app_moxa_framework 2>/dev/null | head -1)
+echo "binary: $B"
+for s in "mxfiberCheck/general/portTable/" "fiberCheckStatus/monitor/portTable/"; do
+    printf '  %-40s %s\n' "$s" "$(strings "$B" 2>/dev/null | grep -c "$s")"
+done
+echo "### libmoxaiesautomibs 裡的 fiber check 字串"
+L=/usr/lib/libmoxaiesautomibs.so.1.0.0
+for s in "txPowerWarning" "resetToDefault" "rxPowerLimit" "ies_fc_array_elem"; do
+    printf '  %-24s %s\n' "$s" "$(strings $L 2>/dev/null | grep -c "$s")"
+done
+echo "### ies_fc_* 符號"
+nm -D $L 2>/dev/null | grep -c 'ies_fc_'
+echo "### 帶後綴的初值還在嗎(靜態陣列)"
+strings $L 2>/dev/null | grep -E 'txPowerWarning\[|resetToDefault\[' | sort -u
+echo "### DONE"

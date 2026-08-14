@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Count RO/RW columns per agentx_owned.list URI prefix, from the net_*.h maps."""
+import glob, re, os, collections
+
+D = "/home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs"
+PREFIXES = ["ifmibdb/", "stdethdb/", "mxportdb/", "mxrstpdb/"]
+
+# fields appear in fixed order: name .. uri .. mode .. iss_build
+blk = re.compile(
+    r'\.name\s*=\s*"([^"]*)"'      # 1 name
+    r'[\s\S]{0,400}?\.uri\s*=\s*"([^"]*)"'   # 2 uri
+    r'[\s\S]{0,800}?\.mode\s*=\s*(\w+)'      # 3 mode
+    r'(?:[\s\S]{0,200}?\.iss_build\s*=\s*(\d+))?')
+
+stats = collections.defaultdict(collections.Counter)
+detail = collections.defaultdict(list)
+
+for f in sorted(glob.glob(os.path.join(D, "*.h"))):
+    txt = open(f, errors="replace").read()
+    for name, uri, mode, iss in blk.findall(txt):
+        for p in PREFIXES:
+            if uri.startswith(p):
+                kind = "RW" if "RWRITE" in mode else "RO"
+                stats[p][kind] += 1
+                stats[p]["iss" + (iss or "?")] += 1
+                detail[p].append((kind, name, os.path.basename(f)))
+
+for p in PREFIXES:
+    c = stats[p]
+    tot = c["RO"] + c["RW"]
+    print(f"== {p}  total={tot}  RO={c['RO']}  RW={c['RW']}  "
+          f"(iss_build 1={c['iss1']} 0={c['iss0']})")
+    print("   files:", ", ".join(sorted(set(d[2] for d in detail[p]))))
+    rw = [d[1] for d in detail[p] if d[0] == "RW"]
+    print("   RW cols:", ", ".join(rw) if rw else "(none)")

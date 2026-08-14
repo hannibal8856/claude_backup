@@ -1,0 +1,73 @@
+#!/bin/bash
+# Rust APP package 的 clippy MR 流程(每個 repo):
+#   1. 開 issue,標題 "Clippy scan binaries only" → iid
+#   2. 從 NOS_v6.0_develop 開新分支 <iid>-clippy-scan-binary-packages,
+#      把 clippy-scan-binary-packages-3 上「除 Cargo.lock 外的所有改動」checkout 過來,
+#      squash 成單一 commit "Issue #<iid>: Clippy scan binaries only"
+#      (自動排除 Cargo.lock、自動清掉 firmware_update 的 -p 與重複 commit)
+#   3. push + 開 MR(target=NOS_v6.0_develop,描述 Closes #<iid>)
+#
+# 預設 DRY-RUN;確認後加 --go。env: LIST_FILE / TOKEN_FILE / SLEEP / TARGET
+set -u
+DL=/home/moxa/sda2/home/moxa/NOS_v6.0_develop/buildroot/dl
+SRC_BR=clippy-scan-binary-packages-3
+BASE=origin/NOS_v6.0_develop
+TARGET=${TARGET:-NOS_v6.0_develop}
+TITLE="Clippy scan binaries only"
+TOKEN_FILE=${TOKEN_FILE:-$HOME/moxa_gitlab_scm_token}
+LIST_FILE=${LIST_FILE:-/tmp/app_list.txt}
+GO=0; [ "${1:-}" = "--go" ] && GO=1
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' "$TOKEN_FILE" | head -1)
+[ -n "$TOKEN" ] || { echo "找不到 glpat- token"; exit 1; }
+[ -s "$LIST_FILE" ] || { echo "缺清單檔 $LIST_FILE"; exit 1; }
+api(){ curl -sS --max-time 30 --header "PRIVATE-TOKEN: $TOKEN" "$@" </dev/null; }
+
+done_n=0; skip_n=0; fail=""
+cd "$DL" || exit 1
+while read -r r; do
+  [ -d "$r/.git" ] || continue
+  git -C "$r" rev-parse --verify -q "$SRC_BR" >/dev/null 2>&1 || { echo "SKIP(無源分支) $r"; skip_n=$((skip_n+1)); continue; }
+  enc=$(git -C "$r" remote get-url origin | sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g')
+
+  # idempotency:origin 已有 *-clippy-scan-binary-packages → 跳過
+  if git -C "$r" ls-remote origin 'refs/heads/*-clippy-scan-binary-packages' 2>/dev/null | grep -q .; then
+    echo "EXISTS $r"; skip_n=$((skip_n+1)); continue
+  fi
+  # 要納入的檔 = branch 上除 Cargo.lock 外的所有改動
+  files=$(git -C "$r" diff --name-only --no-ext-diff ${BASE}..${SRC_BR} 2>/dev/null | grep -v 'Cargo.lock')
+  [ -n "$files" ] || { echo "SKIP(無非lock改動) $r"; skip_n=$((skip_n+1)); continue; }
+
+  iid=$(api "https://gitlab.com/api/v4/projects/$enc/issues?state=opened&search=$(printf %s "$TITLE" | sed 's/ /%20/g')" \
+        | jq -r --arg t "$TITLE" '[.[]|select(.title==$t)][0].iid // empty')
+  if [ -z "$iid" ]; then
+    if [ "$GO" = 1 ]; then
+      iid=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/issues" --data-urlencode "title=$TITLE" | jq -r '.iid // empty')
+      [ -n "$iid" ] || { echo "FAIL(開 issue) $r"; fail="$fail $r"; continue; }
+    else iid="<NEW>"; fi
+  fi
+  newbr="${iid}-clippy-scan-binary-packages"; msg="Issue #${iid}: ${TITLE}"
+
+  if [ "$GO" = 0 ]; then
+    echo "DRY  $r  issue=#$iid  branch=$newbr  含檔=[$(echo $files | tr '\n' ',')]  → MR to $TARGET"
+    continue
+  fi
+
+  # 工作樹必須乾淨
+  [ -z "$(git -C "$r" status --porcelain)" ] || { echo "FAIL(工作樹不乾淨) $r"; fail="$fail $r"; continue; }
+  git -C "$r" checkout -q -B "$newbr" "$BASE" || { echo "FAIL(checkout base) $r"; fail="$fail $r"; continue; }
+  git -C "$r" checkout "$SRC_BR" -- $files || { echo "FAIL(取檔) $r"; fail="$fail $r"; continue; }
+  git -C "$r" commit -q -m "$msg" || { echo "FAIL(commit) $r"; fail="$fail $r"; continue; }
+  git -C "$r" push -q -u origin "$newbr" || { echo "FAIL(push) $r"; fail="$fail $r"; continue; }
+  resp=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/merge_requests" \
+    --data-urlencode "source_branch=$newbr" --data-urlencode "target_branch=$TARGET" \
+    --data-urlencode "title=$msg" --data-urlencode "description=Closes #${iid}" \
+    --data "remove_source_branch=true")
+  mrurl=$(echo "$resp" | jq -r '.web_url // empty')
+  if [ -n "$mrurl" ]; then echo "OK   $r  issue #$iid  → $mrurl"; done_n=$((done_n+1))
+  else echo "FAIL(MR) $r : $(echo "$resp" | jq -rc '.message // .')"; fail="$fail $r"; fi
+  [ "${SLEEP:-0}" != 0 ] && sleep "${SLEEP}"
+done < "$LIST_FILE"
+echo "---------------------------------------------"
+echo "完成=$done_n  跳過=$skip_n  失敗:${fail:- 無}"
+[ "$GO" = 0 ] && echo "(DRY-RUN;確認後加 --go)"
+exit 0

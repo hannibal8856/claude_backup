@@ -1,0 +1,28 @@
+---
+name: build-is-users-job
+description: 不要自己跑 buildroot build；使用者有 run_in_docker.sh，且並行 build 會互相破壞
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: ba3523f8-fd26-456e-8fce-c6165f41d9f4
+  modified: 2026-08-03T10:15:16.673Z
+---
+
+**不要自己執行 buildroot 的 build（包含透過 subagent）。** 只做程式碼變更與語法檢查，
+把要跑的指令列給使用者，由他執行。
+
+**Why:** Plan E Task 4 時，subagent 在使用者同時也在 build 的情況下跑了
+`make ...-rebuild`，撞到 `make -j` 的 libtool symlink race（`ln: File exists`）。
+同一個 `output/` 目錄跑兩個 buildroot 會互相破壞，且事後無法確定 image 是否乾淨。
+使用者有自己的 `run_in_docker.sh` 負責建置。
+
+**How to apply:**
+
+- 交付變更時列出：改動的 buildroot package、對應 `dl/<repo>` 與 commit、受影響的目標執行檔
+- **要主動告知曾執行過哪些 build 指令**（使用者明確要求）
+- **`plugin_moxa_*`、`framework` 這類 package rebuild 之後，還要跑
+  `make rust_moxa_build-rebuild` 才會生效** —— 列指令時別漏掉
+- 容器外直接執行 make 會撞到 `snmp_script_rust/Makefile` 的 docker 偵測 bug
+  （`&>/dev/null` 在 dash 下被誤解析），這是既有問題
+
+相關：[[report-changed-packages]]、[[snmp-work-notes-repo]]

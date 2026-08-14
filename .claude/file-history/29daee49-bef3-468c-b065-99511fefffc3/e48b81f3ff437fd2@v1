@@ -1,0 +1,23 @@
+---
+name: feedback-build-order
+description: Buildroot rebuild order — plugin_moxa_snmp must be rebuilt before rust_moxa_build (then final make)
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+---
+
+Buildroot rebuild order for mds4xg (and likely other Moxa products on this tree):
+
+```
+make 3rdparty_net_snmp-rebuild
+make plugin_moxa_snmp-rebuild        # MUST be before rust_moxa_build-rebuild
+make rust_moxa_build-rebuild
+make                                  # final image
+```
+
+**Why:** User corrected my initial ordering (which had rust_moxa_build before plugin_moxa_snmp). Likely because rust_moxa_build consumes generated/installed artifacts from plugin_moxa_snmp (or the rust glue depends on snmp plugin headers/.so being in staging first). Reversing the order risks a stale-link or rust-build-against-old-snmp-plugin situation, even if neither errors visibly.
+
+**How to apply:** Any time the user asks for a chained rebuild that touches both `plugin_moxa_snmp` and `rust_moxa_build`, put `plugin_moxa_snmp-rebuild` first. The full chain above is the canonical sequence after editing C in 3rdparty_net_snmp + plugin_moxa_snmp.
+
+**Rust binaries (`app_moxa_framework`, `app_moxa_iss_config_loader`, …) are compiled ONLY by `rust_moxa_build` (2026-07-14):** their own package (`app_moxa_framework-custom`) has an EMPTY Makefile and NO `_BUILD_CMDS` in the `.mk` — `make app_moxa_framework-rebuild` only rsyncs source + installs, it does NOT run cargo, so the installed binary stays stale. The actual `cargo build --workspace` lives in `rust_moxa_build` (`dl/rust_moxa_build/Cargo.toml` `[workspace] members=["app_moxa_framework", …]`; it symlinks/uses the sibling `output/build/<pkg>-custom` dirs). So after editing any Rust binary/crate source: `make <pkg>-rebuild` (to rsync the new source into `output/build/<pkg>-custom`) THEN `make rust_moxa_build-rebuild` (to recompile), THEN `make` (image). Skipping `rust_moxa_build` = old binary in the image → symptom looked like "code change had no effect" (e.g. new AgentX subagent OID returned No Such Object because the framework binary was never recompiled).

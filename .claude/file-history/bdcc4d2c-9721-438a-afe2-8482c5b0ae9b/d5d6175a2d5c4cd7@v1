@@ -1,0 +1,39 @@
+---
+name: project_every_get_pays_shm_attach
+description: "出貨 image 每個成功 SNMP GET 都做一次 ftok+shmget+shmat,自 2022 年既有,mainline 也在付"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 543288d9-63d4-40ca-a311-1a8b83f5414d
+  modified: 2026-08-13T07:28:42.260Z
+---
+
+2026-08-13 追查 mxQos 具象化成本時查到,**與 mxQos 無關,影響整個 SNMP 讀取路徑**。
+
+```
+ies_auto_mibs.c:241  util_timeDiff()  → LibUtil_DbgTrace(...)   無旗標前置檢查,無條件呼叫
+util_debug.c:81      LibUtil_DbgTrace → if (LibUtil_CheckDbgFlgBits(aType))
+util_debug.c:231     LibUtil_CheckDbgFlgBits → _LibUtil_InitDbgFlagShm() + ftok() + shmget()
+                                               每次呼叫,無快取
+ies_auto_mibs.c:3772 util_timeDiff("mib_get_success")   ← 每個成功 GET 都走到
+ies_auto_mibs.c:2349 util_timeDiff("get_val_from_iss")  ← 每次具象化再一次
+```
+
+旗標檢查在 `LibUtil_DbgTrace()` **內部**,呼叫端跳不掉;而 `util_timeDiff` 連一個 `if` 都沒有。
+**所以 debug 旗標關著也照付。**
+
+`git blame` 三行都指向 **`280b1b7f`(2022-06-02,"Upgrade to net-snmp 5.8")**,
+在 `develop` / `NOS_v6.0_develop` 上 —— **不是 Plan E,是產品既有,mainline 同樣在付。**
+
+⚠️ **量級未測,是候選不是發現。** 但位置很糟:每個 GET、純為診斷而存在。
+
+## 兩個連帶修正
+
+1. 「用 debug image 量 `get_val_from_iss` 會被 instrumentation 汙染」**是錯的** ——
+   SHM 成本本來就在付,開旗標只新增每行 trace 的寫出成本
+   (`util_debug.c:87-93` 每行一次 `fopen`/`fprintf`/`fclose`)。
+2. 這與 [[project_agentx_priority_direction_inverted]] 之類的無關;它是**純粹的固定開銷**,
+   不影響正確性。
+
+相關:[[project_mxqos_forwarding_measured_slower]](in-master 單價 2.98 ms/varbind,
+這筆成本含在裡面)、[[project_frameworkuri_reconnects_per_request]]

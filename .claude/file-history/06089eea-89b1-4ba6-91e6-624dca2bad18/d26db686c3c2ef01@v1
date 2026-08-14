@@ -1,0 +1,2 @@
+- [Rust clippy-scan MSRV fix](rust-clippy-scan-msrv-fix.md) — fixing RUST_CLIPPY_SCAN_CONFIG=true failures under pinned rustc 1.85
+- [Build & verify via docker](build-and-verify-via-docker.md) — run real rustc-1.85 build in container mx_NOS_v6.0_develop

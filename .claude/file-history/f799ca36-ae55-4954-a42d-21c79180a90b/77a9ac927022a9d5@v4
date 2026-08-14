@@ -1,0 +1,898 @@
+#ifndef _ISS_SNMP_URI_REMAP_STDRMONDB_C_
+#define _ISS_SNMP_URI_REMAP_STDRMONDB_C_
+
+remapper_tableOid_t                stdrmodb_etherStatsTable_oid     [] = {1,3,6,1,2,1,16,1,1,1};
+
+struct remapper_tableEntryHandler  stdrmodb_etherStatsTable_handler [] = 
+{
+    {
+        .entry_uri = "etherStatsDataSource",
+        .entry_oid = 2,
+    },
+};
+
+remapper_tableOid_t                stdrmodb_historyControlTable_oid     [] = {1,3,6,1,2,1,16,2,1,1};
+
+struct remapper_tableEntryHandler  stdrmodb_historyControlTable_handler [] = 
+{
+    {
+        .entry_uri = "historyControlDataSource",
+        .entry_oid = 2,
+    },
+};
+
+
+remapper_tableOid_t                stdrmodb_alarmTable_oid     [] = {1,3,6,1,2,1,16,3,1,1};
+
+struct remapper_tableEntryHandler  stdrmodb_alarmTable_handler [] = 
+{
+    {
+        .entry_uri = "alarmVariable",
+        .entry_oid = 3,
+    },
+};
+
+
+remapper_tableOid_t                stdrmodb_eventTable_oid     [] = {1,3,6,1,2,1,16,9,1,1};
+
+struct remapper_tableEntryHandler  stdrmodb_eventTable_handler [] = 
+{
+    {
+        .entry_uri = "eventCommunity",
+        .entry_oid = 4,
+    },
+};
+
+
+/**
+ * @brief We only need to do port-remap function in alarmVariable of alramTable.
+          But alarmVariable only allow the following 3 mib table for now
+          ifTable(ifMIB), ifXtable(ifMIB) and etherStatsTable(stdRmonMIB).
+          And we don't need to do port-remap-function in etherStatsTable.
+
+ * $param[in]      handleType                REMAP_RMON_READ  / REMAP_RMON_UPDATE
+ * $param[in]      iputBuf
+                                            REMAP_RMON_READ
+
+                                                if handleType is REMAP_RMON_READ,
+                                                inputBuf is like the following.
+                                                    oid='<value>'
+                                                example :
+                                                    1.3.6.1.2.1.16.3.1.1.3='<value>'
+
+                                            REMAP_RMON_UPDATE
+
+                                                if handleType is REMAP_RMON_UPDATE,
+                                                inputBuf is like the following.
+                                                    stdrmodb/alarmTable/<index>/alarmVariable='<value>'
+
+                                            example of value is like the following:
+                                                '1,3,6,1,2,1,16,1,1,1,4,1'
+                                             or
+                                                '1.3.6.1.2.1.16.1.1.1.4.1'
+
+ * $param[in]      iputBufLen                the length of input buffer
+
+
+
+ * @returns     REMAP_RMON_PORT_YES
+                REMAP_RMON_PORT_NO
+                REMAP_RMON_PORT_ERROR
+ */
+int32_t moxaIssUriRemap_Rmon_CheckAlarmTableVariable( const int   handleType,
+                                                      const char *iputBuf,
+                                                      const int   iputBufLen )
+
+{
+    const uint32_t oisList_stdrmodb_etherStatsTable[]          = {1,3,6,1,2,1,16,1,1,1};
+    const uint32_t oidList_stdrmodb_alarmTable_alarmVariable[] = {1,3,6,1,2,1,16,3,1,1,3};
+
+    int   oidList[IES_MAX_OID]  = {0x0};
+    int   oidListLen            = 0;
+    char *iputBufVal            = NULL;
+    char  tmpBuf[IES_MAX_FILE]  = {0x0};
+
+    snprintf(tmpBuf, sizeof(tmpBuf), "%s", iputBuf);
+
+    if ( handleType == REMAP_RMON_READ )
+    {
+        if ( remapper_util_buf_handle_get_oid_and_value(
+                    tmpBuf, strlen(tmpBuf),
+                    oidList, &oidListLen, &iputBufVal) != IES_NOERR )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't get_oid_and_value\n",
+                __func__, __LINE__ );
+            return REMAP_RMON_PORT_ERROR;
+        }
+
+        /* only do transfer alarmVariable of alramTable */
+        if ( memcmp( oidList,
+                     oidList_stdrmodb_alarmTable_alarmVariable,
+                     sizeof(oidList_stdrmodb_alarmTable_alarmVariable) )  != 0 )
+        {
+            return REMAP_RMON_PORT_NO;
+        }
+    }
+    else
+    {
+        if ( remapper_util_snmp_table_get_value_from_buffer(
+                tmpBuf, strlen(tmpBuf),
+                &iputBufVal) != IES_NOERR )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't get_value_from_buffer\n",
+                __func__, __LINE__ );
+            return REMAP_RMON_PORT_ERROR;
+        }
+    }
+
+    iputBufVal += 1; // iputBufVal is wrapped by this symbol <'>, skip 1st <'>
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d iputBufVal('%s') \n",
+        __func__, __LINE__, iputBufVal);
+
+    /* cover the oidString into oidList  */
+    if ( moxaIssUriRemap_Util_StringObjectIDToOID(
+            iputBufVal, strlen(iputBufVal) - 1 ,
+            ( uint32_t * )    oidList,
+            ( uint32_t * )   &oidListLen,
+            (const uint32_t)  IES_MAX_OID ) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't StringObjectIDToOID\n",
+            __func__, __LINE__ );
+        return REMAP_RMON_PORT_ERROR;
+    }
+
+    /* no need to do transfer if alarmVariable is etherStatsTable */
+    if ( memcmp( oidList,
+                 oisList_stdrmodb_etherStatsTable,
+                 sizeof(oisList_stdrmodb_etherStatsTable) ) == 0 )
+    {
+        return REMAP_RMON_PORT_NO;
+    }
+    return REMAP_RMON_PORT_YES;
+}
+
+
+/**
+ * @brief handle remap function for read stdrmodb/alarmTable/
+
+ * $param[in]      iputURI                 string like (stdrmodb/alarmTable/)
+ * $param[in]      iputFile                input  file name ( file before remap )
+ * $param[in]      oputFile                output file name ( file after  remap )
+
+ * @returns     IES_NOERR               -- read remap is success
+                IES_ERR                 -- read remap fail
+ */
+ies_handle_t remapper_handle_read_stdrmodb_alarmTable( u8 *iputURI,
+                                                       u8 *iputFile,
+                                                       u8 *oputFile )
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+    int32_t             retChk                 = (-1);
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        retChk = moxaIssUriRemap_Rmon_CheckAlarmTableVariable(
+                    REMAP_RMON_READ,
+                    ( const char *) iput_buf,
+                    ( const int   ) strlen(iput_buf));
+        if ( retChk == REMAP_RMON_PORT_ERROR )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't CheckAlarmTableVariable\n",
+                __func__, __LINE__ );
+            goto out;
+        }
+        else
+        if ( retChk == REMAP_RMON_PORT_NO )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_IFINDEX_OBJ_TABLE(
+            stdrmodb_alarmTable_handler,
+            stdrmodb_alarmTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_update_stdrmodb_alarmTable
+(
+    u8           *iputURI,
+    u8           *oputURI,
+    u8           *iputFile,
+    u8           *oputFile
+)
+{
+    
+    char          uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN] = {0x0};
+    int           uri_col_idx                                       =  0;
+    FILE         *iput_fp                                           = NULL;
+    FILE         *oput_fp                                           = NULL;
+    char          iput_buf[IES_MAX_FILE]                            = {0x0};
+    char          oput_buf[IES_MAX_FILE]                            = {0x0};
+    ies_handle_t  ret                                               = IES_ERR;
+    int           i = 0;
+    int32_t       retChk = (-1);
+
+
+    snprintf((char *)oputURI,  IES_MAX_URI,      "%s", iputURI);
+    
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    
+    {
+        for ( i = 0; i <= uri_col_idx; i++ )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d buf \'%s\'\n", __func__, __LINE__, uri_col_buf[i] );
+        }
+    }
+
+    if ( 0 == REMAPPER_UTIL_SNMP_CHECK_TRANSFER_BY_URI(
+        stdrmodb_alarmTable_handler, 
+        uri_col_buf[uri_col_idx]) )
+    {
+        rename( (const char *)iputFile, (const char *)oputFile );
+        return IES_NOERR;
+    }
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    retChk = moxaIssUriRemap_Rmon_CheckAlarmTableVariable(
+                REMAP_RMON_UPDATE,
+                ( const char *) iput_buf,
+                ( const int   ) strlen( iput_buf));
+
+    if ( retChk == REMAP_RMON_PORT_ERROR )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't CheckAlarmTableVariable\n",
+            __func__, __LINE__ );
+        goto out;
+    }
+    else
+    if ( retChk == REMAP_RMON_PORT_NO )
+    {
+        fclose(iput_fp);
+        fclose(oput_fp);
+        rename( (const char *)iputFile, (const char *)oputFile );
+        return IES_NOERR;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_handle_ifidxObj_entry_update(
+        iput_buf, strlen(iput_buf), 
+        oput_buf, sizeof(oput_buf) ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    fprintf(oput_fp,"%s", oput_buf);
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    這個 table 的 read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_read_stdrmodb_historyControlTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_IFINDEX_OBJ_TABLE(
+            stdrmodb_historyControlTable_handler,
+            stdrmodb_historyControlTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_update_stdrmodb_historyControlTable
+(
+    u8           *iputURI,
+    u8           *oputURI,
+    u8           *iputFile,
+    u8           *oputFile
+)
+{
+    
+    char          uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN] = {0x0};
+    int           uri_col_idx                                       =  0;
+    FILE         *iput_fp                                           = NULL;
+    FILE         *oput_fp                                           = NULL;
+    char          iput_buf[IES_MAX_FILE]                            = {0x0};
+    char          oput_buf[IES_MAX_FILE]                            = {0x0};
+    ies_handle_t  ret                                               = IES_ERR;
+    int           i = 0;
+
+    snprintf((char *)oputURI,  IES_MAX_URI,      "%s", iputURI);
+    
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    
+    {
+        for ( i = 0; i <= uri_col_idx; i++ )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d buf \'%s\'\n", __func__, __LINE__, uri_col_buf[i] );
+        }
+    }
+
+    if ( 0 == REMAPPER_UTIL_SNMP_CHECK_TRANSFER_BY_URI(
+        stdrmodb_historyControlTable_handler, 
+        uri_col_buf[uri_col_idx]) )
+    {
+        rename( (const char *)iputFile, (const char *)oputFile );
+        return IES_NOERR;
+    }
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_handle_ifidxObj_entry_update(
+        iput_buf, strlen(iput_buf), 
+        oput_buf, sizeof(oput_buf) ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    fprintf(oput_fp,"%s", oput_buf);
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    這個 table 的 read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_read_stdrmodb_etherStatsTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_IFINDEX_OBJ_TABLE(
+            stdrmodb_etherStatsTable_handler,
+            stdrmodb_etherStatsTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_update_stdrmodb_etherStatsTable
+(
+    u8           *iputURI,
+    u8           *oputURI,
+    u8           *iputFile,
+    u8           *oputFile
+)
+{
+    
+    char          uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN] = {0x0};
+    int           uri_col_idx                                       =  0;
+    FILE         *iput_fp                                           = NULL;
+    FILE         *oput_fp                                           = NULL;
+    char          iput_buf[IES_MAX_FILE]                            = {0x0};
+    char          oput_buf[IES_MAX_FILE]                            = {0x0};
+    ies_handle_t  ret                                               = IES_ERR;
+    int           i = 0;
+
+    snprintf((char *)oputURI,  IES_MAX_URI,      "%s", iputURI);
+    
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    
+    {
+        for ( i = 0; i <= uri_col_idx; i++ )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d buf \'%s\'\n", __func__, __LINE__, uri_col_buf[i] );
+        }
+    }
+
+    if ( 0 == REMAPPER_UTIL_SNMP_CHECK_TRANSFER_BY_URI(
+        stdrmodb_etherStatsTable_handler, 
+        uri_col_buf[uri_col_idx]) )
+    {
+        rename( (const char *)iputFile, (const char *)oputFile );
+        return IES_NOERR;
+    }
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_handle_ifidxObj_entry_update(
+        iput_buf, strlen(iput_buf), 
+        oput_buf, sizeof(oput_buf) ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    
+    fprintf(oput_fp,"%s", oput_buf);
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+
+
+/****************************************************************************
+ Description        : 
+
+    這個 table 的 read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_read_stdrmodb_eventTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+
+        memset(oput_buf, 0, sizeof(oput_buf));
+
+        if ( IES_NOERR == REMAPPER_UTIL_BUF_HANDLE_STDRMON_EVENT_TABLE(
+            stdrmodb_eventTable_handler,
+            stdrmodb_eventTable_oid, 
+            iput_buf, strlen(iput_buf),
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    update remapper for stdrmodb
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_stdrmodb_update
+(
+    u8 *iputURI,
+    u8 *oputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        
+        {
+            .uri     = "stdrmodb/etherStatsTable/",
+            .update  = remapper_handle_update_stdrmodb_etherStatsTable,
+        },
+        {
+            .uri     = "stdrmodb/historyControlTable/",
+            .update  = remapper_handle_update_stdrmodb_historyControlTable,
+        },
+        {
+            .uri     = "stdrmodb/alarmTable/",
+            .update  = remapper_handle_update_stdrmodb_alarmTable,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_update(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, oputURI, iputFile, oputFile );
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    read remapper for stdrmodb
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_stdrmodb_read
+(
+    u8 *iputURI, 
+    u8 *iputFile, 
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        {
+            .uri   = "stdrmodb/etherStatsTable/",
+            .read  = remapper_handle_read_stdrmodb_etherStatsTable,
+        },
+        {
+            .uri   = "stdrmodb/historyControlTable/",
+            .read  = remapper_handle_read_stdrmodb_historyControlTable,
+        },
+        {
+            .uri   = "stdrmodb/alarmTable/",
+            .read  = remapper_handle_read_stdrmodb_alarmTable,
+        },
+        {
+            .uri   = "stdrmodb/eventTable/",
+            .read  = remapper_handle_read_stdrmodb_eventTable,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_read(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, iputFile, oputFile );
+}
+
+
+
+#endif // _ISS_SNMP_URI_REMAP_STDRMONDB_C_

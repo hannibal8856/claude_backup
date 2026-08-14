@@ -1,0 +1,238 @@
+# ADR-0032: 否決 mxQos 的 `+getfwd` 委派(實測慢 14%),並記錄排序在其之上的 GETNEXT 邊界缺陷
+
+Status:
+  🔴 **Proposed / 結論已於同日撤回重審(2026-08-13)。**
+  使用者指出 mxQos 仍有搬遷價值,重審後我同意 **Decision 一節的「不搬」不成立** ——
+  它建立在一組**不足以支撐該結論**的量測上:
+
+  1. **只量了 walk 形狀的存取**,而 walk 把具象化成本攤在大量 varbind 上,
+     結構上最有利於 in-master。真實使用者(MIB browser / 網管軟體的表格檢視)是
+     **table view 形狀**,那裡具象化佔 60–71%(第 6b 節),兩者結論可能相反。
+  2. **兩臂都把 registration 留在 in-master**(`+nodelegate` 的定義),所以
+     `entry_handle_exception()` 的邊界缺陷**在兩臂都存在** ——
+     「換 ISS 服務能不能讓 walk 從 17% 變 100%」這個問題**從未被測到**,
+     而它的價值遠大於 14%。
+  3. **機制模型對不上**:`:3704-3707` 顯示轉發成功即 `return`,不會走到 `:3725` 的具象化,
+     那 B 臂應省下具象化;但逐表數字(`.1.4` 24 vb:A 0.178 / B 0.186)回推不出來。
+     **代表我對 B 臂實際走哪條路的理解有誤。**
+
+  **量測數據本身(第 3–4 節、兩張 pcap)不受影響,仍然有效** —— 失效的是從它們
+  推導出的「不搬」。正確狀態是「**用這組量測無法判斷**」。
+  待使用者釐清所求價值(消除具象化 / 繞開邊界缺陷 / 架構一致性)後重新設計實驗。
+
+  以下原文保留不改,作為當時的判斷紀錄。這是 ADR-0031 的**應用決策**,不取代它。
+  ADR-0031 證明的是「機制成立」(`+nodelegate` 解開耦合、三種 probe 來源可用),
+  本 ADR 回答的是「值不值得用在 mxQos 上」——**不值得**。
+  機制本身維持 Accepted,`+getfwd` 對既有四個 prefix 的行為不變。
+
+Date: 2026-08-13
+
+Context:
+  ADR-0031 用 bind mount 熱套用證明 `mxqosdb/ +getfwd +nodelegate` 會轉發、且完整性
+  回到 180 varbind / 15 欄,但**完全沒有量過快慢**,並明確把「若量出來沒好處就不要搬」
+  留給下一輪。可參考的舊數字全部作廢:ADR-0014 推導的 +12.7% 前提已被 ADR-0030 推翻,
+  ADR-0025 那組 A/B 是在「以為沒轉發」的前提下解讀的。
+
+  量測的前置條件是一顆**不帶 instrumentation 的 image**:ADR-0030 記載
+  `LibUtil_CheckDbgFlgBits()` 每次呼叫都跑一輪 `ftok`+`shmget`+`shmat`,而 `T4 GATE`
+  在每個 RW GET 的路徑上,所以 `2026_0812_*` 那批的任何時間數字都不可用。
+  本輪先把 GETFWD trace 收進編譯期開關(`MOX_GETFWD_TRACE_ENABLED`,預設 0),
+  建出 `2026_0813_0905`,實查出貨 `.so` 內 `GETFWD` 字串為 0 後才開始量。
+
+Decision:
+  **不要把 `mxqosdb/` 加進 `agentx_owned.list`。** mxQos 的 GET 維持 in-master。
+
+  依據是同一顆 image 上的交錯 A/B/A:只切換 `agentx_owned.list` 的那一行
+  (bind mount)+ 依支援路徑重啟 snmpd,其餘位元組完全相同。七張表**逐表** walk、
+  每表 7 次取中位數:
+
+  ```
+  A(未列入,in-master)    A1 1.4033s   A2 1.4117s    A↔A 重複性 0.008s
+  B(+getfwd +nodelegate)  B1 1.6144s   B2 1.5960s    B↔B 重複性 0.018s
+  Δ = +0.197s (+14.0%)                              雜訊的 11–25 倍
+  ```
+
+  慢的集中在資料量大的三張:`.1.5` +21.8%、`.1.6` +19.0%、`.1.7` +18.0%;
+  `.1.1`(64 varbind)幾乎零差異。**完整性兩臂完全相同**(434 varbind,七表逐表一致),
+  所以這不是「用速度換覆蓋」的取捨 —— 是純粹的負收益。
+
+  線路對照兩張都有效(見 Constraints 的有效性檢查):
+
+  ```
+  A 臂    2 GetNext(邊界流量)/ 6 次 .8691.603 OID 位元組 / pcap 1.6 KB
+  B 臂  201 GetNext / 205 Response / 608 次 / pcap 70 KB
+  ```
+
+  100 倍差距排除了「兩臂其實一樣、差異只是漂移」與「B 臂沒轉發所以才慢」兩種解釋。
+
+  ## 附帶確立的通則
+
+  **委派的收益取決於本地讀取有多慢,不取決於 AgentX 有多快。**
+
+  這是反直覺的,值得寫下來:in-master 走 `ies_uri_handle_client` → LibFrameworkUri,
+  而後者 `_isConnectionAlive()` 硬編回 0,**每個請求重建一次 TCP 連線**;AgentX 相反,
+  開機建一次、之後常駐。結構上 in-master 應該比較慢,**實測卻快 14%**。
+  推論:**ISS 端回答一個 varbind 的成本,超過「本地建連 + 讀取」的總和。**
+  mxQos 的 in-master 單價是 **2.98 ms/varbind** —— 已經快到 ISS 蓋不過去。
+
+  → 篩選候選群組時,**先量 in-master 的 ms/varbind 並排序,只對慢的做完整 A/B**;
+  「本地夠快」本身就是不委派的充分理由,不必真的跑一輪。
+  這與 ADR-0015 關卡二(walk 夠不夠慢才值得搬)方向一致,但把它從「不值得」
+  推進到「會變糟」——mxQos 是第一個實測的負值案例。
+  同族現象:ADR-0028 收回的 `mxrstpdb/` 「快 0.03s」,實為無可測量差異。
+
+Alternatives Considered:
+  - **照 ADR-0031 的路徑直接搬,不量效能。** 否決。ADR-0024/0025/0028/0030 這條線
+    已經四次因為「沒量或量錯」而翻案,交接也明確把量測列為不可省的一步。
+  - **建兩顆 image(有/無 mxQos 行)做 A/B。** 否決,改用同一顆 image 切 list。
+    `agentx_owned.list` 是執行期檔案,兩臂之間只差那一行;跨 image 比較會把中間
+    所有無關的重編都算進差異,而且要兩次建置與兩次燒錄。
+  - **拿 `~/swu/` 既有的 `0811_1349` / `0812_1136` 當 B 臂。** 否決,同上 ——
+    那兩顆與新 image 差的不只 mxQos 一行。
+  - **用整棵 `.603.2.9` walk 計時。** 否決,見下方缺陷:整棵 walk 在 `.1.2` 就中止,
+    只回 434 個中的 73 個,量的是「走到第 73 個就出錯」的時間。
+  - **保留 list 那行但標註「已知較慢」。** 否決。列入即生效,留著就是讓出貨版付這 14%。
+
+Consequences:
+  - `plugin_moxa_snmp` 的 `e7f6889` 加的那一行**應予移除**。建議用新 commit 只拿掉該行、
+    並把 −14% 寫進註解(**不要 `git revert`** —— 那會連同檔頭那段旗標說明一起還原,
+    而那段說明「`+getfwd` / `+nodelegate` 各做什麼、加錯會靜默掉欄位」是要留的)。
+  - `b1536f3` 的 trace 編譯期開關**留下**,與本決策無關且獨立有價值:出貨版不帶
+    instrumentation,現場診斷加 `-DMOX_GETFWD_TRACE_ENABLED=1` 即可,
+    停用形式用 `if (0)` 而非空 body,所以引數仍受型別檢查、不會腐爛。
+  - 其餘 0-RO 前綴(`stdlldp/` `mxradiusdb/` `mxlldp/` …)在推廣前**先量本地單價**,
+    不要因為 ADR-0031 證明機制可用就整批上。
+
+  ## 🔴 排序在本決策之上的未解缺陷:mxQos 整棵 walk 只回得出 17%
+
+  **GETNEXT 在兩個邊界回傳「請求的 OID 自己」**:
+
+  ```
+  GETNEXT .603.2.9.1.3        → .603.2.9.1.3 = NULL      (應為 .603.2.9.1.3.1.2.1)
+  GETNEXT .603.2.9.1.2.1.2.7  → .603.2.9.1.2.1.2.7       (應跨到 .1.3)
+  ```
+
+  後果:任何標準 walk 在 `.1.2` 就以 `Error: OID not increasing` 中止,
+  **只拿到 434 個 varbind 中的 73 個(17%)**。逐表 walk 才完整。
+  欄位本身存在 —— `snmpget .603.2.9.1.3.1.2.1` 回 `INTEGER: 3`,
+  `snmpgetnext .603.2.9.1.3.1.2` 也正確回下一筆;**是 walk 走不到,不是沒實作**。
+  `snmpwalk -Cc` 不能繞(會無限重送同一個 OID,實測 180 秒未停)。
+
+  **這件事的價值大於整輪效能討論**:一個是客戶可見資料量 17% → 100%,
+  另一個是已否決的十分之幾秒。已請 `snmp-plan-E trace 3` 從原始碼找根因(純唯讀)。
+
+  ⚠️ 對外敘述的直接影響:在這個缺陷修好之前,**宣稱「補上了 mxQos」是過度宣稱** ——
+  客戶用一般網管軟體看到的是 17%。
+
+  ### 更正(2026-08-13,同日):「mainline 完全沒有 mxQos」是錯的,不要引用
+
+  本 ADR 初稿據以下觀測寫下「mainline NOS 7 對 `.603.2.9` 回 `No Such Object`,
+  所以 mxQos 是 Plan E 才有的新覆蓋」:
+
+  ```
+  mainline p2 (2026_0805_2335)  snmpwalk .1.3.6.1.4.1.8691.603.2.9
+    Error in packet. Reason: (badValue) The value given has the wrong type or length.
+    .1.3.6.1.4.1.8691.603.2.9 = No Such Object available on this agent at this OID
+  ```
+
+  **這是誤讀。** 第一行才是 agent 的實際回應,第二行是 snmpwalk 在請求失敗後印的。
+  沒有註冊的話 net-snmp 會回 `endOfMibView`(`snmp_agent.c:2361-2371`,`tp == NULL` 的
+  GETNEXT 分支),**不會回 `badValue`**;`badValue` 是 `ies_auto_mibs.c:1822`
+  `entry_handle_update_result()` 的 fall-through 回傳值 —— 代表**請求進到了 in-master
+  handler,是 handler 自己回錯**。同樣的誤讀也發生在 `.603.2` 那次 walk(只拿到
+  `.603.2.3` 的 23 個 varbind 就中止,被讀成「`.603.2.9` 不存在」)。
+
+  `snmp-plan-E trace 3` 以 MIB browser 的 table view 封包(`~/pcap/2026-08-13_nodelegate_*`)
+  證實正確的狀態是:
+
+  ```
+  mainline   .1.1 .1.2 .1.3  全部 badValue(OID 原樣退回)   .1.4–.1.7  正常
+  Plan E     .1.1 .1.2 修好  .1.3 仍 badValue(0.014s 立即失敗,非逾時)   .1.4–.1.7 正常
+  ```
+
+  **→ mxQos 不是 Plan E 新增的覆蓋,而是 Plan E 修好了 mainline 上壞掉的兩張表。**
+  這仍是正面事實,但性質完全不同,**簡報敘述必須用後者**。
+  本輪 walk 沒看到 `.1.4`–`.1.7`,純粹是因為 walk 在第一個請求就中止,沒走到那裡。
+
+  ### 同時證實的另一件事:回傳的邊界哨兵不是真 OID
+
+  Plan E 的 `.1.1` / `.1.2` 雖然能用,但第一個 varbind 回的是
+  `GETNEXT .1.1.1.1 → .1.2.1.3`,而 **`.603.2.9.1.2.1.3` 在 `net_mxQosdb.h` 裡不存在**
+  (qosConfigCoSMappingTable 只有 col 2)—— 它是 net-snmp 給 `.1.2.1.2` 這個
+  registration 的 range 結束標記。成因是 `entry_handle_exception():1868` 把
+  `next_subtree->name_a` 直接 `snmp_set_var_objid()` 回去,而 `find_prev()` 是照
+  `start_a` 排序走訪的,兩者不等時就把哨兵當成真 OID 交出去。
+
+  ## 另一個 session 提出、尚未確立的問題(不在本 ADR 的結論範圍)
+
+  `snmp-plan-E document 4` 指出簡報頭條的「mainline 30.953 s / 48 倍」可能是逾時常數:
+  `walk.sh:25` 用 `-t 5` 且未指定 `-r`,net-snmp 預設 retries 5,
+  總等待 = 5 × (1+5) = **30 秒**,而實測 30.953 s = 30 秒 + 0.95 秒;9 輪離散度僅 0.2%。
+  ⚠️ **「所以真值是 3–4 倍」不可寫** —— 逾時代表某個 OID 完全沒回應,
+  那一臂**可能根本沒走完**,也就是資料可能不完整而不只是時間錯。
+  目前唯一站得住的說法是「**48 倍不成立;真值未知,待重量**」。
+  重量協定應為 `-r 0` + 交錯 A/B/A + **兩側都量** + **逐輪記錄 varbind 數**。
+
+Constraints / Assumptions:
+  - 量測 image `2026_0813_0905`(p1);p2 的 mainline `2026_0805_2335` 全程未動。
+  - **本輪四次量測方法錯誤,共同形狀是「工具給出一個看起來合理、實際由工具本身決定的數字」**,
+    列此以免重蹈:
+    1. `tcpdump -G 25 -W 1`(`measure-snmp-walk/walkpcap.sh:40` 的寫法)讓 tcpdump 在
+       walk **之前**就結束,stderr 照樣印 `19 packets captured / 0 dropped`,pcap 1.7 KB。
+       連續兩次重現,**機制未確立**(隨機落點只有 0.6% 機率,偏向確定性),
+       但**兩種情況下因應都是換方法,不要把重跑當繞道**。
+       → 該 skill 產出的**舊 pcap 全部有嫌疑**;1–2 KB 的幾乎一定是空的。
+       **連帶效果:ADR-0025 / ADR-0030 的未決題可以正式標成永久未決,不要再投入考古。**
+       ADR-0030 把差異成因刪到只剩「舊 `fwdcheck.sh` 判準」一個存活假說,並記載舊 pcap
+       已不存在;現在要再加一句 —— **就算找回來,`-G` 產出的舊 pcap 本身也不可信**,
+       所以那條線無論如何都無法定案。(由 `snmp-plan-E trace 3` 指出。)
+    2. **DUT 上沒有 `timeout` 指令**(`exit 127`),不能用 `timeout N tcpdump` 限時。
+    3. `/etc/os-release` 的 `VERSION` 寫著 `EDS-G4100_v0.1_2026_0611_0159`,
+       是 MDS 建置樹帶的死標籤,**連機種都是錯的**;image 身分讀
+       `/etc/moxa/version/BUILD_TIME`,機種讀 `/proc/device-tree/model` 或 `/tmp/modelName`。
+    4. 整棵 `.603.2.9` walk 的 0.241 s 是「中止時間」不是 walk 時間。
+    5. **walk 在第一個請求就中止,使 `.1.4`–`.1.7` 從未被看見,被讀成「mainline 沒有 mxQos」**
+       (見上方更正)。
+
+  **第 5 條與前四條性質不同,值得單獨記:前四條產生「錯的數字」,第 5 條產生「不存在的印象」。**
+  錯的數字還會被下一個人拿去對帳而發現矛盾;**缺席不會 —— 沒有任何一行輸出會告訴你
+  「你沒走到那裡」**,而缺席正好是許多假說的預期結果。本輪同一天內,
+  「零 Get PDU」「No Such Object」「62 欄而非 73 欄」三個結論都是這個形狀,
+  三個都是工具沒走到、而不是被測物沒有。
+  → **判準:凡是結論的形式為「X 不存在 / 沒有發生」,都必須另外證明觀測管道走到了 X 應該在的位置。**
+  (此節形狀由 `snmp-plan-E document 4` 歸納。)
+  - 有效擷取的三道自我檢查(缺任何一道,空擷取就會看起來像結論):
+    `kill -0 $TP` 確認 walk 開始時 tcpdump 還活著、回報 walk 的 varbind 數確認它真的跑了、
+    結束後 `ps | grep -c tcpdump` 確認沒殘留。收尾用同 session 已知 PID 的 `kill -INT`,
+    不用 `pkill`(那個寫法 2026-08-12 造成兩個行程掛 11 小時並各佔一條 DUT ssh session)。
+  - 完整性判準只有 `~/mxqosdb-oracle-2026-08-13.txt`(29 欄):mainline 沒有 mxQos,
+    沒有交叉檢查。其可信度由欄位總數對帳支撐:MIB 七表 36 欄 − 7 個 not-accessible index
+    = 29 = ies-auto-mibs 的 entry 數。
+  - **完整性一律比 OID 不比名字**:8 欄在 MIB 與 ies-auto-mibs 的拼法不同
+    (`qosConfigQueueWeight1` vs `qosConfigQueue1Weight`),用名字比會假報 8 欄消失,
+    而那個假象與真故障同形。
+  - gate 的兩個已知例外:`.1.3.1.2` 永遠報 missing(被上述 GETNEXT 缺陷擋住,欄位實際存在);
+    4 個 not-accessible index 欄(`.1.4.1.1` `.1.5.1.1` `.1.6.1.1` `.1.7.1.1`)永遠報 surplus,
+    是 `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()` 的既有 MIB 違規,基線也有。
+  - `.1.2` 的 varbind 數隨委派狀態變動(未委派 10 / 委派 9)—— NULL 落點會移動,
+    比對只能比有實際值的行。
+
+Related Files / Modules:
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list` —— `e7f6889` 加入的
+    `mxqosdb/\t+getfwd\t+nodelegate`(第 69 行),依本 ADR 應移除
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` —— `b1536f3` 的
+    `MOX_GETFWD_TRACE` / `MOX_GETFWD_TRACE_ENABLED`(約 :3119–3165),18 個呼叫點;
+    `mox_snmp_probe_derive()` :3266、`mox_snmp_agentx_prefix_nodelegate()` :3920
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup_net_mxQosdb.c:131-135`
+    —— 唯一的 `.mode` 覆寫(RWRITE → RONLY),包在 `#if !defined(BCM_ROBO2_XSDK)` 內,
+    所以該欄的有效 mode 跨產品不同
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c:166-168`
+    —— 合成 index 欄並以 `HANDLER_CAN_RONLY` 註冊,not-accessible 洩漏的來源
+  - `~/mxqos_check.py` —— 完整性 gate(比 OID);`~/mxqosdb-oracle-*-2026-08-13.txt` —— oracle
+  - `~/pcap/2026-08-13-mxqos-arm{A,B}-*.pcap` + `.tcpdump.log` —— 線路證據與有效性中繼資料
+  - `~/mds4xgl3/tools/dutget.exp` —— 本輪新增的 pull(`dutscp.exp` 只能 push)
+
+Related ADRs:
+  ADR-0031(機制成立,本 ADR 是其應用決策)、ADR-0030(推翻 ADR-0025)、
+  ADR-0028(收回 mxRstp 的效果宣稱,同族現象)、ADR-0015(關卡二:walk 夠不夠慢)、
+  ADR-0014(其 +12.7% 前提已被 ADR-0030 推翻)、ADR-0022(MIB 與實作不符,未解)

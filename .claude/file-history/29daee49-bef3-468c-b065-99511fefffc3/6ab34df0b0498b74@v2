@@ -1,0 +1,13 @@
+#!/bin/sh
+# 從實際執行中的 snmpd 取得權威的 dlmod 清單
+echo "### snmpd 實際載入的所有 config 檔裡的 dlmod 行"
+P=$(pgrep -f '/bin/snmpd' | head -1)
+CFGS=$(tr '\0' '\n' < /proc/$P/cmdline | grep -A0 '^/' | tr ',' '\n' | grep '\.conf$')
+for c in $CFGS; do
+    [ -f "$c" ] && awk -v f="$c" '/^[[:space:]]*dlmod/{printf "%-24s %-56s %s\n", $2, $3, f}' "$c"
+done
+echo "### /moxa/run/snmp/snmpd.conf 裡有沒有 dlmod"
+grep -c '^[[:space:]]*dlmod' /moxa/run/snmp/snmpd.conf 2>/dev/null
+echo "### 總計"
+for c in $CFGS; do [ -f "$c" ] && grep -h '^[[:space:]]*dlmod' "$c"; done | awk 'END{print NR " 個 dlmod"}'
+echo "### DONE"

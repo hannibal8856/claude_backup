@@ -1,0 +1,147 @@
+@RTK.md
+
+# CLAUDE.md
+
+Behavioral guidelines to reduce common LLM coding mistakes, tuned for Claude Opus 5.
+Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed for non-trivial work.
+For trivial tasks, use judgment.
+
+**Opus 5 note:** Opus 5 verifies its own work and iterates without being told to.
+Principle 4 below sets the *scope* of that verification — it does not add a second
+verification layer on top. Do not add extra instructions elsewhere like "add a final
+verification step" or "use a subagent to verify"; stacking those with Opus 5's default
+behavior causes over-verification (extra tool calls, longer sessions, wasted tokens).
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Scoped Verification
+
+**Verification effort matched to task size. One pass, not a loop.**
+
+- Trivial change (single-line config, typo fix, defconfig flag, obvious one-liner) →
+  no test-first loop required. Make the change, briefly state what changed, done.
+- Non-trivial change (new function, bug fix, refactor, anything touching multiple files
+  or build/CI behavior) → state success criteria up front, then verify against them
+  once:
+  ```
+  1. [Step] → verify: [check]
+  2. [Step] → verify: [check]
+  3. [Step] → verify: [check]
+  ```
+- If the first check passes, stop. Don't re-verify the same criteria multiple times
+  "to be safe."
+- For multi-step or agentic tasks, state the plan once at the start rather than
+  re-confirming progress after every step — Opus 5 already narrates progress on its
+  own; don't ask it to narrate on top of that.
+
+The test: If you're about to verify something a second time without new information
+that changed, stop.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer
+rewrites due to overcomplication, clarifying questions come before implementation
+rather than after mistakes, and verification effort visibly scales with change size
+instead of running a full loop on every edit.
+
+## 5. Subagent Model Selection
+
+**Default subagents to Sonnet 5. Escalate to Fable 5 only for judgment work.**
+
+Pass `model: "sonnet"` on every Agent dispatch unless the task is one of:
+- Architecture or module-boundary design
+- Migration / refactor planning
+- Complex debugging where the root cause is not yet identified
+- Final review before merge (the last pass, not routine per-commit review)
+
+Those four get `model: "fable"`. Everything else — log scanning, code search,
+file surveys, mechanical edits, single-file changes, running tests — is Sonnet.
+Cost is the reason: Fable is $10/$50 per MTok against Sonnet's $3/$15, so
+roughly 3x input and 5x output. High-volume mechanical work on Fable is waste.
+
+**Say so before dispatching on Fable, and wait for the go-ahead.** One line:
+which task, which of the four cases it falls under, and why Sonnet or Opus
+isn't enough for it. This is a cost gate, so it comes before the dispatch, not
+alongside it. No announcement needed for Sonnet, Opus, or Haiku dispatches.
+
+Caveats:
+- `subagent_type: "fork"` always inherits the parent model; the `model` param is
+  ignored there. Use a named agent or `general-purpose` when the override matters.
+- Fable 5 has always-on thinking (no `disabled` option) and elevated cyber
+  safety classifiers. SNMP/network-security-adjacent prompts can occasionally
+  come back refused — if that happens, re-dispatch the same task on `opus`
+  rather than rewording the prompt.
+- The built-in `Plan` agent is the architecture case: dispatch it with
+  `model: "fable"`. `Explore` is a search agent: `model: "sonnet"`.
+
+## Project-Specific Guidelines (Buildroot BSP)
+
+- Trivial: defconfig flag flips, .hash updates, single-line Config.in edits
+- Non-trivial: new package .mk recipes, kernel patch changes, post-build/post-image
+  hook logic, GitLab CI pipeline changes
+- Always cross-compile and check the build log for the actual target (Marvell CN9130 /
+  Cortex-A9) before calling a change verified — do not assume host-build success
+  implies target success
+
+## Inherited Code Boundary (AgentX Restart)
+
+Some source files in this project were carried over from a prior implementation
+attempt. Treat them as a **starting point, not a verified baseline**:
+
+- Do not assume prior code reflects current design intent — re-derive correctness
+  from this session's CLAUDE.md and the current design doc only.
+- Do not read, reference, or infer from any file under `~/mds4xgl3/.adr/`,
+  `session-plan-e-handoff-2026-07-27.md`, `session-framework-readpath-2026-07-28.md`, 
+  or old session logs, even if reachable from this
+  workspace. If a question can only be answered by consulting those files, stop
+  and ask the user directly instead of reading them.
+- If reused code conflicts with the current design doc, the design doc wins —
+  flag the conflict, don't silently patch around it.
+
+## Project-Specific Guidelines (SNMP AgentX Integration)
+
+- Every phase ends with a written decision log entry: what changed, why, what
+  alternatives were rejected and why. This is the only source of truth for
+  "why we did X" going forward — do not rely on conversational memory of past
+  turns for design rationale.
+- Before starting a new phase, restate the current data flow / module boundary
+  in your own words; if it doesn't match the design doc, stop and reconcile
+  before proceeding.

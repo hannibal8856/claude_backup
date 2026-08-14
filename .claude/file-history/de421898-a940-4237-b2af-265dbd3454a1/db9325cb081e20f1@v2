@@ -1,0 +1,149 @@
+RESULT-phase3-task2.txt — lib_moxa_snmp_agentx, the C shim
+==========================================================
+Date: 2026-08-05
+
+WHAT WAS CREATED
+
+  Source tree (its own git repo, like every other dl/lib_moxa_*):
+
+    dl/lib_moxa_snmp_agentx/Makefile
+    dl/lib_moxa_snmp_agentx/include/lib_moxa_snmp_agentx/agentx.h
+    dl/lib_moxa_snmp_agentx/src/agentx.c
+    dl/lib_moxa_snmp_agentx/debian/{changelog,control,compat,rules}
+    dl/lib_moxa_snmp_agentx/{.gitignore,MOXA-SOFTWARE-NOTICE.txt}
+
+  Buildroot package (moxa repo):
+
+    moxa/package/net/lib_moxa_snmp_agentx/Config.in
+    moxa/package/net/lib_moxa_snmp_agentx/lib_moxa_snmp_agentx.mk
+    moxa/Config.in.Product_Packages          + one source line
+    moxa/local.mk                            + LIB_MOXA_SNMP_AGENTX_OVERRIDE_SRCDIR
+
+  Produced artefact: libmoxa_snmp_agentx.so (usr/lib/), header in
+  usr/include/lib_moxa_snmp_agentx/.
+
+STEP 5 — libnetsnmpmibs is absent                                PASS
+
+  This is the acceptance test the library exists for.
+
+    $ file output/target/usr/lib/libmoxa_snmp_agentx.so
+    ELF 32-bit LSB shared object, ARM, EABI5 version 1 (SYSV)
+
+    $ readelf -d output/target/usr/lib/libmoxa_snmp_agentx.so | grep NEEDED
+    libnetsnmpagent.so.40
+    libnetsnmp.so.40
+    libgcc_s.so.1
+    libc.so.6
+    ld-linux-armhf.so.3
+
+  No libnetsnmpmibs, so no ies-auto-mibs, no parson, no
+  lib_moxa_framework_uri, no lib_moxa_system pulled in through this library
+  (design D6 / section 5.2). Link line is exactly `-lnetsnmpagent -lnetsnmp`;
+  net-snmp-config --agent-libs was deliberately not used, and the Makefile says
+  so at the point where it would have been.
+
+  A note on tooling: the plan says arm-linux-gnueabihf-readelf. That does not
+  exist on the host - the toolchain is inside the container. The host's own
+  readelf reads ARM ELF correctly (unlike nm, which silently reports zero
+  symbols; see RESULT-phase3-task1.txt), so the host readelf was used and the
+  file's architecture was checked in the same breath.
+
+STEP 6 — cross-compiled                                          PASS
+
+    CC = output/host/bin/arm-linux-gnueabihf-gcc
+    -Wall -Werror -std=c99, clean
+
+  All 11 API functions are exported from the dynamic symbol table:
+
+    mx_agentx_init            mx_agentx_reply_integer
+    mx_agentx_shutdown        mx_agentx_reply_octets
+    mx_agentx_register_arc    mx_agentx_reply_oid
+    mx_agentx_select_info     mx_agentx_reply_nosuch
+    mx_agentx_handle_read     mx_agentx_set_get_handler
+    mx_agentx_handle_timeout
+
+  (readelf -sWD prints an extra "Buc:" column that a naive field-4 filter
+  misses. Mentioned because the first check came back empty and looked like a
+  visibility problem.)
+
+TWO PIECES OF BUILD WIRING THE PLAN DOES NOT MENTION
+
+  Neither is optional, and the first fails in the quiet way this project keeps
+  running into.
+
+  1. moxa/local.mk needs LIB_MOXA_SNMP_AGENTX_OVERRIDE_SRCDIR="./dl/...".
+
+     Every dl/ package is wired in through OVERRIDE_SRCDIR, not through
+     _SITE. Without it the build printed "Extracting", produced an empty build
+     directory, and only then failed at "No targets specified and no makefile
+     found" - the .mk's _SITE line is present in every sibling and is not what
+     makes the source arrive. Built directories carry a "-custom" suffix when
+     the override is in effect, which is the quickest way to tell.
+
+     buildroot/local.mk is a symlink to moxa/local.mk, so one edit covers both.
+
+  2. .config had to be refreshed. It was generated on Jul 31 and predates the
+     new Config.in, so `make olddefconfig` was run to pick the symbol up, then
+     BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX set to y and olddefconfig run again.
+     Nothing else in .config moved (diff is a one-line insertion plus its
+     offset).
+
+INHERITED-STATE FINDING
+
+  moxa/configs/mdsg4000l34xgs_defconfig:132 already carried
+
+    BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX=y
+
+  left over from commit 34a53041b "Pick up plan D and create plan E" - the
+  earlier implementation attempt. No package defined that symbol, so kconfig
+  dropped it silently and the line has been inert ever since. It is live now
+  that the package exists, and the name matches what this plan wanted, so it
+  was kept rather than renamed.
+
+  A sweep for other leftovers from that attempt found none: the only other
+  matches for "snmp_agentx" in the tree are ISS's own AgentX code under
+  dl/app_moxa_cli/future/snmpv3/, which is unrelated.
+
+DESIGN DECISIONS INSIDE THE SHIM
+
+  One in-flight request, not a table. The dispatcher calls the Rust handler
+  synchronously on the same thread (D5 / section 5.3), so at most one request
+  is ever open. The request id handed to the handler is a generation counter
+  rather than an index: its only job is to make a reply for an already-closed
+  request fail instead of writing into a varbind net-snmp has moved past.
+
+  No value delivered means noSuchObject. A handler that returns non-zero, and
+  a handler that returns without calling any mx_agentx_reply_*, are treated
+  identically. That is the only interpretation that cannot leave a varbind
+  holding stale contents.
+
+  GET only. The dispatcher returns immediately for any other mode. SET does not
+  move (section 6.2), and GETNEXT over an arc needs the OID table that Task 3
+  is going to build, so it is not this library's job.
+
+  The non-blocking guard in mx_agentx_handle_read() is carried over from FRR
+  (lib/agentx.c:57), not invented: snmp_read2() blocks on a blocking socket and
+  net-snmp does not guarantee the AgentX socket is non-blocking.
+
+  Compile-time width check on the oid typedef. The public API passes OID
+  subidentifiers as unsigned long so the Task 4 Rust FFI does not need
+  net-snmp's headers; on this target net-snmp's oid is also unsigned long
+  (library/oid.h:17). The cast is asserted rather than assumed.
+
+CHECKED AHEAD — THE REPLY API COVERS BOTH PILOTS
+
+  The plan's reply set is integer / octets / oid / nosuch. Counted from the
+  headers rather than assumed:
+
+    net_mx_device_io.h    8 entries    8x SNMP_DATA_TYPE_INTEGER
+    net_mx_portmirror.h  18 entries   11x INTEGER, 7x OCTET_PRIM
+
+  So Tasks 6 and 7 need only reply_integer and reply_octets. Nothing in the
+  API has to change. (Other MIBs do use COUNTER32 and MAC_ADDRESS - mxGeneralInfo
+  for one - so this is a statement about the two pilots, not about Phase 5.)
+
+NOT DONE IN THIS TASK
+
+  No unit test. Task 2 has no test step in the plan; the acceptance criterion
+  is the NEEDED list, which passes. The first real exercise of this code is
+  Task 5, when the framework opens a session with it.

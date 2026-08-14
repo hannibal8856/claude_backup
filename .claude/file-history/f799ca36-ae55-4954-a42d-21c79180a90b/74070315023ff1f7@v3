@@ -1,0 +1,33 @@
+################################################################################
+#
+# app_moxa_framework
+#
+################################################################################
+APP_MOXA_FRAMEWORK_SITE = "$(TOPDIR)/dl/app_moxa_framework"
+APP_MOXA_FRAMEWORK_DEPENDENCIES = \
+	app_moxa_token_module \
+	lib_moxa_rust_debug_log_ng \
+	lib_moxa_rust_encrypt \
+	lib_moxa_rust_event_action \
+	lib_moxa_rust_io \
+	lib_moxa_rust_led_service \
+	lib_moxa_rust_pam \
+	plugins_moxa_framework \
+	rust_moxa_app_state \
+	rust_moxa_auth_layer \
+	rust_moxa_bff \
+	rust_moxa_command_layer \
+	rust_moxa_common \
+	rust_moxa_config_layer \
+	rust_moxa_create_dummy_package \
+	rust_moxa_file_layer \
+	rust_moxa_new_moxa_command_layer \
+	rust_moxa_profiling \
+	rust_moxa_status_layer \
+	rust_moxa_status_operation \
+	rust_moxa_new_moxa_command_operation \
+	rust_moxa_command_operation \
+	rust_moxa_file_operation \
+	lib_moxa_rust_firmware_header
+
+$(eval $(generic-package))

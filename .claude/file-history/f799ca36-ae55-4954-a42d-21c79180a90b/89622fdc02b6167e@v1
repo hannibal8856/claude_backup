@@ -1,0 +1,3122 @@
+
+/* According to POSIX.1-2001 */
+#include <sys/select.h>         /* select */
+
+/* According to earlier standards */
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <stdlib.h>             /* atoi   */
+
+#include <sys/types.h>          /* socket */
+#include <sys/socket.h>
+#include <sys/un.h>             /* un socket */
+#include <errno.h>              /* errno     */
+#include <sys/sysinfo.h>        /* sysinfo   */
+#include <string.h>
+
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_util/util_shell_cmd.h"
+#include "libmoxa_util/util_debug.h"
+#include "libmoxa_system/lib_moxa_system_l3_spec_def.h"
+
+#define IES_DEBUG_FILE "debug_log_all"
+#include "ies_common.h"
+#include "ies_uri.h"
+#include "ies_uri_handle.h"
+#include "iss_snmp_uri_remap.h"
+
+#define REMAP_RMON_PORT_YES    (1)
+#define REMAP_RMON_PORT_NO     (2)
+#define REMAP_RMON_PORT_ERROR (-1)
+
+#define REMAP_RMON_READ        (1)
+#define REMAP_RMON_UPDATE      (2)
+
+#define MOXA_MIN_IVR_IF_INDEX         LIB_SYSTEM_DEF_CFA_MIN_IVR_IF_INDEX    /* MOXA l3ipvlan specific start index */
+#define MOXA_MAX_IVR_IF_INDEX         LIB_SYSTEM_DEF_CFA_MAX_IVR_IF_INDEX    /* = CFA_MIN_IVR_IF_INDEX + IP_DEV_MAX_L3VLAN_INTF */
+#define MOXA_MIN_LOOPBACK_IF_INDEX    (MOXA_MAX_IVR_IF_INDEX + 20 + 1)       /* 20 is SYS_DEF_MAX_TUNL_IFACES interfaces */
+#define MOXA_MAX_LOOPBACK_IF_INDEX    (MOXA_MIN_LOOPBACK_IF_INDEX + 10)      /* 10 is SYS_MAX_LOOPBACK_INTERFACES */
+
+typedef enum 
+{
+    OID_PORT_ERROR  = 0,
+    OID_PORT_NORMAL = 1,
+    OID_PORT_FILTER = 2,
+    OID_PORT_UPDATE = 3
+} iss_remapper_port_t ;
+
+typedef enum 
+{
+    REMAP_NOERR     = 0,
+    REMAP_ERROR     = 1,
+    REMAP_NOT_FOUND = 2,
+} iss_remapper_handle_t ;
+
+typedef enum 
+{
+    REMAP_ENTRY_NULL  = 0,
+    REMAP_ENTRY_NML   = 1,
+    REMAP_ENTRY_PORT  = 2,
+    REMAP_ENTRY_OID   = 3,
+    REMAP_ENTRY_PRMP  = 4,
+} iss_remapper_table_entry_handle_t ;
+
+
+typedef enum
+{
+    REMAP_TABLE_NORMAL      = 0,
+    REMAP_TABLE_PORT_INDEX  = 1,
+    REMAP_TABLE_PORT_INDEX_SECOND_FROM_LAST = 2,
+} iss_remapper_table_t;
+
+typedef enum
+{
+    REMAP_PORT_TYPE_DEFAULT = 0,
+    REMAP_PORT_TYPE_0BASE   = 1,
+    REMAP_PORT_TYPE_1BASE   = 2
+} iss_remap_port_t;
+
+typedef int remapper_tableOid_t;
+
+#define COMPARE_ISS_SNMP_URI(__entry_uri_string__, __uri__) ( ( 0 == strncmp((const char *) __entry_uri_string__, (const char *) __uri__, strlen(__uri__)) ) ? 1 : 0 )
+
+#ifdef RKSG4000PL
+//According to SNOOP_IF_PORT_LIST_SIZE which is 92 bytes in RKSPL, the value is 184, and it should be lower than ISS_MAX_BIT_VALUE.
+#define ISS_MAX_BIT_VALUE   (256)
+#else
+#define ISS_MAX_BIT_VALUE   (128)
+#endif
+
+#define ISS_MAX_HEX_VALUE   (32)
+#define HALF_BYTES_BITS_NUM (4)
+
+#define REMAPPER_UTIL_BUF_HANDLE_PBMP_TABLE(table_entry_handler, table_oid, iput_buf, iput_buf_len, oput_buf, oput_buf_len )  \
+    remapper_util_buf_handle_pbmap_table(                                                  \
+        table_entry_handler, sizeof(table_entry_handler) / sizeof(table_entry_handler[0]), \
+        table_oid, sizeof(table_oid) / sizeof(table_oid[0]),                               \
+        iput_buf, iput_buf_len, oput_buf, oput_buf_len )
+
+#define REMAPPER_UTIL_SNMP_CHECK_TRANSFER_BY_URI(table_entry_handler, table_entry_uri)      \
+    remapper_util_snmp_check_transfer_by_uri(                                               \
+        table_entry_handler, sizeof(table_entry_handler) / sizeof(table_entry_handler[0]),  \
+        table_entry_uri )
+
+#define REMAPPER_UTIL_BUF_HANDLE_IFINDEX_OBJ_TABLE(table_entry_handler, table_oid, iput_buf, iput_buf_len, oput_buf, oput_buf_len )  \
+    remapper_util_buf_handle_ifidxObj_table(                                               \
+        table_entry_handler, sizeof(table_entry_handler) / sizeof(table_entry_handler[0]), \
+        table_oid, sizeof(table_oid) / sizeof(table_oid[0]),                               \
+        iput_buf, iput_buf_len, oput_buf, oput_buf_len )
+        
+#define REMAPPER_UTIL_BUF_HANDLE_STDRMON_EVENT_TABLE(table_entry_handler, table_oid, iput_buf, iput_buf_len, oput_buf, oput_buf_len )  \
+    remapper_util_buf_handle_stdrmon_eventTable_eventCommunity(                                               \
+        table_entry_handler, sizeof(table_entry_handler) / sizeof(table_entry_handler[0]), \
+        table_oid, sizeof(table_oid) / sizeof(table_oid[0]),                               \
+        iput_buf, iput_buf_len, oput_buf, oput_buf_len )
+
+uint32_t    gMaxPortInSystem   = 0;
+uint32_t    gMaxPortInPlatform = 0;
+uint32_t    gMaxPortChannel    = 0;
+uint32_t    gMaxPortNumber     = 0;     /* normal port + port_channel port */
+
+struct remapper_mib_handler
+{
+    char uri[IES_MAX_URI];
+    ies_handle_t (*read)   (u8 *iputURI,             u8 *iputFile, u8 *oputFile);
+    ies_handle_t (*update) (u8 *iputURI, u8 *outURI, u8 *iputFile, u8 *oputFile);
+};
+
+
+struct remapper_tableEntryHandler 
+{
+    char entry_uri[IES_MAX_URI_INDEX];
+    int  entry_oid;
+};
+
+struct remapper_tableEntryHandler_general
+{
+    char                              entry_uri[IES_MAX_URI_INDEX];
+    int                               entry_oid;
+    iss_remapper_table_entry_handle_t entry_type;
+};
+
+
+
+/**
+ * @brief handle transfer object-id-string to oid
+
+ * @param[in]    buf           object-id-string buffer
+ * @param[in]    bufLen        object-id-string buffer len
+ * @param[out]   retOID        return oid buffer
+ * @param[out]   retOIDLen     return oid buffer len
+ * @param[in]    retOIDLenMax  return oid buffer max len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaIssUriRemap_Util_StringObjectIDToOID( const char     *buf,
+                                                  const uint32_t  bufLen,
+                                                  uint32_t       *retOID,
+                                                  uint32_t       *retOIDLen,
+                                                  const uint32_t  retOIDLenMax )
+{
+    char     *end           = ( char *) buf + bufLen;
+    char     *token         = NULL;
+    uint32_t  oidBufIndex   = 0;
+    char      tmpOidStr[32] = {0x0};
+    uint32_t  tmpOidStrLen  = 0;
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : %s(%d) \n",
+        __func__, __LINE__, buf, bufLen);
+
+    for ( token = (char *) buf; buf <= end; buf++ )
+    {
+        if ( *buf == ',' || *buf == '.' || *buf == '\'' || *buf == '\0' )
+        {
+            tmpOidStrLen = buf - token;
+            if ( tmpOidStrLen >= sizeof(tmpOidStr) )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : tmpOidStrLen(%d) exceed max(%d)\n",
+                    __func__, __LINE__, tmpOidStrLen, sizeof(tmpOidStr));
+                return (-1);
+            }
+            memset(tmpOidStr, 0, sizeof(tmpOidStr));
+            memcpy(tmpOidStr, token, tmpOidStrLen);
+            tmpOidStr[tmpOidStrLen] = '\0';
+            token = (char *) buf + 1;
+            retOID[oidBufIndex] = atoi(tmpOidStr);
+            oidBufIndex++;
+            if ( oidBufIndex >= retOIDLenMax )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : oidBufIndex(%d) exceed retOIDLenMax %d\n",
+                    __func__, __LINE__, oidBufIndex, retOIDLenMax);
+                return (-1);
+            }
+        }
+    }
+    *retOIDLen = oidBufIndex;
+
+    return 0;
+}
+
+/****************************************************************************
+ Description        : 
+
+    更新過的 strchr 
+
+    只會針對 buf 長度做 strchr
+
+*****************************************************************************/
+char * 
+remapper_util_buf_strchr
+(
+    char *buf, 
+    int   buf_len, 
+    char  token
+)
+{
+    char *end = buf + buf_len;
+    while( buf < end ){
+        if( token == *buf ){
+            return buf;
+        }
+        buf++;
+    }
+    return NULL;
+}
+
+/****************************************************************************
+ Description        : 
+
+    更新過的 snprintf 
+
+    可以對一塊 buf 的不同位址(idx), 作 snprintf 的動作 
+    好比說 如果用一個 int array 作 oid 的儲存
+    可以使用以下的方式印整個 oid
+    {
+        int  oid_buf[]     = {1,3,6,1,2,1,2,2,1,1};
+        int  oid_buf_idx   = 0;
+        char tmp_buf[1024] = {0x0};
+        int  tmp_buf_idx   = 0;
+
+        oid_buf_idx = sizeof(oid_buf) / sizeof(oid_buf_idx[0]);
+
+        for ( i = 0; i <= oid_buf_idx; i++ )
+        {
+            remapper_util_buf_sprintf((char *)tmp_buf, sizeof(tmp_buf), 
+                &tmp_buf_idx, " %d ", (unsigned int)oid_buf[i]);
+        }
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d oid %s \n", __func__, __LINE__, tmp_buf);
+    }
+*****************************************************************************/
+ies_handle_t 
+remapper_util_buf_sprintf
+(
+    char   *iput_buf, 
+    int     iput_buf_len, 
+    int    *iput_buf_idx, 
+    char   *fmt, 
+    ...
+)
+{
+
+    char   *iput_buf_current_position;
+    int     iput_buf_available_len;
+    int     len;
+    va_list ap;
+
+    if ( *iput_buf_idx >= iput_buf_len )
+    {
+        return IES_ERR;
+    }
+    
+    iput_buf_available_len    = iput_buf_len - *iput_buf_idx;
+    iput_buf_current_position = &iput_buf[*iput_buf_idx];
+
+    va_start(ap, fmt);
+    len = vsnprintf(iput_buf_current_position, iput_buf_available_len, fmt, ap);
+    va_end(ap);
+
+    iput_buf_available_len -= len;
+    if (iput_buf_available_len > 0 ) 
+    {
+        *iput_buf_idx += len;
+        return IES_NOERR;
+    }
+    return IES_ERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    類似 atoi 的轉換，只是將轉換的方式從 Dec 改成 Hex
+
+    舉例來說：
+    input_buf[] = "4032"; ( 4個 byte )，
+    經過此 function 的轉換
+
+    oput_buf     會變成 0x4032 ( 2個 byte )
+    oput_buf_idx 會是   2
+
+*****************************************************************************/
+ies_handle_t 
+remapper_util_buf_atox
+(
+    char         *iput_buf, 
+    int           iput_buf_len, 
+    char         *oput_buf,
+    int           oput_buf_len, 
+    int          *oput_buf_idx
+)
+{
+    int           i;
+    char          tmp, sum;
+
+    for ( i = 0, *oput_buf_idx = 0, sum = 0; 
+          i < iput_buf_len ; 
+          i++ ) 
+    {
+        if ( *iput_buf >= '0' && *iput_buf <= '9' ) 
+        {
+            tmp = *iput_buf - '0';
+        } 
+        else 
+        if ( *iput_buf >= 'a' && *iput_buf <= 'f' ) 
+        {
+            tmp = *iput_buf - 'a' + 10;
+        } 
+        else 
+        if ( *iput_buf >= 'A' && *iput_buf <= 'F' ) 
+        {
+            tmp = *iput_buf - 'A' + 10;
+        } 
+        else 
+        if ( *iput_buf == 0x00 || *iput_buf == '\r' || *iput_buf == '\n' ) 
+        {
+            break;
+        }
+        else 
+        {
+            return IES_ERR;
+        }
+        sum  = sum << 4;
+        sum |= tmp & 0xf;
+        if ( 0 == ( i + 1 ) % 2 ) 
+        {
+            *oput_buf_idx            = i / 2;
+             oput_buf[*oput_buf_idx] = sum;
+            *oput_buf_idx            = *oput_buf_idx + 1 ;
+            sum                      = 0;
+            if ( *oput_buf_idx >= oput_buf_len )
+            {
+                return IES_ERR;
+            }
+        }
+        iput_buf ++;
+    }
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    確認 data port 在 read / update 時的轉換方式
+
+    OID_PORT_NORMAL 代表 不需轉換
+    OID_PORT_FILTER 代表 需要濾掉這些資訊
+    OID_PORT_UPDATE 代表 需要更新 port 的 內容 
+                         而更新的內容會回傳到 oput_port 中
+
+*****************************************************************************/
+iss_remapper_port_t
+remapper_util_check_data_port
+(
+    int              iput_port, 
+    int             *oput_port, 
+    ies_uri_handle_t type,
+    iss_remap_port_t port_type
+)
+{
+    if ( IES_URI_HANDLE_TYPE_READ == type )
+    {
+        // read 面對的 port 是從 1 開始的
+        if ( iput_port >= 1 && iput_port <= gMaxPortInSystem )
+        {
+            return OID_PORT_NORMAL;
+        }
+        else
+        if ( iput_port > gMaxPortInSystem && iput_port <= gMaxPortInPlatform )
+        {
+            return OID_PORT_FILTER;
+        }
+        else
+        if ( iput_port > gMaxPortInPlatform && iput_port < (gMaxPortInPlatform + ( gMaxPortInPlatform / 2 ) + 1 /* vlanMgmt */) )
+        {
+            iput_port  = iput_port - gMaxPortInPlatform;
+            *oput_port = gMaxPortInSystem + iput_port;
+            return OID_PORT_UPDATE;
+        }
+        else
+        if ( iput_port == ( gMaxPortInPlatform + ( gMaxPortInPlatform / 2 ) + 1 /* vlanMgmt */ ) )
+        {
+            *oput_port = gMaxPortInSystem + gMaxPortChannel + 1;
+            return OID_PORT_FILTER;
+        }
+#if !defined(INCLUDE_MOXA_L3)
+        else
+        if ( iput_port > (gMaxPortInPlatform + ( gMaxPortInPlatform / 2 ) + 1 /* vlanMgmt */) && iput_port <= MOXA_MAX_IVR_IF_INDEX )
+        {
+            iput_port  = iput_port - gMaxPortInPlatform;
+            *oput_port = gMaxPortInSystem + iput_port;
+            return OID_PORT_UPDATE;
+        }
+#else
+        else if ( iput_port >= MOXA_MIN_IVR_IF_INDEX && iput_port <= MOXA_MAX_IVR_IF_INDEX )  /* L3 Vlan Interface */
+        {            
+            return OID_PORT_NORMAL;
+        }
+        else if (iput_port >= MOXA_MIN_LOOPBACK_IF_INDEX && iput_port < MOXA_MAX_LOOPBACK_IF_INDEX) /* Loopback interface */
+        {
+            return OID_PORT_NORMAL;
+        }
+#endif
+
+    }
+    else
+    if ( IES_URI_HANDLE_TYPE_UPDATE == type )
+    {
+
+        // update 面對的 port 是從 0 開始的
+        if ( REMAP_PORT_TYPE_1BASE == port_type )
+        {
+            iput_port -= 1;
+        }
+        if ( iput_port >= 0 && iput_port < gMaxPortInSystem )
+        {
+            return OID_PORT_NORMAL;
+        }
+        else
+        if ( iput_port >= gMaxPortInSystem && iput_port < ( gMaxPortInSystem + gMaxPortChannel /* vlanMgmt */ ) )
+        {
+            iput_port  = iput_port - gMaxPortInSystem;
+            *oput_port = gMaxPortInPlatform + iput_port;
+            if ( REMAP_PORT_TYPE_1BASE == port_type )
+            {
+                *oput_port = *oput_port + 1;
+            }
+            return OID_PORT_UPDATE;
+        }
+        else
+        if ( iput_port == ( gMaxPortInSystem + gMaxPortChannel + 1 ) /* vlanMgmt */ )
+        {
+            iput_port  = iput_port - gMaxPortInSystem;
+            *oput_port = gMaxPortInPlatform + iput_port;
+            if ( REMAP_PORT_TYPE_1BASE == port_type )
+            {
+                *oput_port = *oput_port + 1;
+            }
+            return OID_PORT_UPDATE;
+        }
+        else if ( iput_port > (gMaxPortInPlatform + ( gMaxPortInPlatform / 2 ) + 1 /* vlanMgmt */) && iput_port <= MOXA_MAX_IVR_IF_INDEX )
+        {
+            iput_port  = iput_port - gMaxPortInSystem;
+            *oput_port = gMaxPortInPlatform + iput_port;
+            if ( REMAP_PORT_TYPE_1BASE == port_type )
+            {
+                *oput_port = *oput_port + 1;
+            }
+            return OID_PORT_UPDATE;
+        }
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d iput_port = %d\n", __func__, __LINE__, iput_port );
+    return OID_PORT_ERROR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    從 每個 mib 中 找到需要更新的 table 的 handler
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_util_lookup_mib_table_handler_for_general
+(
+    struct remapper_mib_handler *mib_table,
+    int                          mib_tableCount,
+    u8                          *iputURI,
+    u8                          *oputURI,
+    u8                          *iputFile,
+    u8                          *oputFile,
+    ies_uri_handle_t             type
+)
+{
+
+    struct remapper_mib_handler *mib_table_handler = NULL;
+    ies_handle_t                 ret               = IES_ERR;
+    int i; 
+    
+    for ( i = 0; i < mib_tableCount; i++ )
+    {
+        mib_table_handler = &mib_table[i];
+
+        if ( COMPARE_ISS_SNMP_URI(iputURI, mib_table_handler->uri )  )
+        {
+            if ( IES_URI_HANDLE_TYPE_READ == type ) 
+            {
+                ret = mib_table_handler->read(iputURI, iputFile, oputFile);
+            }
+            else
+            if ( IES_URI_HANDLE_TYPE_UPDATE == type ) 
+            {
+                ret = mib_table_handler->update(iputURI, oputURI, iputFile, oputFile);
+            }
+            else
+            {
+                return REMAP_ERROR;
+            }
+            return ( IES_NOERR == ret ) ? REMAP_NOERR : REMAP_ERROR ; 
+        }
+    }
+    return REMAP_NOT_FOUND;
+}
+
+/****************************************************************************
+ Description        : 
+
+    從 每個 mib 中 找到需要更新的 table 的 handler 
+    針對 update 來處理
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_util_lookup_mib_table_handler_for_update
+(
+    struct remapper_mib_handler *mib_table,
+    int                          mib_tableCount,
+    u8                          *iputURI,
+    u8                          *oputURI,
+    u8                          *iputFile,
+    u8                          *oputFile
+)
+{
+
+    return remapper_util_lookup_mib_table_handler_for_general(
+        mib_table, mib_tableCount, 
+        iputURI, oputURI,
+        iputFile, oputFile, IES_URI_HANDLE_TYPE_UPDATE);
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    從 每個 mib 中 找到需要更新的 table 的 handler 
+    針對 read 來處理
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_util_lookup_mib_table_handler_for_read
+(
+    struct remapper_mib_handler *mib_table,
+    int                          mib_tableCount,
+    u8                          *iputURI,
+    u8                          *iputFile,
+    u8                          *oputFile
+)
+{
+
+    return remapper_util_lookup_mib_table_handler_for_general(
+        mib_table, mib_tableCount, 
+        iputURI, NULL,
+        iputFile, oputFile, IES_URI_HANDLE_TYPE_READ);
+}
+
+/****************************************************************************
+ Description        : 
+
+
+
+*****************************************************************************/
+int 
+get_pbmp_array_len(int port_num )
+{
+    return ( port_num / 4 ) + ( 0 == ( port_num % 4) ? 0 : 1 );
+}
+
+
+/****************************************************************************
+ Description        : 
+
+   將此 port-bit-map value 轉成 hex array 的格式
+   iput_buf_val 的格式會是如下
+    1. 'value'\n
+    2. '0xhex_value'\n
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_trans_val_to_pbmap
+(
+    char *iput_buf_val,
+    char *pbmp_array,
+    int   pbmp_array_max,
+    int  *pbmp_array_len,
+    int  *rem_len
+)
+{
+    int iput_buf_val_len = 0;
+    int i;
+    char *tmp;
+
+    if ( '\'' == iput_buf_val[0] )
+    {
+        iput_buf_val++;
+    }
+
+    if ( 0 == strncmp("0x", iput_buf_val, 2) ) 
+    {
+        iput_buf_val += 2;
+    }
+    
+    iput_buf_val_len = strlen(iput_buf_val);
+    
+    tmp = remapper_util_buf_strchr(iput_buf_val, strlen(iput_buf_val), '\n' );
+    if ( NULL != tmp )
+    {
+        *tmp = '\0';
+        iput_buf_val_len -= 1;
+    }
+
+    tmp = remapper_util_buf_strchr(iput_buf_val, strlen(iput_buf_val), '\'' );
+    if ( NULL != tmp )
+    {
+        *tmp = '\0';
+        iput_buf_val_len = iput_buf_val_len - 1;
+    }
+
+    if ( pbmp_array_max < iput_buf_val_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d max = %d %d\n", __func__, __LINE__, pbmp_array_max,  iput_buf_val_len );
+        return IES_ERR;
+    }
+
+    *rem_len = iput_buf_val_len;
+
+    for ( i = 0, *pbmp_array_len = 0; i < iput_buf_val_len; i++ )
+    {
+        if ( *iput_buf_val >= '0' && *iput_buf_val <= '9' )
+        {
+            *iput_buf_val = *iput_buf_val - '0';
+        }
+        else
+        if ( *iput_buf_val >= 'a' && *iput_buf_val <= 'f' )
+        {
+            *iput_buf_val = *iput_buf_val - 'a' + 10;
+        }
+        else
+        if ( *iput_buf_val >= 'A' && *iput_buf_val <= 'F' )
+        {
+            *iput_buf_val = *iput_buf_val - 'A' + 10;
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d %2.2x\n", __func__, __LINE__, (unsigned char )*iput_buf_val);
+            return IES_ERR;
+        }
+        pbmp_array[i]   = *iput_buf_val;
+        *pbmp_array_len = *pbmp_array_len + 1;
+        iput_buf_val    = iput_buf_val + 1;
+    }
+
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+   將此 ifindex-objID value 轉成 oid array 的格式
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_trans_val_to_ifidxObj
+(
+    char *iput_buf_val,
+    int  *oid_array,
+    int   oid_array_max,
+    int  *oid_array_len
+)
+{
+    int   i = 0;
+    int   iput_buf_val_len = 0;
+    char *iput_buf_tmp;
+    int   get_last = 0;
+
+    if ( '\'' == iput_buf_val[0] )
+    {
+        iput_buf_val++;
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    iput_buf_val_len = strlen(iput_buf_val) - 1 /* \n */;
+
+    if ( oid_array_max < iput_buf_val_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d max = %d %d\n", __func__, __LINE__, oid_array_max,  iput_buf_val_len );
+        return IES_ERR;
+    }
+
+    for ( i = 0, iput_buf_tmp = iput_buf_val; i < iput_buf_val_len; i++ )
+    {
+        if ( '.' == iput_buf_val[i] || ',' == iput_buf_val[i] ||'\'' == iput_buf_val[i] )
+        {
+            if ( '\'' == iput_buf_val[i] )
+            {
+                get_last = 1;
+            }
+            iput_buf_val[i]           = '\0';
+            oid_array[*oid_array_len] = atoi(iput_buf_tmp);
+            iput_buf_tmp              = &iput_buf_val[ i  + 1 ];
+            if ( 0 == get_last )
+            {
+                *oid_array_len = *oid_array_len + 1;
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    input-buf 屬於以下格式
+    result='value' 
+    此 function 會抽出 'value'
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_table_get_value_from_buffer
+(
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                             **ret_buf_val
+)
+{
+    int                                i = 0;
+    
+    for ( i = 0; i < iput_buf_len; /* blank */ )
+    {
+        if ( '=' == iput_buf[i] )
+        {
+            *ret_buf_val = &iput_buf[i+1];
+            break;
+        }
+        else
+        {
+            i++;
+        }
+    }
+
+    
+    if ( i > iput_buf_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    從 entry_oid 確認 是否是要做替換動作的 entry 
+    
+    如果 return 1 確認
+
+*****************************************************************************/
+int
+remapper_util_snmp_check_transfer_by_oid
+(
+    struct remapper_tableEntryHandler *handle_table,
+    int                                handle_table_len,
+    int                                entry_oid
+)
+{
+    int i = 0;
+    for ( i = 0; i < handle_table_len; i++ )
+    {
+        if ( entry_oid == handle_table[i].entry_oid ) 
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    從 entry_oid 確認 是否是要做替換動作的 entry 
+    
+    如果 return 1 確認
+
+*****************************************************************************/
+int
+remapper_util_snmp_check_transfer_by_oid_general
+(
+    struct remapper_tableEntryHandler_general *handle_table,
+    int                                        handle_table_len,
+    int                                        entry_oid,
+    iss_remapper_table_entry_handle_t         *entry_type
+)
+{
+    int i = 0;
+    for ( i = 0; i < handle_table_len; i++ )
+    {
+        if ( entry_oid == handle_table[i].entry_oid ) 
+        {
+            if ( NULL != entry_type )
+            {
+                *entry_type = handle_table[i].entry_type;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/****************************************************************************
+ Description        : 
+
+    從 uri 確認 是否是要做替換動作的 entry 
+    
+    如果 return 1 代表有找到
+
+*****************************************************************************/
+int
+remapper_util_snmp_check_transfer_by_uri
+(
+    struct remapper_tableEntryHandler *handle_table,
+    int                                handle_table_len,
+    char                              *entry_uri
+)
+{
+    int i = 0;
+    for ( i = 0; i < handle_table_len; i++ )
+    {
+        if ( COMPARE_ISS_SNMP_URI( entry_uri, handle_table[i].entry_uri ) )
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static char
+*get_bits(char pbmp_hex)
+{
+    /* data transform from hex to bit format and return as 4 array elements
+     * For example:
+     * pbmp_hex = 0xA -> bits[3]=1, bits[2]=0, bits[1]=1, bits[0]=0
+     * pbmp_hex = 0x3 -> bits[3]=0, bits[2]=0, bits[1]=1, bits[0]=1
+     * ...
+     */
+
+    int idx = 0, mask = 0, masked_n = 0, bit = 0;
+    char *bits = malloc(sizeof(char) * HALF_BYTES_BITS_NUM);
+
+    for (idx = 0; idx < HALF_BYTES_BITS_NUM; idx++)
+    {
+        mask =  1 << idx;
+        masked_n = pbmp_hex & mask;
+        bit = masked_n >> idx;
+        bits[HALF_BYTES_BITS_NUM - 1 - idx] = bit;
+    }
+
+    return bits;
+}
+
+/****************************************************************************
+ Description        :
+
+    Transform hex pbmp value to bitwise format.
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_trans_pbmp_hex_val_to_bits
+(
+    char                              *pbmp_hex_array,
+    int                                hex_array_len,
+    char                              *pbmp_bit_array,
+    int                                bit_array_len
+)
+{
+    int idx = 0;
+    char *bits_ret = NULL;
+
+    for (idx = 0; idx < hex_array_len; idx++)
+    {
+        bits_ret = get_bits(pbmp_hex_array[idx]);
+        memcpy ((pbmp_bit_array + (idx * HALF_BYTES_BITS_NUM)),
+                bits_ret,
+                sizeof(char) * HALF_BYTES_BITS_NUM);
+        free(bits_ret);
+    }
+
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        :
+
+    Transform bit pbmp value to hex format.
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_trans_pbmp_bits_val_to_hex
+(
+    char                              *pbmp_hex_array,
+    int                                hex_array_len,
+    char                              *pbmp_bit_array,
+    int                                bit_array_len
+)
+{
+    int idx = 0, jdx = 0, offset = 0;
+
+    for (idx = 0; idx < bit_array_len; idx++)
+    {
+        if (pbmp_bit_array[idx] == 1)
+        {
+            jdx = idx / HALF_BYTES_BITS_NUM;
+            offset = idx % HALF_BYTES_BITS_NUM;
+            pbmp_hex_array[jdx] += (1 << (HALF_BYTES_BITS_NUM - offset - 1));
+        }
+    }
+
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        :
+
+    Insert number of 0 after array element with specified offset.
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_insert_zero_by_offset_and_len
+(
+    char                              *pbmp_bit_array,
+    int                                bit_array_len,
+    int                                offset,
+    int                                len
+)
+{
+    int idx = 0;
+
+    for (idx = (bit_array_len - 1); idx >= (offset + len); idx--)
+    {
+        pbmp_bit_array[idx] = pbmp_bit_array[idx - len];
+    }
+
+    for (idx = 0; idx < len; idx++)
+    {
+        pbmp_bit_array[offset + idx] = 0;
+    }
+
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    update port-bit-map 型態的 value
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_handle_pbmap_entry_update
+(
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                              *oput_buf,
+    int                                oput_buf_len
+)
+{
+
+    char                              *iput_buf_val          = NULL;
+    int                                oput_buf_idx          = 0;
+    int                                j = 0, pad_len = 0, rem_len = 0;
+    char                               pbmap_array[ISS_MAX_BIT_VALUE + 8 /* just in case */ ]  = {0x0};
+    int                                pbmap_array_len = 0;
+    char                               pbmp_bit_array[ISS_MAX_BIT_VALUE] = {0x0};
+    int                                pbmp_bit_array_len = ISS_MAX_BIT_VALUE;
+    char                               pbmp_hex_array[ISS_MAX_HEX_VALUE] = {0x0};
+    int                                pbmp_hex_array_len = ISS_MAX_HEX_VALUE;
+
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_snmp_table_get_value_from_buffer(
+            iput_buf, iput_buf_len, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_trans_val_to_pbmap(
+            iput_buf_val, pbmap_array, ISS_MAX_BIT_VALUE, &pbmap_array_len, &rem_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    /* Convert pbmp value into bits format */
+    if ( IES_NOERR != remapper_util_snmp_trans_pbmp_hex_val_to_bits(
+            pbmap_array, pbmap_array_len, pbmp_bit_array, pbmp_bit_array_len))
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    oput_buf_idx = 0;
+    memset(oput_buf, 0, oput_buf_len);
+    remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "result='0x");
+
+    /* Insert 0 to transform trunk port index */
+    pad_len = gMaxPortInPlatform - gMaxPortInSystem;
+    if ( IES_NOERR != remapper_util_snmp_insert_zero_by_offset_and_len(
+            pbmp_bit_array, pbmp_bit_array_len, gMaxPortInSystem, pad_len))
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    /* Convert pbmp value back to hex format */
+    if ( IES_NOERR != remapper_util_snmp_trans_pbmp_bits_val_to_hex(
+            pbmp_hex_array, pbmp_hex_array_len, pbmp_bit_array, pbmp_bit_array_len))
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    for (j = 0; j < pbmp_hex_array_len; j++)
+    {
+        remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx,
+                "%x", (unsigned char )pbmp_hex_array[j]);
+    }
+
+    remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "'\n");
+
+    return IES_NOERR;
+}
+
+
+
+
+/****************************************************************************
+ Description        : 
+
+    update ifIndex 型態的 value
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_snmp_handle_ifidxObj_entry_update
+(
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                              *oput_buf,
+    int                                oput_buf_len
+)
+{
+
+    char                              *iput_buf_val             = NULL;
+    int                                oput_buf_idx             = 0;
+    int                                oid_ifIndex[IES_MAX_OID] = {0x0};
+    int                                oid_ifIndex_len          = 0;
+    int                                port                     = 0;
+    int                                update_port              = 0;
+    iss_remapper_port_t                ret_port                 = OID_PORT_ERROR;
+    int                                i = 0;
+
+
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_snmp_table_get_value_from_buffer(
+            iput_buf, iput_buf_len, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_trans_val_to_ifidxObj(
+            iput_buf_val, oid_ifIndex, IES_MAX_OID, &oid_ifIndex_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    port     = oid_ifIndex[oid_ifIndex_len];
+    ret_port = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_UPDATE, REMAP_PORT_TYPE_1BASE);
+
+    if ( OID_PORT_NORMAL == ret_port )
+    {
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_FILTER == ret_port )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret_port )
+    {
+        oid_ifIndex[oid_ifIndex_len] = update_port;
+        memset(oput_buf, 0, oput_buf_len);
+        oput_buf_idx = 0;
+        remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "result='");
+        for ( i = 0; i < oid_ifIndex_len; i++ )
+        {
+            remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "%d.", oid_ifIndex[i]);
+        }
+        remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "%d'\n", oid_ifIndex[oid_ifIndex_len]);
+        return IES_NOERR;
+    }
+
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+    return IES_ERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+    
+    將 input URI 轉成 以下的格式
+    char  uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN] = {0x0};
+    使用  '/' 作 uri_col_buf[idx] 的分隔
+    
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_get_uri_col_buf
+(
+    u8    *iputURI,
+    char  *uri_col_buf_input,
+    int   *uri_col_idx
+)
+{
+    char  *iputURICol = NULL;
+    int    i = 0;
+
+    for ( i = 0, *uri_col_idx = 0, iputURICol = ( char * ) &iputURI[0]; 
+          i < IES_MAX_URI; 
+          /* blank */ )
+    {
+        if ( '/'   == iputURI[i] ||  '\0' == iputURI[i] )
+        {
+            if ( '/' == iputURI[i] )
+            {
+                iputURI[i] = '\0';
+                snprintf(uri_col_buf_input + ( *uri_col_idx * IES_MAX_URI_COL_LEN ), 
+                    IES_MAX_URI_COL_LEN, "%s/", iputURICol);
+                *uri_col_idx = *uri_col_idx + 1;
+                if ( *uri_col_idx >= IES_MAX_URI_COL )
+                {
+                    
+                }
+                iputURICol = ( char * ) &iputURI[ i + 1 ];
+            }
+            else
+            if ( '\0' == iputURI[i] )
+            {
+                snprintf(uri_col_buf_input + ( *uri_col_idx * IES_MAX_URI_COL_LEN ), 
+                    IES_MAX_URI_COL_LEN, "%s", iputURICol);
+                break;
+            }
+        }
+        i++;
+    }
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    input-buf 屬於以下格式
+    oid='value' 
+    此 function 會抽出 oid 跟 'value'
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_get_oid_and_value
+(
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    int                               *oid_buf,
+    int                               *oid_buf_idx,
+    char                             **ret_buf_val
+)
+{
+    char                              *iput_buf_tmp          = NULL;
+    int                                get_value = 0, i = 0;
+    
+    for ( i = 0, iput_buf_tmp = &iput_buf[0], *oid_buf_idx = 0, get_value = 0; 
+          i < iput_buf_len; 
+          /* blank */ )
+    {
+        if ( '.' == iput_buf[i] || '=' == iput_buf[i] )
+        {
+            if ( '=' == iput_buf[i] )
+            {
+                get_value    = 1;
+                *ret_buf_val = &iput_buf[i+1];
+            }
+            iput_buf[i]          = '\0';
+            oid_buf[*oid_buf_idx] = atoi(iput_buf_tmp);
+            if ( 1 == get_value )
+            {
+                break;
+            }
+            i++;
+            iput_buf_tmp = &iput_buf[i];
+            *oid_buf_idx = *oid_buf_idx + 1;
+            if ( *oid_buf_idx >= IES_MAX_OID )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+        else
+        {
+            i++;
+        }
+    }
+
+    
+    if ( i > iput_buf_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    input-buf 屬於以下格式
+    result='value' 
+
+    此 function 會抽出 result 跟 'value'
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_get_result_and_value
+(
+    char  *iput_buf,
+    int    iput_buf_len,
+    char **oput_buf_result,
+    char **oput_buf_value
+)
+{
+    int    i = 0;
+
+    *oput_buf_result = iput_buf;
+
+    for ( i = 0; i < iput_buf_len; i++ )
+    {
+        if ( '=' == iput_buf[i] )
+        {
+            *oput_buf_value = &iput_buf[i+1];
+            iput_buf[i]     = '\0';
+            return IES_NOERR;
+        }
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+    return IES_ERR;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    轉換 ifmib 型態的 table 
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_general_table
+(
+    struct remapper_tableEntryHandler_general *handle_table,
+    int                                        handle_table_len,
+    iss_remapper_table_t                       table_type,
+    int                                       *oid_table,
+    int                                        oid_table_len,
+    char                                      *iput_buf,
+    int                                        iput_buf_len,
+    char                                      *oput_buf,
+    int                                        oput_buf_len
+)
+{
+
+    int                                        oid_buf[IES_MAX_OID]     = {0x0};
+    int                                        oid_buf_idx              = 0;
+    char                                      *iput_buf_val             = NULL;
+    int                                        oput_buf_idx             = 0;
+    iss_remapper_table_entry_handle_t          entry_type               = REMAP_ENTRY_NULL;
+    iss_remapper_port_t                        ret_port                 = OID_PORT_ERROR;
+    int                                        port                     = 0;
+    int                                        update_port              = 0;
+    int                                        port_oid_idx             = 0;
+    int                                        oid_ifIndex[IES_MAX_OID] = {0x0};
+    int                                        oid_ifIndex_len          = 0;
+    int                                        entry_oid = 0;
+    char                                       pbmap_array[ISS_MAX_BIT_VALUE + 8 /* just in case */ ]  = {0x0};
+    int                                        pbmap_array_len = 0;
+    int                                        pbmp_maxPortInSystem   = get_pbmp_array_len(gMaxPortInSystem);
+    int                                        pbmp_maxPortInPlatform = get_pbmp_array_len(gMaxPortInPlatform);
+    int                                        pbmp_maxPortChannel    = get_pbmp_array_len(gMaxPortChannel);
+    int                                        i = 0, len = 0, rem_len = 0;
+
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( oid_buf_idx < oid_table_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( REMAP_TABLE_NORMAL == table_type )
+    {
+        ; // No Need to do InputURI Transfer
+    }
+    else
+    if ( REMAP_TABLE_PORT_INDEX                  == table_type || 
+         REMAP_TABLE_PORT_INDEX_SECOND_FROM_LAST == table_type )
+    {
+        if ( REMAP_TABLE_PORT_INDEX_SECOND_FROM_LAST == table_type )
+        {
+            port_oid_idx = oid_buf_idx - 1;
+        }
+        else
+        {
+            port_oid_idx = oid_buf_idx;
+        }
+
+        port      = oid_buf[ port_oid_idx ];
+        ret_port  = remapper_util_check_data_port(port, &update_port, 
+            IES_URI_HANDLE_TYPE_READ, REMAP_PORT_TYPE_DEFAULT);
+        if ( OID_PORT_NORMAL == ret_port )
+        {
+            return IES_NOERR;
+        }
+        else
+        if ( OID_PORT_FILTER == ret_port )
+        {
+            snprintf(oput_buf, oput_buf_len, "#\n");
+            return IES_NOERR;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    entry_oid = oid_buf[oid_table_len];
+
+    if ( 0 == remapper_util_snmp_check_transfer_by_oid_general(
+        handle_table, handle_table_len, entry_oid, &entry_type) )
+    {
+        entry_type = REMAP_ENTRY_NML;
+    }
+
+    if ( REMAP_ENTRY_OID == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_snmp_trans_val_to_ifidxObj(
+                iput_buf_val, oid_ifIndex, IES_MAX_OID, &oid_ifIndex_len) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    if ( REMAP_ENTRY_PRMP == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_snmp_trans_val_to_pbmap(
+                iput_buf_val, pbmap_array, ISS_MAX_BIT_VALUE, &pbmap_array_len, &rem_len) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+
+    oput_buf_idx = 0;
+    memset(oput_buf, 0, oput_buf_len);
+    if ( REMAP_TABLE_NORMAL == table_type )
+    {
+        for ( i = 0; i < oid_buf_idx; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d.", (unsigned int)oid_buf[i]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+            (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+            "%d='", (unsigned int)oid_buf[oid_buf_idx] ) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    if ( REMAP_TABLE_PORT_INDEX                  == table_type || 
+         REMAP_TABLE_PORT_INDEX_SECOND_FROM_LAST == table_type )
+    {
+        for ( i = 0; i <= oid_buf_idx  ; i++ )
+        {
+            if ( i == port_oid_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)update_port) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)oid_buf[i]) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+
+            if ( i != oid_buf_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, ".") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, "=") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+        }
+    }
+
+    if ( REMAP_ENTRY_PORT == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "'%d'\n", (unsigned int)update_port) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    if ( REMAP_ENTRY_NML == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%s",iput_buf_val) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    if ( REMAP_ENTRY_OID == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, "'") )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+        for ( i = 0 ; i < oid_ifIndex_len  ; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d.", (unsigned int)oid_ifIndex[i]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d'\n", (unsigned int)update_port) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    if ( REMAP_ENTRY_PRMP == entry_type ) 
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, "%'") )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+        for ( i = 0; i < pbmp_maxPortInSystem; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%x", (unsigned char )pbmap_array[i]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        for ( i =  0; i < pbmp_maxPortChannel; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%x", (unsigned char )pbmap_array[i + pbmp_maxPortInPlatform]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        len = rem_len - pbmp_maxPortInSystem - pbmp_maxPortChannel;
+
+        for ( i = 0; i < len; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, 
+                &oput_buf_idx, "0") )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+            (char *)oput_buf, oput_buf_len, 
+            &oput_buf_idx, "'\n") )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+
+
+
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    轉換 if index 型態的 table 
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_ifidxObj_table
+(
+    struct remapper_tableEntryHandler *handle_table,
+    int                                handle_table_len,
+    int                               *oid_table,
+    int                                oid_table_len,
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                              *oput_buf,
+    int                                oput_buf_len
+)
+{
+
+    int                                oid_buf[IES_MAX_OID]  = {0x0};
+    int                                oid_buf_idx           = 0;
+    char                              *iput_buf_val          = NULL;
+    int                                oput_buf_idx          = 0;
+    int                                entry_oid = 0, i = 0;
+    int                                oid_ifIndex[IES_MAX_OID] = {0x0};
+    int                                oid_ifIndex_len          = 0;
+    int                                port                     = 0;
+    int                                update_port              = 0;
+    iss_remapper_port_t                ret_port                 = OID_PORT_ERROR;
+
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( oid_buf_idx < oid_table_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    entry_oid = oid_buf[oid_table_len];
+
+
+
+    if ( 0 == remapper_util_snmp_check_transfer_by_oid(handle_table, handle_table_len, entry_oid) )
+    {
+        return IES_NOERR;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_trans_val_to_ifidxObj(
+            iput_buf_val, oid_ifIndex, IES_MAX_OID, &oid_ifIndex_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+    port     = oid_ifIndex[oid_ifIndex_len];
+    ret_port = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_READ, REMAP_PORT_TYPE_DEFAULT);
+
+    if ( OID_PORT_NORMAL == ret_port )
+    {
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_FILTER == ret_port )
+    {
+        snprintf(oput_buf, oput_buf_len, "#\n");
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret_port )
+    {
+        for ( i = 0, oput_buf_idx = 0 ; i < oid_buf_idx  ; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d.", (unsigned int)oid_buf[i]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d='", (unsigned int)oid_buf[oid_buf_idx]) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+
+        for ( i = 0 ; i < oid_ifIndex_len  ; i++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d.", (unsigned int)oid_ifIndex[i]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d'\n", (unsigned int)update_port) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+    return IES_NOERR;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    hardcode stdrmon eventTable 的 community
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_stdrmon_eventTable_eventCommunity
+(
+    struct remapper_tableEntryHandler *handle_table,
+    int                                handle_table_len,
+    int                               *oid_table,
+    int                                oid_table_len,
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                              *oput_buf,
+    int                                oput_buf_len
+)
+{
+
+    int                                oid_buf[IES_MAX_OID]  = {0x0};
+    int                                oid_buf_idx           = 0;
+    char                              *iput_buf_val          = NULL;
+    int                                entry_oid = 0;
+    int                                oput_buf_idx, i = 0;
+
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( oid_buf_idx < oid_table_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    entry_oid = oid_buf[oid_table_len];
+
+    if ( 0 == remapper_util_snmp_check_transfer_by_oid(handle_table, handle_table_len, entry_oid) )
+    {
+        return IES_NOERR;
+    }
+
+    for ( i = 0, oput_buf_idx = 0 ; i < oid_buf_idx  ; i++ )
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+            (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+            "%d.", (unsigned int)oid_buf[i]) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+
+    if ( IES_NOERR != remapper_util_buf_sprintf(
+            (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+            "%d='  '\n", (unsigned int)oid_buf[oid_buf_idx]) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    Recombination of pbmp array in bits
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_pbmp_table_reorganize
+(
+    char                              *pbmp_bit_array,
+    int                                pbmp_bit_array_len
+)
+{
+    int                                i = 0;
+    int                                vaild_bit_length   = gMaxPortInPlatform + gMaxPortChannel;
+    int                                invalid_bit_length = gMaxPortInPlatform - gMaxPortInSystem;
+
+    if ( pbmp_bit_array_len < vaild_bit_length )
+        return IES_ERR;
+
+    if ( invalid_bit_length == 0 )
+        return IES_NOERR;
+
+    for (i = gMaxPortInSystem; i < vaild_bit_length - invalid_bit_length; i++)
+    {
+        pbmp_bit_array[i] = pbmp_bit_array[i + invalid_bit_length];
+        pbmp_bit_array[i + invalid_bit_length] = 0x0;
+    }
+
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        :
+
+    轉換 port-bit-map 型態的 table 
+
+*****************************************************************************/
+ies_handle_t
+remapper_util_buf_handle_pbmap_table
+(
+    struct remapper_tableEntryHandler *handle_table,
+    int                                handle_table_len,
+    int                               *oid_table,
+    int                                oid_table_len,
+    char                              *iput_buf,
+    int                                iput_buf_len,
+    char                              *oput_buf,
+    int                                oput_buf_len
+)
+{
+
+    int                                oid_buf[IES_MAX_OID]  = {0x0};
+    int                                oid_buf_idx           = 0;
+    char                              *iput_buf_val          = NULL;
+    int                                oput_buf_idx          = 0;
+    int                                entry_oid = 0, j = 0, rem_len = 0;
+    char                               pbmap_array[ISS_MAX_BIT_VALUE + 8 /* just in case */ ]  = {0x0};
+    int                                pbmap_array_len = 0;
+    char                               pbmp_bit_array[(ISS_MAX_BIT_VALUE + 8) * HALF_BYTES_BITS_NUM] = {0x0};
+    int                                pbmp_bit_array_len = (ISS_MAX_BIT_VALUE + 8) * HALF_BYTES_BITS_NUM;
+    char                               pbmp_hex_array[ISS_MAX_HEX_VALUE + 8] = {0x0};
+    int                                pbmp_hex_array_len = ISS_MAX_HEX_VALUE + 8;
+
+    int                                pbmp_maxPortEffectValue = get_pbmp_array_len(gMaxPortInSystem + gMaxPortChannel);
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( oid_buf_idx < oid_table_len )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    entry_oid = oid_buf[oid_table_len];
+
+    if ( 0 == remapper_util_snmp_check_transfer_by_oid(handle_table, handle_table_len, entry_oid) )
+    {
+        return IES_NOERR;
+    }
+
+    if ( IES_NOERR != remapper_util_snmp_trans_val_to_pbmap(
+            iput_buf_val, pbmap_array, ISS_MAX_BIT_VALUE, &pbmap_array_len, &rem_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    /* Convert pbmp value into bits format */
+    if ( IES_NOERR != remapper_util_snmp_trans_pbmp_hex_val_to_bits(
+            pbmap_array, pbmap_array_len, pbmp_bit_array, pbmp_bit_array_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    /* Recombine the pbmp array based on gMaxPortInSystem and gMaxPortChannel */
+    if ( IES_NOERR != remapper_util_pbmp_table_reorganize(pbmp_bit_array, pbmp_bit_array_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    /* Convert pbmp value back to hex format */
+    if ( IES_NOERR != remapper_util_snmp_trans_pbmp_bits_val_to_hex(
+            pbmp_hex_array, pbmp_hex_array_len, pbmp_bit_array, pbmp_bit_array_len) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    memcpy(pbmap_array, pbmp_hex_array, pbmp_hex_array_len);
+
+    oput_buf_idx = 0;
+    memset(oput_buf, 0, oput_buf_len);
+    for ( j = 0; j < oid_buf_idx; j++ )
+    {
+        remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, 
+            &oput_buf_idx, "%d.", (unsigned int)oid_buf[j]);
+    }
+
+    remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, 
+        &oput_buf_idx, "%d='", (unsigned int)oid_buf[oid_buf_idx]);
+
+    for ( j = 0; j < pbmp_maxPortEffectValue; j++ )
+    {
+        remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, 
+            &oput_buf_idx, "%x", (unsigned char )pbmap_array[j]);
+    }
+
+    for ( j = 0; j < rem_len - pbmp_maxPortEffectValue; j++ )
+    {
+        remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, 
+            &oput_buf_idx, "0");
+    }
+
+    remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, 
+        &oput_buf_idx, "'\n");
+
+
+    return IES_NOERR;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    處理 oid_index 為 data_port 的 remap-handler 
+    大部分的 port_oid 都是這個 table_oid_index 的最後一個
+    而 port_oid_offset 是指跟 最後一個 table_oid_index 的距離
+    
+    如果是最後一個   port_oid_offset 是 0
+    如果是倒數第二個 port_oid_offset 是 1
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_util_buf_handle_port_index_table_ifStackTable
+(
+    char *iput_buf,
+    int   iput_buf_len,
+    char *oput_buf,
+    int   oput_buf_len
+)
+{
+
+    int                 oid_buf[IES_MAX_OID]  = {0x0};
+    int                 oid_buf_idx           = 0;
+    int                 port_oid_idx          = 0;
+    char               *iput_buf_val          = NULL;
+    int                 oput_buf_idx          = 0;
+    iss_remapper_port_t ret_port              = OID_PORT_ERROR;
+    int                 port = 0, i = 0, update_port = 0;
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    port_oid_idx = oid_buf_idx;
+    port = oid_buf[ port_oid_idx ];
+    if ( 0 == port )
+    {
+        port_oid_idx = oid_buf_idx - 1;
+        port = oid_buf[ port_oid_idx ];
+    }
+
+    # if 0
+    {
+        char tmp_buf[1024] = {0x0};
+        int  tmp_buf_idx   = 0;
+        for ( i = 0; i <= oid_buf_idx; i++ )
+        {
+            remapper_util_buf_sprintf((char *)tmp_buf, sizeof(tmp_buf), &tmp_buf_idx, " %d ", (unsigned int)oid_buf[i]);
+        }
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d oid %s port %d value %s\n", __func__, __LINE__, tmp_buf, port, iput_buf_val );
+    }
+    #endif //
+
+    ret_port  = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_READ, REMAP_PORT_TYPE_DEFAULT);
+
+    if ( OID_PORT_NORMAL == ret_port )
+    {
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_FILTER == ret_port )
+    {
+        snprintf(oput_buf, oput_buf_len, "#\n");
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret_port )
+    {
+        for ( i = 0, oput_buf_idx = 0 ; i <= oid_buf_idx  ; i++ )
+        {
+            if ( i == port_oid_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)update_port) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)oid_buf[i]) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+
+            if ( i != oid_buf_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, ".") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, "=") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%s", iput_buf_val) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    處理 oid_index 為 data_port 的 remap-handler 
+    大部分的 port_oid 都是這個 table_oid_index 的最後一個
+    而 port_oid_offset 是指跟 最後一個 table_oid_index 的距離
+    
+    如果是最後一個   port_oid_offset 是 0
+    如果是倒數第二個 port_oid_offset 是 1
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_util_buf_handle_port_index_table
+(
+    char *iput_buf,
+    int   iput_buf_len,
+    char *oput_buf,
+    int   oput_buf_len,
+    int   port_oid_offset
+)
+{
+
+    int                 oid_buf[IES_MAX_OID]  = {0x0};
+    int                 oid_buf_idx           = 0;
+    int                 port_oid_idx          = 0;
+    char               *iput_buf_val          = NULL;
+    int                 oput_buf_idx          = 0;
+    iss_remapper_port_t ret_port              = OID_PORT_ERROR;
+    int                 port = 0, i = 0, update_port = 0;
+
+    snprintf(oput_buf, oput_buf_len, "%s", iput_buf);
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+            iput_buf, iput_buf_len, 
+            oid_buf, &oid_buf_idx, &iput_buf_val) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    port_oid_idx = oid_buf_idx - port_oid_offset;
+    port = oid_buf[ port_oid_idx ];
+
+    # if 0
+    {
+        char tmp_buf[1024] = {0x0};
+        int  tmp_buf_idx   = 0;
+        for ( i = 0; i <= oid_buf_idx; i++ )
+        {
+            remapper_util_buf_sprintf((char *)tmp_buf, sizeof(tmp_buf), &tmp_buf_idx, " %d ", (unsigned int)oid_buf[i]);
+        }
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d oid %s port %d value %s\n", __func__, __LINE__, tmp_buf, port, iput_buf_val );
+    }
+    #endif //
+
+    ret_port  = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_READ, REMAP_PORT_TYPE_DEFAULT);
+
+    if ( OID_PORT_NORMAL == ret_port )
+    {
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_FILTER == ret_port )
+    {
+        snprintf(oput_buf, oput_buf_len, "#\n");
+        return IES_NOERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret_port )
+    {
+        for ( i = 0, oput_buf_idx = 0 ; i <= oid_buf_idx  ; i++ )
+        {
+            if ( i == port_oid_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)update_port) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                    "%d", (unsigned int)oid_buf[i]) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+
+            if ( i != oid_buf_idx )
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, ".") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+            else
+            {
+                if ( IES_NOERR != remapper_util_buf_sprintf(
+                    (char *)oput_buf, oput_buf_len, &oput_buf_idx, "=") )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    return IES_ERR;
+                }
+            }
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%s", iput_buf_val) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    redundant interface entry 是兩個 OCT 的結構，
+    而在 ISS 內，每個 OCT 是用 %02x 的格式來作輸出。
+
+    所以如果 redundant Interface 是設成 1 跟 2 的話，
+    這個值域會是 0x0102 or 0102。
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_util_buf_handle_redundant_interface_entry
+(
+    char *iput_buf,
+    int   iput_buf_len,
+    char *oput_buf,
+    int   oput_buf_len,
+    ies_uri_handle_t type
+)
+{
+
+#define MAX_REDUNDANT_OCTs_SIZE (2)
+    int                 oid_buf[IES_MAX_OID]  = {0x0};
+    int                 oid_buf_idx           = 0;
+    char               *iput_buf_val          = NULL;
+    char               *iput_buf_result       = NULL;
+    int                 oput_buf_idx          = 0;
+    iss_remapper_port_t ret_port              = OID_PORT_ERROR;
+    char                hex_port_buf[2]       = {0x0};
+    int                 hex_port_buf_idx      = 0;
+    int                 port                  = 0;
+    int                 port_update           = 0;
+    char                port_buf[4]           = {0x0};
+    int                 i, j; 
+
+    if ( IES_URI_HANDLE_TYPE_READ == type )
+    {
+        if ( IES_NOERR != remapper_util_buf_handle_get_oid_and_value(
+                iput_buf, iput_buf_len, 
+                oid_buf, &oid_buf_idx, &iput_buf_val) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        if ( IES_NOERR != remapper_util_buf_handle_get_result_and_value(
+                iput_buf, iput_buf_len,
+                &iput_buf_result, &iput_buf_val ) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+
+    if ( '\'' == iput_buf_val[0] )
+    {
+        iput_buf_val += 1;
+    }
+    
+    if ( 0 == strncmp(iput_buf_val, "0x", 2) ) 
+    {
+        iput_buf_val += 2;
+    }
+    
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d %s\n", __func__, __LINE__, iput_buf_val );
+    
+    if ( IES_URI_HANDLE_TYPE_READ == type )
+    {
+        for ( j = 0; j < oid_buf_idx  ; j++ )
+        {
+            if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%d.", (unsigned int)oid_buf[j]) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                return IES_ERR;
+            }
+        }
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+             (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+             "%d='", (unsigned int)oid_buf[oid_buf_idx]) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+            (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+            "%s='0x", iput_buf_result) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    
+    
+    for ( i = 0; i < MAX_REDUNDANT_OCTs_SIZE; i++ )
+    {
+        memset(port_buf, 0, sizeof(port_buf));
+        memcpy(port_buf, ( iput_buf_val + ( i * MAX_REDUNDANT_OCTs_SIZE ) ), MAX_REDUNDANT_OCTs_SIZE);
+        port_buf[MAX_REDUNDANT_OCTs_SIZE] = '\0';
+
+        if ( IES_NOERR != remapper_util_buf_atox(port_buf, MAX_REDUNDANT_OCTs_SIZE, 
+            hex_port_buf, sizeof(hex_port_buf), &hex_port_buf_idx ) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+
+        port = (int) hex_port_buf[0];
+        // LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d port_buf %s \n", __func__, __LINE__, port_buf );
+        // LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d port     %d \n", __func__, __LINE__, port );
+        ret_port  = remapper_util_check_data_port(port, &port_update, 
+            type, REMAP_PORT_TYPE_1BASE);
+
+        if ( OID_PORT_NORMAL == ret_port )
+        {
+            port_update = port;
+        }
+        else
+        if ( OID_PORT_FILTER == ret_port )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+        else
+        if ( OID_PORT_UPDATE == ret_port )
+        {
+            ;
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+
+        if ( IES_NOERR != remapper_util_buf_sprintf(
+                (char *)oput_buf, oput_buf_len, &oput_buf_idx, 
+                "%02x", port_update) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            return IES_ERR;
+        }
+    }
+    if ( IES_NOERR != remapper_util_buf_sprintf((char *)oput_buf, oput_buf_len, &oput_buf_idx, "'\n") )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+#undef MAX_REDUNDANT_OCTs_SIZE
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    oid index table read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_entry_read_for_redundant_interface
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        ret = IES_ERR;
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        ret = IES_ERR;
+        goto out;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+        memset(oput_buf, 0, sizeof(oput_buf));
+        if ( IES_NOERR == remapper_util_buf_handle_redundant_interface_entry(
+            iput_buf, strlen(iput_buf), 
+            oput_buf, sizeof(oput_buf), 
+            IES_URI_HANDLE_TYPE_READ) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    處理屬於 redundant interface 的 entry update
+
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_entry_update_for_redundant_interface
+(
+    u8                 *iputURI,
+    u8                 *oputURI,
+    u8                 *iputFile,
+    u8                 *oputFile
+)
+{
+
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    snprintf( (char *) oputURI, IES_MAX_URI, "%s", iputURI);
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+    memset(oput_buf, 0, sizeof(oput_buf));
+    if ( IES_NOERR == remapper_util_buf_handle_redundant_interface_entry(
+        iput_buf, strlen(iput_buf), 
+        oput_buf, sizeof(oput_buf),
+        IES_URI_HANDLE_TYPE_UPDATE) )
+    {
+        fprintf(oput_fp,"%s", oput_buf);
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        goto out;
+    }
+
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+
+/****************************************************************************
+ Description        : 
+
+    oid index table read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_table_read_for_port_index_table_handler
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile,
+    int port_oid_offset
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+        memset(oput_buf, 0, sizeof(oput_buf));
+        if ( IES_NOERR == remapper_util_buf_handle_port_index_table(
+            iput_buf, strlen(iput_buf), 
+            oput_buf, sizeof(oput_buf), port_oid_offset ) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+
+
+
+/****************************************************************************
+ Description        : 
+
+    oid index table read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_table_read_for_port_index_table
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    return remapper_handle_table_read_for_port_index_table_handler(
+        iputURI, iputFile, oputFile, 0);
+}
+
+/****************************************************************************
+ Description        : 
+
+    oid index table read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_table_read_for_port_index_table_port_index_second_from_the_last
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    return remapper_handle_table_read_for_port_index_table_handler(
+        iputURI, iputFile, oputFile, 1);
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    oid index table read 
+ 
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_table_read_for_port_index_table_ifmibdb_ifStackTable
+(
+    u8 *iputURI,
+    u8 *iputFile,
+    u8 *oputFile
+)
+{
+    FILE               *iput_fp                = NULL;
+    FILE               *oput_fp                = NULL;
+    char                iput_buf[IES_MAX_FILE] = {0x0};
+    char                oput_buf[IES_MAX_FILE] = {0x0};
+    ies_handle_t        ret                    = IES_ERR;
+
+    iput_fp = fopen((char *)iputFile, "r");
+    if ( NULL == iput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    oput_fp = fopen((char *)oputFile, "w");
+    if ( NULL == oput_fp )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    while ( !feof(iput_fp) )
+    {
+        if ( NULL == fgets(iput_buf, sizeof(iput_buf), iput_fp) )
+        {
+            break;
+        }
+        if ( '#' == iput_buf[0] )
+        {
+            fprintf(oput_fp,"%s", iput_buf);
+            continue;
+        }
+        memset(oput_buf, 0, sizeof(oput_buf));
+        if ( IES_NOERR == remapper_util_buf_handle_port_index_table_ifStackTable(
+            iput_buf, strlen(iput_buf), 
+            oput_buf, sizeof(oput_buf)) )
+        {
+            fprintf(oput_fp,"%s", oput_buf);
+        }
+        else
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            goto out;
+        }
+    }
+    ret = IES_NOERR;
+out:
+    if ( NULL != iput_fp )
+    {
+        fclose(iput_fp);
+    }
+
+    if ( NULL != oput_fp )
+    {
+        fclose(oput_fp);
+    }
+    return ret;
+}
+
+/****************************************************************************
+ Description        : 
+
+    處理屬於 port_index_table 的 update
+    
+    iputURI = URI_TABLE/URI_ENTRY_IDX/URI_TABLE_ENTRY
+    
+    將 URI_ENTRY_IDX 取出
+    將 URI_ENTRY_IDX 跟 port 有關的部分作修正
+    並將結果 輸出到 oputURI 
+    
+    iputURI = URI_TABLE/URI_ENTRY_IDX(with_port_modified)/URI_TABLE_ENTRY
+
+*****************************************************************************/
+ies_handle_t 
+remapper_handle_table_update_for_port_index_table
+(
+    u8                 *iputURI,
+    u8                 *oputURI,
+    u8                 *iputFile,
+    u8                 *oputFile
+)
+{
+    char                uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN]  = {0x0};
+    int                 uri_col_idx                                        = 0;
+    char               *uri_col_port                                       = NULL;
+    int                 uri_col_port_idx                                   = 0;
+    int                 uri_col_port_flag                                  = 0;
+    int                 uri_col_port_len                                   = 0;
+    char               *uri_col_port_tmp                                   = NULL;
+    char                uri_col_port_buf[IES_MAX_URI_COL_LEN]              = {0x0};
+    int                 uri_col_port_oid[IES_MAX_URI_COL_LEN]              = {0x0};
+    int                 uri_col_port_oid_len                               = 0;
+    int                 oputURI_idx                                        = 0;
+    iss_remapper_port_t ret                                                = OID_PORT_ERROR;
+    int                 port                                               = 0;
+    int                 update_port                                        = 0;
+    int                 i;
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    uri_col_port      = uri_col_buf[ uri_col_idx - 1 ];
+    uri_col_port_len  = strlen(uri_col_port);
+    uri_col_port_flag = ( NULL == remapper_util_buf_strchr ( uri_col_port, uri_col_port_len, '.') ) ? 0 : 1;
+
+    if ( uri_col_port_flag )
+    {
+        uri_col_port_tmp = remapper_util_buf_strchr( uri_col_port, uri_col_port_len, '/' );
+        if ( NULL == uri_col_port_tmp )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            return IES_ERR;
+        }
+        *uri_col_port_tmp = '\0';
+        snprintf(uri_col_port_buf, sizeof(uri_col_port_buf), "\'%s\'\n", uri_col_port);
+        if ( IES_NOERR != remapper_util_snmp_trans_val_to_ifidxObj(
+                uri_col_port_buf, uri_col_port_oid, 
+                IES_MAX_URI_COL_LEN, &uri_col_port_oid_len) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            return IES_ERR;
+        }
+        port = uri_col_port_oid[uri_col_port_oid_len];
+    }
+    else
+    {
+        port = atoi( uri_col_port );
+    }
+
+    ret = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_UPDATE, REMAP_PORT_TYPE_DEFAULT);
+
+    if ( OID_PORT_NORMAL == ret )
+    {
+        if ( uri_col_port_flag )
+        {
+            for ( i = 0; i < uri_col_port_oid_len; i++ )
+            {
+                remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                    &uri_col_port_idx, "%d.", uri_col_port_oid[i]);
+            }
+            remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                &uri_col_port_idx, "%d/", port);
+        }
+        else
+        {
+            snprintf(uri_col_port, IES_MAX_URI_COL_LEN, "%d/", port);
+        }
+    }
+    else
+    if ( OID_PORT_FILTER == ret )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret )
+    {
+        if ( uri_col_port_flag )
+        {
+            for ( i = 0; i < uri_col_port_oid_len; i++ )
+            {
+                remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                    &uri_col_port_idx, "%d.", uri_col_port_oid[i]);
+            }
+            remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                &uri_col_port_idx, "%d/", update_port);
+        }
+        else
+        {
+            snprintf(uri_col_port, IES_MAX_URI_COL_LEN, "%d/", update_port);
+        }
+
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    for ( i = 0, oputURI_idx = 0; i <= uri_col_idx; i++ )
+    {
+        remapper_util_buf_sprintf((char *)oputURI, IES_MAX_URI, 
+            &oputURI_idx, "%s", uri_col_buf[i]);
+    }
+
+    LibUtil_ExecShCmd( NULL, NULL, 0, "/bin/mv %s %s", iputFile, oputFile);
+    return IES_NOERR;
+}
+
+#include "iss_snmp_uri_remap_ifmibdb.c"
+#include "iss_snmp_uri_remap_fscfadb.c"
+#include "iss_snmp_uri_remap_fsladb.c"
+#include "iss_snmp_uri_remap_stdvladb.c"
+#include "iss_snmp_uri_remap_mxigmpdb.c"
+#include "iss_snmp_uri_remap_stdrmodb.c"
+#include "iss_snmp_uri_remap_mxtcdb.c"
+#include "iss_snmp_uri_remap_mxDualdb.c"
+#include "iss_snmp_uri_remap_stdbrgdb.c"
+#include "iss_snmp_uri_remap_fsvlandb.c"
+#include "iss_snmp_uri_remap_mxrstpdb.c"
+#include "iss_snmp_uri_remap_std1d1db.c"
+#include "iss_snmp_uri_remap_std1w1db.c"
+#include "iss_snmp_uri_remap_fsmpmsdb.c"
+#include "iss_snmp_uri_remap_std1s1db.c"
+#include "iss_snmp_uri_remap_mxtcstdb.c"
+#include "iss_snmp_uri_remap_stdethdb.c"
+#include "iss_snmp_uri_remap_stdladb.c"
+#include "iss_snmp_uri_remap_stdbridb.c"
+#include "iss_snmp_uri_remap_mxrlpsdb.c"
+
+struct iss_snmp_uri_remap_handler
+{
+
+    char                     uri[IES_MAX_URI];
+
+    iss_remapper_handle_t  (*read)   (u8 *iputURI,              u8 *iputFile, u8 *oputFile);
+    iss_remapper_handle_t  (*update) (u8 *iputURI, u8 *oputURI, u8 *iputFile, u8 *oputFile);
+
+} table_remap_handler [] = 
+{
+    {
+        .uri    = "ifmibdb",
+        .read   =  remapper_ifmibdb_read,
+        .update =  remapper_ifmibdb_update,
+    },
+    {
+        .uri    = "fscfadb",
+        .read   =  remapper_fscfadb_read,
+        .update =  remapper_fscfadb_update,
+    },
+    {
+        .uri    = "fsladb",
+        .read   =  remapper_fsladb_read,
+        .update =  remapper_fsladb_update,
+    },
+    {
+        .uri    = "stdvladb",
+        .read   =  remapper_stdvladb_read,
+        .update =  remapper_stdvladb_update,
+    },
+    {
+        .uri    = "mxigmpdb",
+        .read   =  remapper_mxigmpdb_read,
+        .update =  remapper_mxigmpdb_update,
+    },
+    {
+        .uri    = "stdrmodb",
+        .read   =  remapper_stdrmodb_read,
+        .update =  remapper_stdrmodb_update,
+    },
+    {
+        .uri    = "mxtcdb",
+        .read   =  remapper_mxtcdb_read,
+        .update =  remapper_mxtcdb_update,
+    },
+    {
+        .uri    = "mxdualdb",
+        .read   =  remapper_mxdualdb_read,
+        .update =  remapper_mxdualdb_update,
+    },
+    {
+        .uri    = "stdbrgdb",
+        .read   =  remapper_stdbrgdb_read,
+        .update =  remapper_stdbrgdb_update,
+    },
+    {
+        .uri    = "fsvlandb",
+        .read   =  remapper_fsvlandb_read,
+        .update =  remapper_fsvlandb_update,
+    },
+    {
+        .uri    = "mxrstpdb",
+        .read   =  remapper_mxrstpdb_read,
+        .update =  remapper_mxrstpdb_update,
+    },
+    {
+        .uri    = "std1d1db",
+        .read   =  remapper_std1d1db_read,
+        .update =  remapper_std1d1db_update,
+    },
+    {
+        .uri    = "std1w1db",
+        .read   =  remapper_std1w1db_read,
+        .update =  remapper_std1w1db_update,
+    },
+    {
+        .uri    = "fsmpmsdb",
+        .read   =  remapper_fsmpmsdb_read,
+        .update =  remapper_fsmpmsdb_update,
+    },
+    {
+        .uri    = "std1s1db",
+        .read   =  remapper_std1s1db_read,
+        .update =  remapper_std1s1db_update,
+    },
+    {
+        .uri    = "mxtcstdb",
+        .read   =  remapper_mxtcstdb_read,
+        .update =  remapper_mxtcstdb_update,
+    },
+    {
+        .uri    = "stdethdb",
+        .read   =  remapper_stdethdb_read,
+        .update =  remapper_stdethdb_update,
+    },
+    {
+        .uri    = "stdladb",
+        .read   =  remapper_stdladb_read,
+        .update =  remapper_stdladb_update,
+    },
+    {
+        .uri    = "stdbridb",
+        .read   =  remapper_stdbridb_read,
+        .update =  remapper_stdbridb_update,
+    },
+    {
+        .uri    = "mxrlpsdb",
+        .read   =  remapper_mxrlpsdb_read,
+        .update =  remapper_mxrlpsdb_update,
+    },
+};
+
+/****************************************************************************
+ Description        : 
+
+    genaral handler for ISS SNMP URI Remapper 
+
+*****************************************************************************/
+ies_handle_t 
+IssSnmpURI_generalRemapper 
+(
+    u8                  *iputURI, 
+    u8                  *oputURI, 
+    u8                  *iputFile, 
+    u8                  *oputFile, 
+    ies_uri_handle_t     handleType
+)
+{
+    struct iss_snmp_uri_remap_handler *handler;
+    iss_remapper_handle_t              ret_handler = REMAP_ERROR;
+    int i = 0, count = 0;
+    
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetMaxPortNumInSystem(&gMaxPortInSystem) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetMaxPortNumOfPlatform(&gMaxPortInPlatform) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    if ( gMaxPortInPlatform < gMaxPortInSystem ) /* should not happen */ 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    gMaxPortChannel = gMaxPortInSystem / 2;
+    gMaxPortNumber  = gMaxPortInSystem + gMaxPortChannel;
+
+    /* 
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortInSystem   = %d\n", __func__, __LINE__, gMaxPortInSystem );
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortInPlatform = %d\n", __func__, __LINE__, gMaxPortInPlatform );
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortChannel    = %d\n", __func__, __LINE__, gMaxPortChannel );
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortNumber     = %d\n", __func__, __LINE__, gMaxPortNumber );
+    */
+
+    count = sizeof(table_remap_handler)/sizeof(table_remap_handler[0]);
+
+    for ( i = 0; i < count; i++ )
+    {
+        handler = &table_remap_handler[i];
+        if ( COMPARE_ISS_SNMP_URI( iputURI, handler->uri ) )
+        {
+            if ( IES_URI_HANDLE_TYPE_READ == handleType )
+            {
+                ret_handler = handler->read(iputURI, iputFile, oputFile);
+            }
+            else
+            if ( IES_URI_HANDLE_TYPE_UPDATE == handleType )
+            {
+                ret_handler = handler->update(iputURI, oputURI, iputFile, oputFile);
+            }
+            else
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                    __func__, __LINE__ );
+                return IES_ERR;
+            }
+            if ( REMAP_NOT_FOUND == ret_handler )
+            {
+                goto out;
+            }
+            return ( REMAP_NOERR == ret_handler ) ? IES_NOERR : IES_ERR;
+        }
+    }
+out:
+    LibUtil_ExecShCmd(NULL, NULL, 0, "/bin/mv %s %s", iputFile, oputFile);
+    if ( IES_URI_HANDLE_TYPE_UPDATE == handleType )
+    {
+        snprintf( (char *)oputURI, IES_MAX_URI, "%s", iputURI );
+    }
+    return IES_NOERR;
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    read handler for ISS SNMP URI Remapper 
+
+*****************************************************************************/
+ies_handle_t 
+IssSnmpURI_readRemapper 
+(
+    u8                  *iputURI,
+    u8                  *iputFile, 
+    u8                  *oputFile
+)
+{
+    return IssSnmpURI_generalRemapper(iputURI, NULL, iputFile, oputFile, IES_URI_HANDLE_TYPE_READ);
+}
+
+
+/****************************************************************************
+ Description        : 
+
+    read handler for ISS SNMP URI Remapper 
+
+*****************************************************************************/
+ies_handle_t 
+IssSnmpURI_updateRemapper 
+(
+    u8                  *iputURI, 
+    u8                  *oputURI, 
+    u8                  *iputFile, 
+    u8                  *oputFile
+)
+{
+    return IssSnmpURI_generalRemapper(iputURI, oputURI, iputFile, oputFile, IES_URI_HANDLE_TYPE_UPDATE);
+}

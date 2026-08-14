@@ -1,0 +1,123 @@
+# ADR-0003: iss_build==0 —— SNMP GET 前送 framework AgentX、SET 留 in-master
+
+Status: Proposed
+Date: 2026-07-23
+
+PoC Outcome & Refined Mechanism (2026-07-23, trustAccess on DUT):
+  定位收斂:**Plan E = Plan C 的架構(已證明可行),把 forward 目標從 ISS 換成
+  framework subagent;借用 Plan D 的 framework GET 服務 code,但不採用 Plan D
+  的 SET(rowStatus valid-toggle)——SET 一律留 in-master(Plan C 精神)。**
+  PoC 關鍵發現:framework 用 netsnmp_register_instance(per-instance 葉子)時,
+  in-master forward 一個 GETNEXT 進去會卡死(單一 instance 子樹無法排序);
+  對照 framework 獨佔群組(syslog/email/event_port,原生路由)walk 正常,ISS forward
+  可行是因為 ISS 註冊的是 table 子樹。→ **修正:framework 必須把被 forward 的表
+  註冊成唯讀 table_data_set(fix-1),GETNEXT 才由 net-snmp 排序。**
+  採用做法 B(Plan-C 式,對齊已驗證機制):
+    - RO 欄:agentx_owned.list **skip** → framework table_data_set 原生服務。
+    - RW 欄:in-master 保留(SET 留 in-master)+ **forward GET** 給 framework table。
+  放棄 Plan D「framework 擁有 SET」的方向(per-instance 無法原子 append rowStatus,
+  ADR-0002 的硬邊界即此)。fix-1 需在 framework AgentX binding 加 table_data_set 註冊
+  (lib_moxa_snmp_agentx/src/agentx.c 目前只有 scalar/instance)。以 event_port
+  (無 rowStatus)為最單純載具先建立機制。以下原始 Decision(dual-register+iterate)
+  仍適用於 RW 欄的 forward;RO 欄改走 skip。
+Context:
+  Plan D(ADR-0001/ADR-0002)把 iss_build==0 的 config MIB 從 snmpd in-master
+  遷到 app_moxa_framework AgentX subagent,GET+SET 都交給 framework,並註解
+  MOX_SNMP_INIT_ENTRY 讓 framework 獨佔 OID。過程撞到硬邊界:framework 用
+  netsnmp_register_instance(逐 OID instance),createAndGo 的多 varbind SET PDU
+  被逐欄路由,rowStatus handler 看不到同列其他欄 → 動態 append 表無法原子建列;
+  只能在 Rust 逐表「重實作」valid-toggle 語意(ADR-0001),每張表對產品行為驗證,
+  成本高且有天花板(真正動態長度的表可能複製不了)。
+  觀察:Plan C(iss_build==1)已用「in-master 保留註冊贏 wire、只把 GET 前送到
+  另一個 AgentX subagent(ISS)」的模式(mox_snmp_forward_get_to_iss),SET 留本地。
+  這模式可鏡像到 iss_build==0:GET 前送 framework(快),SET 留 in-master(rowStatus
+  原生原子),直接繞過上述邊界,不必在 Rust 重實作。
+Decision:
+  對全部 iss_build==0 群組採用:
+  1. in-master(ies-auto-mibs)保留 MOX_SNMP_INIT_ENTRY 註冊,priority 較高、
+     贏 wire:SET 走既有 readCreate_v2 + net-snmp table 多階段(原子建列不變)。
+  2. GET:在 mox_snmp_handle_entry 的 MODE_IS_GET 分支,以
+     moxaSnmpHandle_UtilMibEntryCheckFromUri(iss_build==0)為閘門,呼叫新增的
+     mox_snmp_forward_get_to_framework() 前送到 framework AgentX subagent。
+  3. mox_snmp_forward_get_to_framework 不用硬寫 probe 表(有別於 Plan C 的
+     mox_iss_get_forward_rules[]):因同顆 OID 由 in-master 與 framework 併存註冊,
+     直接在該 OID 上迭代 subtree、挑 reginfo->handler 非自身(mox_snmp_handle_entry)
+     的 framework 註冊前送。→ 按 flag 通用,不用逐群組手寫 probe。
+  4. framework AgentX subagent 註冊全部 iss_build==0 OID,但只服務 GET
+     (SET 不會落到它);註冊 priority 低於 in-master。
+  5. 刻意採 dual registration(in-master 贏 wire+SET、framework 服務被前送 GET),
+     以 priority 分序 —— 取代 ADR-0001/0002「避免 dual registration + 註解 INIT_ENTRY
+     交接擁有權」的決策。
+  本 ADR supersede ADR-0001 / ADR-0002 的擁有權與 SET 面向;保留 ADR-0002 的資料層
+  決策(lib_moxa_ies_auto_mibs = 純資料/分類,無 net-snmp),framework subagent 續重用。
+
+  終局(End-State,為維護一致性收斂到單一模型):
+  6. **forward-only**:退休「skip 本地註冊讓 master 原生路由」這條路(Plan C ifTable RO
+     目前用 skip + agentx_owned.list)。全部走同一機制 = dual-register + 迭代前送。
+     理由:skip 無 runtime fallback(skip 了但 subagent 沒服務 → 靜默 noSuchObject),
+     需一份顯式白名單保命;forward 有 REST/local fallback,天生安全。消除 skip 後,
+     只剩單一 code path。
+  7. **隱式閘門、agentx_owned.list 逐步退休**:一旦沒有 skip,路由三決策各有單一內在來源,
+     不需獨立 list:
+       (a) 去 ISS / framework → 由 per-entry .iss_build flag 決定(net_*.h 內在,零重複)。
+       (b) 是否加速 → 由「subagent(framework g_reuse_srcs / ISS)有沒有註冊該 OID」
+           + fallback 決定。
+       (c) 機制 → 一律 forward。
+     顯式無法乾淨取代隱式:target(ISS vs framework)是資料內在屬性 = iss_build,塞進 list
+     等於手動複製 2136 筆歸屬並同步,維護倒退。隱式可完全取代顯式的唯一前提就是 forward-only
+     (解除 skip 的 fallback 死結)。
+  8. **iss_build==1(Plan C)一併收斂**:RW 前送的 4 條硬寫 probe 規則(mox_iss_get_forward_rules[])
+     改為與 iss0 相同的「迭代 subtree 挑非自身 handler」;ifTable RO 由 skip 轉 dual-register+forward。
+     最終 iss0 + iss1 共用單一 forward 機制,agentx_owned.list 退休。
+Alternatives Considered:
+  - Plan D 原案(SET 也搬 framework、Rust 重實作 rowStatus valid-toggle、註解
+    INIT_ENTRY 獨佔):撞 per-instance 無法原子建列的天花板,每表重實作+驗證成本高,
+    動態長度表可能不可行(ADR-0002 已列為殘留硬邊界)。
+  - Plan E 只套用在「刻意留 in-master」的子集、其餘走 Plan D:分工較細但兩套機制並存、
+    邊界判斷複雜;user 選擇全 iss_build==0 通用政策以求一致。
+  - GET 仍走既有 REST 慢路徑(entry_handle_generate_uri_value_file, ~600ms):
+    不符「增快速度」目標。
+  - framework 擁有 OID、SET 前送回 in-master:framework 端仍先收到逐欄路由的 SET PDU,
+    無法原子重組轉發 → 同撞 rowStatus 邊界,不可行。
+  - 保留 skip + 顯式 agentx_owned.list 為終局:skip 對純 RO 獨佔 OID 最快(master 原生路由),
+    但留著 skip 就得永遠維護一份保命白名單、且與 forward 兩套 code path 並存;user 以維護
+    一致性為先,選 forward-only 換掉微優化。
+  - 純顯式(list 記全部 target):把 iss_build 的歸屬手動複製進 list,2136 筆需同步 → 維護倒退,否決。
+Consequences:
+  - 刻意 dual registration:in-master 與 framework 必須設不同 priority(in-master 高),
+    需驗證 net-snmp 不判 MIB_DUPLICATE_REGISTRATION 而是依 priority 併存且可迭代。
+  - framework subagent 需註冊全部 iss_build==0 OID 為 GET 服務端(記憶體/啟動成本)。
+  - rowStatus SET 留 in-master → 不需在 Rust 逐表重實作/逐表產品驗證(消掉 ADR-0001/0002
+    的持續成本與天花板)。
+  - 若 Plan D 分支已註解某些群組 INIT_ENTRY,Plan E 需還原(in-master 重新持有 SET)。
+  - 未驗證前為 Proposed:PoC(單一 rowStatus 群組如 trustAccess/mxTrap)通過 priority 併存、
+    subtree 迭代 API、wire 落點三項後,轉 Accepted 並將 ADR-0001/0002 標
+    Superseded by ADR-0003(動舊 ADR 前先與 user 確認)。
+  - 終局 forward-only 的代價(明列):
+    (i) ifTable RO 由 skip 轉 dual-register+forward → 動到已出貨的 Plan C 路徑,需套同樣的
+        priority / 重複註冊處理與回歸驗證。
+    (ii) 純 RO、subagent 獨佔 OID:從 master 原生路由變成 in-master 前送一跳,多一點記憶體
+         (in-master 多一份註冊)與微延遲 —— 以一致性換微優化。
+    (iii) agentx_owned.list 退休是漸進的:iss0 forward 打通 → iss1 probe 表改迭代 → ifTable
+          skip 轉 forward → 最後移除 list。每一步各自可驗、可回退。
+Constraints / Assumptions:
+  - iss_build==0 = framework/config 擁有;iss_build==1 = ISS 擁有(不變,Plan C 續行)。
+  - framework subagent 用 netsnmp_register_instance(逐 OID instance)。
+  - net-snmp 允許同 OID region 多 subtree 依 priority 排序(待 PoC 核實 5.9.3 行為)。
+  - SET 正確性依賴 in-master readCreate_uri_set_tableRowStatus_v2 + 多階段 SET。
+Related Files / Modules:
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c
+    (mox_snmp_handle_entry:3179 / MODE_IS_GET:3233 / Plan C 前送:3062-3168;
+     新增 mox_snmp_forward_get_to_framework)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c:277
+    (moxaSnmpHandle_UtilMibEntryCheckFromUri = iss_build==0 閘門)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c
+    (保留/還原 iss_build==0 群組的 MOX_SNMP_INIT_ENTRY)
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c:60 (netsnmp_register_instance + priority)
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs (全 iss_build==0 GET 服務端註冊)
+  - buildroot/dl/lib_moxa_ies_auto_mibs/ (純資料/分類,ADR-0002 保留部分)
+  - 設計文件: ~/plan-e-iss0-get-forward-framework-set-in-master-design-2026-07-23.md
+Related ADRs:
+  - Supersedes(擁有權/SET 面向): ADR-0001, ADR-0002
+  - 保留: ADR-0002 的資料層決策(lib_moxa_ies_auto_mibs 純資料)
+  - Plan C 前送機制為本 ADR 的模式來源

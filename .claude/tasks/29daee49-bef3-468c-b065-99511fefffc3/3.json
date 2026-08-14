@@ -1,0 +1,9 @@
+{
+  "id": "3",
+  "subject": "Decide each MIB-vs-implementation mismatch: change the .mib or change the code (ADR-0022)",
+  "description": "待決議事項,全文見 ~/mds4xgl3/.adr/ADR-0022-mib-vs-implementation-mismatches-open.md(Status: Proposed)。\n\n使用者 2026-08-10 的重新框定:MIB 與實作不符時有**兩個**選項,不是一個 ——\n改 code 讓它配合 MIB,或改 .mib 因為 MIB 本身寫錯。ADR-0010「MIB 為權威」\n沒有回答「MIB 本身錯了怎麼辦」。\n\n== 已決定的臨時原則 ==\n決議前,搬遷輪次一律維持現狀、不夾帶 MIB 相容性修正。\n(ADR-0021 已違反 —— mxFiberCheck 多回 2 欄已上線於 2026_0810_0021。)\n\n== A. 實作有註冊、但 .mib 沒有定義 ==\n改 code = 取消註冊;改 .mib = 補定義。\n  mxPort  PortConfigTid                        12 個\n  evtPort chainProtectEvent (.602.7.1.2.1.8/.9) 24 個\n  mxLp    lpConfiguration.3 整張 per-port 表     2 欄\n          (mxLp.mib 只定義 {lpConfiguration 1} 與 {2})\n\n== B. MAX-ACCESS 與實際行為不符 ==\n\nB-1【波及面最大】lib_moxa_snmp_plugin/src/handler/scalar.c:126 無條件用\n    HANDLER_CAN_RWRITE 註冊每一個 dlmod scalar,不看 MIB。影響全部 35 個模組。\n    - 改 code:依 MIB 決定註冊模式 → 會移除今天可用的 SET,若有客戶在用即破壞性\n    - 改 .mib:把確實可設定的改成 read-write → 需逐一確認是設計意圖非副作用\n\nB-2 mxFiberCheck 的 fiberCheckConfigPortIndex / fiberCheckStatPortIndex\n    MIB 皆 read-only;mainline 2026_0805_2335 對兩者回 No Such Object(未註冊)\n    - 改 code:Plan E 回退成不註冊,與 mainline 逐位元組一致\n    - 改 .mib:改成 not-accessible(符合 SMIv2 對 INDEX 物件的慣例)\n    - 維持現況:依臨時原則,三者中最不該留的\n\n== 決議前提 ==\n改 .mib 影響對外發布的 MIB 檔與既有 manager/客戶整合,決策層級高於 code,\n**需要產品側參與**,不是工程單方面能定。\nA 類三案可分別決議;B-1 應整批決議。",
+  "activeForm": "Deciding the MIB-vs-implementation mismatches",
+  "status": "pending",
+  "blocks": [],
+  "blockedBy": []
+}

@@ -1,0 +1,23 @@
+#!/bin/bash
+# 掃 ~/NOS_v7.0_develop/buildroot/dl 底下所有名字帶 moxa 的資料夾,確認 git branch
+DL=$HOME/NOS_v7.0_develop/buildroot/dl
+EXPECT="${1:-clippy-scan-binary-packages-3}"   # 預期分支,可用第一參數覆寫
+
+declare -A seen
+on=0; off=0; nogit=0; total=0
+printf "%-50s %s\n" "REPO" "BRANCH"
+printf "%-50s %s\n" "----" "------"
+while IFS= read -r d; do
+    root=$(cd "$d" && git rev-parse --show-toplevel 2>/dev/null) || { printf "%-50s %s\n" "${d#$DL/}" "(not a git repo)"; nogit=$((nogit+1)); continue; }
+    [ -n "${seen[$root]:-}" ] && continue       # 同一 git repo 只報一次
+    seen[$root]=1
+    total=$((total+1))
+    br=$(cd "$root" && git branch --show-current)
+    [ -z "$br" ] && br="(detached: $(cd "$root" && git rev-parse --short HEAD))"
+    rel=${root#$DL/}
+    if [ "$br" = "$EXPECT" ]; then on=$((on+1)); else off=$((off+1)); fi
+    printf "%-50s %s\n" "$rel" "$br"
+done < <(find "$DL" -maxdepth 1 -type d -iname '*moxa*' | sort)
+
+echo "-----------------------------------------------------"
+echo "git repos 總數=$total   在 $EXPECT=$on   其他分支=$off   非git=$nogit"

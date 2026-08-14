@@ -1,0 +1,25 @@
+################################################################################
+#
+# lib_moxa_rust_ies_auto_mibs
+#
+################################################################################
+
+LIB_MOXA_RUST_IES_AUTO_MIBS_SITE = "$(TOPDIR)/dl/lib_moxa_rust_ies_auto_mibs"
+LIB_MOXA_RUST_IES_AUTO_MIBS_DEPENDENCIES = \
+	lib_moxa_ies_auto_mibs
+
+define LIB_MOXA_RUST_IES_AUTO_MIBS_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE1) \
+		-C $(@D) \
+		TARGET=$(RUSTC_TARGET_NAME) \
+		RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)
+endef
+
+define LIB_MOXA_RUST_IES_AUTO_MIBS_INSTALL_TARGET_CMDS
+	@if [ "${RUST_CLIPPY_SCAN_CONFIG}" = "true" ]; then \
+		mkdir -p $(BINARIES_DIR)/cargo/lib_moxa_rust_ies_auto_mibs; \
+		cp -rf $(@D)/rust_clippy_scan_result $(BINARIES_DIR)/cargo/lib_moxa_rust_ies_auto_mibs; \
+	fi
+endef
+
+$(eval $(generic-package))

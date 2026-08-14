@@ -1,0 +1,1328 @@
+//! AgentX subagent for app_moxa_framework (Plan D B).
+//!
+//! B1 (Design C): the framework, as an AgentX subagent, FULLY owns the config
+//! OIDs listed in `lib_moxa_ies_auto_mibs` (the dlmod is removed).
+//! - GET maps OID -> config-layer URI and reads the value in-process via
+//!   `config_operation::get_config_from_path` + `remove_password_from_config` —
+//!   the exact pair the REST `_setting_get` uses (byte-identical, fast).
+//! - SET reuses the framework's own REST PATCH via `ies_config_set` — the exact
+//!   loopback path the dlmod used (byte-identical; SET is rare, latency moot).
+
+use std::collections::HashMap;
+use std::os::raw::{c_int, c_uint, c_void};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use lib_moxa_rust_ies_auto_mibs::col;
+use lib_moxa_rust_snmp_agentx as agentx;
+use plugins_moxa_framework::config::Plugins;
+use qstring::QString;
+use rust_moxa_common::config_configs::Configs;
+use rust_moxa_common::user_info::{UserInfo, UserInfoRole};
+use rust_moxa_config_layer::config_operation;
+use rust_moxa_status_operation::StatusOperation;
+
+/// How long a per-plugin status snapshot stays valid (mirrors in-master table
+/// snapshot reuse across a walk). plugin_moxa_io has cache_timeout=0, so without
+/// this every OID would re-scan hardware.
+const STATUS_SNAP_TTL: Duration = Duration::from_secs(2);
+
+/// Per-plugin status root, refreshed at most once per TTL on the AgentX thread.
+struct StatusSnap {
+    /// plugin name -> (fetched_at, plugin status object)
+    by_plugin: HashMap<String, (Instant, serde_json::Value)>,
+}
+
+/// Live handles into the running framework state, shared with the subagent
+/// thread (same `Arc<Mutex<…>>` the actix workers use).
+struct SubagentState {
+    plugins: Arc<Mutex<Plugins>>,
+    configs: Arc<Mutex<Configs>>,
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: Arc<Mutex<plugins_moxa_framework::status::Plugins>>,
+    status_snap: Mutex<StatusSnap>,
+}
+
+static STATE: OnceLock<SubagentState> = OnceLock::new();
+
+/// Fixed read identity for SNMP GETs (Task 5): reads are identity-less — VACM
+/// authorizes at the master and per-OID config values are uniform. Matches the
+/// admin identity `LibUtil_CreateToken` bakes for today's SNMP reads.
+fn sys_read_userinfo() -> UserInfo {
+    UserInfo {
+        username: "snmp@moxa^service".to_string(),
+        role: UserInfoRole::admin,
+        nonce: String::new(),
+        from_ip: "127.0.0.1".to_string(),
+    }
+}
+
+/// First path segment = status plugin name (e.g. "io" from "io/power/system/0").
+fn status_plugin_name(path: &str) -> Option<&str> {
+    path.split('/').find(|s| !s.is_empty())
+}
+
+/// Walk `path` under a plugin status root. The first segment is the plugin name
+/// (already selected); remaining segments index into `root`.
+fn navigate_plugin_status(root: &serde_json::Value, path: &str) -> serde_json::Value {
+    let mut cur = root;
+    let mut skip_plugin = true;
+    for attr in path.split('/').filter(|s| !s.is_empty()) {
+        if skip_plugin {
+            skip_plugin = false;
+            continue;
+        }
+        cur = match attr.parse::<usize>() {
+            Ok(i) => &cur[i],
+            Err(_) => &cur[attr],
+        };
+        if cur.is_null() {
+            return serde_json::Value::Null;
+        }
+    }
+    cur.clone()
+}
+
+/// Status GET with a short per-plugin snapshot (fix 2): one `get_status` per
+/// plugin per TTL, then path navigation in-process — same idea as in-master's
+/// table snapshot, so a walk does not re-hit hardware for every OID.
+fn get_status_with_snap(
+    state: &SubagentState,
+    path: &str,
+) -> Result<serde_json::Value, ()> {
+    let plugin = status_plugin_name(path).ok_or(())?;
+    {
+        let snap = state.status_snap.lock().unwrap();
+        if let Some((at, root)) = snap.by_plugin.get(plugin) {
+            if at.elapsed() < STATUS_SNAP_TTL {
+                return Ok(navigate_plugin_status(root, path));
+            }
+        }
+    }
+
+    let ui = sys_read_userinfo();
+    let query = QString::from("");
+    let root = {
+        let mut status_op = state.status_operation.lock().unwrap();
+        let mut plugins_status = state.plugins_status.lock().unwrap();
+        status_op
+            .get_status_from_path(&mut plugins_status, plugin, &ui, &query)
+            .map_err(|_| ())?
+    };
+    let value = navigate_plugin_status(&root, path);
+    state
+        .status_snap
+        .lock()
+        .unwrap()
+        .by_plugin
+        .insert(plugin.to_string(), (Instant::now(), root));
+    Ok(value)
+}
+
+/// Read-only GET handler shared by every registered config OID.
+fn handle_get(requests: *mut c_void) -> c_int {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 1. the requested OID
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 2. OID -> config-layer URI
+    let entry = match lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid) {
+        Some(e) => e,
+        None => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 2b. table columns:
+    //   1 = portsPbmp index, 2 = portsPbmp value, 4 = index-table index,
+    //   6 = RowStatus (ADR-0001).
+    match entry.table_col {
+        col::ROW_INDEX => {
+            let port = *oid.last().unwrap_or(&0) as i64;
+            agentx::set_int(requests, port);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        col::PBMP_VALUE => return handle_pbmp_value_get(state, requests, &entry.uri, &oid),
+        col::IDXTBL_INDEX => {
+            return handle_idx_table_index_get(
+                state,
+                requests,
+                &entry.uri,
+                &oid,
+                entry.is_status,
+            )
+        }
+        col::ROWSTATUS => return handle_rowstatus_get(state, requests, &entry.uri, &oid),
+        _ => {}
+    }
+
+    // config path: index-table value col (3) -> "<uri><row-1>/<column>";
+    // turboring ring col (5) -> "<uri>/ring<row>/<column>" (row 1-based);
+    // a scalar (0) uses the URI as-is.
+    let idx_path;
+    let path: &str = if entry.table_col == col::IDXTBL_VALUE {
+        let row = *oid.last().unwrap_or(&0);
+        if row < 1 {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        idx_path = format!("{}{}/{}", entry.uri, row - 1, entry.uri_index);
+        &idx_path
+    } else if entry.table_col == col::TR2RING_VALUE {
+        let row = *oid.last().unwrap_or(&0);
+        if row < 1 {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        idx_path = format!("{}/ring{}/{}", entry.uri, row, entry.uri_index);
+        &idx_path
+    } else {
+        &entry.uri
+    };
+
+    // Status-layer entry (stat/ prefix or URI_STATUS flag): read from the status
+    // layer at `path` (a scalar's path is the URI; a table's is the row path).
+    if entry.is_status {
+        return handle_status_get(state, requests, path, entry.val_type);
+    }
+
+    // 3. read the value in-process — byte-identical to REST `_setting_get`.
+    //    Lock order (configs then plugins) matches config_layer::setting_read.
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+
+    let value = match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        path,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            // Config path not present (missing row / a URI needing a remap we
+            // don't apply) -> noSuchInstance so a walk continues.
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let value = if value.is_null() {
+        value
+    } else {
+        match config_operation::remove_password_from_config(&mut plugins, path, value) {
+            Ok(v) => v,
+            Err(_) => {
+                agentx::set_no_such_instance(requests);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    };
+
+    // 4. set the value per the mapped type (byte-identical to the old handler).
+    match entry.val_type {
+        agentx::ASN_INTEGER => {
+            // Config leaf may be a JSON bool (true->1, false->2, per SNMPv2
+            // TruthValue == ies-auto-mibs get_value.c:95), a number, or a
+            // numeric string; accept all three.
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_bool().map(|b| if b { 1 } else { 2 }))
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()));
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        _ => match value.as_str() {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// GET for a portsPbmp value column: read the per-port boolean array at `uri`
+/// and return `array[port-1]` as a TruthValue (true->1, false->2).
+fn handle_pbmp_value_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    uri: &str,
+    oid: &[agentx::Oid],
+) -> c_int {
+    let port = match oid.last() {
+        Some(&p) if p >= 1 => p as usize,
+        _ => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    let arr = match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        uri,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // `arr` is the JSON boolean array; the SNMP value is array[port-1].
+    match arr.get(port - 1) {
+        Some(v) => {
+            let n = v
+                .as_bool()
+                .map(|b| if b { 1 } else { 2 })
+                .or_else(|| v.as_i64());
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        None => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// SET for a portsPbmp value column: read the per-port boolean array, flip
+/// `array[port-1]` to the incoming TruthValue (1 -> true, else -> false), and
+/// PATCH the whole array back. Returns 0 on success, non-zero on failure.
+fn handle_pbmp_value_set(uri: &str, requests: *mut c_void) -> i32 {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => return -1,
+    };
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => return -1,
+    };
+    let port = match oid.last() {
+        Some(&p) if p >= 1 => p as usize,
+        _ => return -1,
+    };
+    let sv = match agentx::get_set_int(requests) {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    // Read the current array (lock order: configs then plugins).
+    let mut bools: Vec<bool> = {
+        let ui = sys_read_userinfo();
+        let configs = state.configs.lock().unwrap();
+        let mut plugins = state.plugins.lock().unwrap();
+        let arr = match config_operation::get_config_from_path(
+            &mut plugins,
+            &ui,
+            uri,
+            &configs.running_config,
+            None,
+            false,
+        ) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+        match arr.as_array() {
+            Some(a) => a.iter().map(|v| v.as_bool().unwrap_or(false)).collect(),
+            None => return -1,
+        }
+    };
+    if port - 1 >= bools.len() {
+        return -1;
+    }
+    bools[port - 1] = sv == 1;
+
+    // Serialize "[true,false,…]" by hand (no serde_json dep) and PATCH it whole.
+    let json = format!(
+        "[{}]",
+        bools
+            .iter()
+            .map(|b| if *b { "true" } else { "false" })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    lib_moxa_rust_ies_auto_mibs::config_set_json(uri, &json)
+}
+
+/* SNMP RowStatus (RFC 2579) — same integers as MOXA_SNMP_READ_CREATE_*. */
+const RS_ACTIVE: i64 = 1;
+const RS_NOT_IN_SERVICE: i64 = 2;
+const RS_CREATE_AND_GO: i64 = 4;
+const RS_CREATE_AND_WAIT: i64 = 5;
+const RS_DESTROY: i64 = 6;
+
+/// Config array path for an index-table URI base (`"snmpTrap/host/"` -> `"snmpTrap/host"`).
+fn index_table_array_uri(uri: &str) -> &str {
+    uri.strip_suffix('/').unwrap_or(uri)
+}
+
+fn read_config_value(state: &SubagentState, path: &str) -> Result<serde_json::Value, ()> {
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        path,
+        &configs.running_config,
+        None,
+        false,
+    )
+    .map_err(|_| ())
+}
+
+/// GET RowStatus: missing row -> noSuchInstance; `valid` true/absent -> active(1);
+/// `valid` false -> notInService(2). Mirrors in-master mapping onto config `valid`.
+fn handle_rowstatus_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    uri: &str,
+    oid: &[agentx::Oid],
+) -> c_int {
+    let row = match oid.last() {
+        Some(&r) if r >= 1 => r as usize,
+        _ => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let arr_uri = index_table_array_uri(uri);
+    let arr = match read_config_value(state, arr_uri) {
+        Ok(v) => v,
+        Err(_) => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let Some(host) = arr.get(row - 1) else {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    };
+    if host.is_null() {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    let rs = match host.get("valid").and_then(|v| v.as_bool()) {
+        Some(false) => RS_NOT_IN_SERVICE,
+        _ => RS_ACTIVE,
+    };
+    agentx::set_int(requests, rs);
+    agentx::SNMP_ERR_NOERROR
+}
+
+fn default_trap_host(valid: bool) -> serde_json::Value {
+    serde_json::json!({
+        "hostName": null,
+        "mode": null,
+        "v1v2cCommunity": null,
+        "valid": valid,
+    })
+}
+
+/// SET RowStatus: createAndGo/Wait pad up to the SNMP index; destroy removes;
+/// active/notInService flip `valid`. Whole-array PATCH like portsPbmp.
+fn handle_rowstatus_set(uri: &str, requests: *mut c_void) -> i32 {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => return -1,
+    };
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => return -1,
+    };
+    let row = match oid.last() {
+        Some(&r) if r >= 1 => r as usize,
+        _ => return -1,
+    };
+    let cmd = match agentx::get_set_int(requests) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let arr_uri = index_table_array_uri(uri);
+    let max_rows = if arr_uri == "snmpTrap/host" { 2 } else { 16 };
+    if row > max_rows {
+        return -1;
+    }
+
+    let mut hosts: Vec<serde_json::Value> = match read_config_value(state, arr_uri) {
+        Ok(v) => match v.as_array() {
+            Some(a) => a.clone(),
+            None => return -1,
+        },
+        Err(_) => Vec::new(),
+    };
+
+    match cmd {
+        RS_ACTIVE | RS_NOT_IN_SERVICE => {
+            if row - 1 >= hosts.len() {
+                return -1;
+            }
+            if let Some(obj) = hosts[row - 1].as_object_mut() {
+                obj.insert("valid".into(), serde_json::Value::Bool(cmd == RS_ACTIVE));
+            } else {
+                return -1;
+            }
+        }
+        RS_CREATE_AND_GO | RS_CREATE_AND_WAIT => {
+            let valid = cmd == RS_CREATE_AND_GO;
+            while hosts.len() < row {
+                hosts.push(default_trap_host(false));
+            }
+            if let Some(obj) = hosts[row - 1].as_object_mut() {
+                obj.insert("valid".into(), serde_json::Value::Bool(valid));
+            } else {
+                hosts[row - 1] = default_trap_host(valid);
+            }
+        }
+        RS_DESTROY => {
+            if row - 1 >= hosts.len() {
+                return -1;
+            }
+            hosts.remove(row - 1);
+        }
+        _ => return -1,
+    }
+
+    let json = match serde_json::to_string(&hosts) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    lib_moxa_rust_ies_auto_mibs::config_set_json(arr_uri, &json)
+}
+
+/// GET for a config index-table index column: the value is the row number, but
+/// only for rows that exist (the fixed-size array element "<uri><row-1>" is
+/// present). Rows past the array end -> noSuchInstance.
+fn handle_idx_table_index_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    uri: &str,
+    oid: &[agentx::Oid],
+    is_status: bool,
+) -> c_int {
+    let row = match oid.last() {
+        Some(&r) if r >= 1 => r,
+        _ => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let path = format!("{}{}", uri, row - 1);
+    // Row exists iff the array element "<uri><row-1>" resolves (config or status).
+    let exists = if is_status {
+        matches!(get_status_with_snap(state, &path), Ok(ref v) if !v.is_null())
+    } else {
+        let ui = sys_read_userinfo();
+        let configs = state.configs.lock().unwrap();
+        let mut plugins = state.plugins.lock().unwrap();
+        matches!(
+            config_operation::get_config_from_path(
+                &mut plugins,
+                &ui,
+                &path,
+                &configs.running_config,
+                None,
+                false,
+            ),
+            Ok(ref v) if !v.is_null()
+        )
+    };
+    if exists {
+        agentx::set_int(requests, row as i64);
+    } else {
+        agentx::set_no_such_instance(requests);
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// GET for a status-layer scalar: read `path` from the status layer (parallel to
+/// config_operation for config OIDs) and set the value per the mapped SNMP type.
+fn handle_status_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    path: &str,
+    val_type: c_int,
+) -> c_int {
+    let value = match get_status_with_snap(state, path) {
+        Ok(v) => v,
+        Err(_) => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    match val_type {
+        agentx::ASN_INTEGER => {
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_bool().map(|b| if b { 1 } else { 2 }))
+                .or_else(|| {
+                    value.as_str().and_then(|s| match s {
+                        // plugin_moxa_io Status.status strings
+                        "on" | "true" => Some(1),
+                        "off" | "false" => Some(2),
+                        other => other.parse().ok(),
+                    })
+                });
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        SNMP_DATA_TYPE_MAC => match value.as_str().and_then(mac_to_bytes) {
+            Some(b) => {
+                agentx::set_octet_bytes(requests, &b);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        _ => match value.as_str() {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Moxa data-type tag for a MacAddress column (ies_auto_mibs.h SNMP_DATA_TYPE_MAC_ADDRESS
+/// = 0xf4). Carried through unchanged in `MapEntry.val_type`, so it is distinguishable
+/// from a plain OCTET string (0x04) here.
+const SNMP_DATA_TYPE_MAC: c_int = 0xf4;
+
+/// Parse the first 6 colon-separated hex octets of a MAC string to 6 raw bytes —
+/// byte-identical to the in-master C engine (moxa_snmp_handle_util.c: reads exactly
+/// 6 groups, ignoring any extra, e.g. turboRing's 7-group status form
+/// "00:00:00:00:00:00:00"). `None` if fewer than 6 groups or a group is not hex.
+fn mac_to_bytes(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut it = s.split(':');
+    for slot in out.iter_mut() {
+        *slot = u8::from_str_radix(it.next()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Look up the mapping entry for the OID a request targets.
+fn request_entry(requests: *mut c_void) -> Option<lib_moxa_rust_ies_auto_mibs::MapEntry> {
+    let oid = agentx::get_request_oid(requests)?;
+    lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid)
+}
+
+/// Write handler (Design C): SET reuses the framework's own REST PATCH via
+/// `ies_config_set`, byte-identical to the dlmod. Called in MODE_SET_ACTION.
+fn handle_set(requests: *mut c_void) -> c_int {
+    let entry = match request_entry(requests) {
+        Some(e) => e,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // Read-only: index columns and status-layer entries.
+    if entry.table_col == col::ROW_INDEX
+        || entry.table_col == col::IDXTBL_INDEX
+        || entry.is_status
+    {
+        agentx::set_error(requests, agentx::SNMP_ERR_NOTWRITABLE);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    // portsPbmp value column: whole-array read-modify-write.
+    if entry.table_col == col::PBMP_VALUE {
+        let rc = handle_pbmp_value_set(&entry.uri, requests);
+        if rc != 0 {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+        }
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    // RowStatus: create/destroy / valid (ADR-0001); not a config leaf path.
+    if entry.table_col == col::ROWSTATUS {
+        let rc = handle_rowstatus_set(&entry.uri, requests);
+        if rc != 0 {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+        }
+        return agentx::SNMP_ERR_NOERROR;
+    }
+
+    // Scalar (0) or a path-addressable value column (index-table / turboring ring):
+    // SET writes the field directly (no read-modify-write).
+    let idx_path;
+    let path: &str = if entry.table_col == col::IDXTBL_VALUE
+        || entry.table_col == col::TR2RING_VALUE
+    {
+        match agentx::get_request_oid(requests).and_then(|o| o.last().copied()) {
+            Some(row) if row >= 1 => {
+                idx_path = if entry.table_col == col::TR2RING_VALUE {
+                    format!("{}/ring{}/{}", entry.uri, row, entry.uri_index)
+                } else {
+                    format!("{}{}/{}", entry.uri, row - 1, entry.uri_index)
+                };
+                &idx_path
+            }
+            _ => {
+                agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    } else {
+        &entry.uri
+    };
+
+    let rc = match entry.val_type {
+        agentx::ASN_INTEGER => match agentx::get_set_int(requests) {
+            None => -1,
+            Some(sv) => {
+                // A config field exposed as SNMP INTEGER may be stored as a JSON
+                // boolean (enable/trap/…). Read its current type and write back
+                // the matching one: TruthValue 1 -> true, anything else -> false.
+                if config_field_is_bool(path) {
+                    lib_moxa_rust_ies_auto_mibs::config_set_bool(path, sv == 1)
+                } else {
+                    lib_moxa_rust_ies_auto_mibs::config_set_int(path, sv)
+                }
+            }
+        },
+        _ => match agentx::get_set_string(requests) {
+            Some(s) => lib_moxa_rust_ies_auto_mibs::config_set(path, &s),
+            None => -1,
+        },
+    };
+    if rc != 0 {
+        agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// True if the config leaf at `uri` is currently a JSON boolean (so a SET should
+/// write a boolean, not a number).
+fn config_field_is_bool(uri: &str) -> bool {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => return false,
+    };
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        uri,
+        &configs.running_config,
+        None,
+        false,
+    )
+    .map(|v| v.is_boolean())
+    .unwrap_or(false)
+}
+
+/// mxTurboRingV2 subtree root. Registered as ONE subtree handler instead of a
+/// per-OID instance each: with per-OID registrations every instance is its own
+/// AgentX subtree, so a GETNEXT landing in an unregistered gap makes the master
+/// probe them one at a time — DUT-measured 18 round-trips (~0.107s each) for a
+/// single GETNEXT across the gap after the ring table (3.9s total). One subtree
+/// answers it in a single round-trip; the ordered index below does the search.
+const TR2_ROOT: &[agentx::Oid] = &[1, 3, 6, 1, 4, 1, 8691, 603, 3, 4];
+
+/// True if `oid` lies strictly under `root` (shares the prefix, and is longer).
+fn oid_under(oid: &[agentx::Oid], root: &[agentx::Oid]) -> bool {
+    oid.len() > root.len() && oid.iter().zip(root.iter()).all(|(a, b)| a == b)
+}
+
+/// Every mapped OID under `TR2_ROOT`, sorted — the ordered index GETNEXT needs.
+/// Built once; the mapping table is static for the program's lifetime.
+static TR2_OIDS: OnceLock<Vec<Vec<agentx::Oid>>> = OnceLock::new();
+
+fn tr2_oids() -> &'static Vec<Vec<agentx::Oid>> {
+    TR2_OIDS.get_or_init(|| {
+        let mut v: Vec<Vec<agentx::Oid>> = lib_moxa_rust_ies_auto_mibs::all_oids()
+            .into_iter()
+            .filter(|o| oid_under(o, TR2_ROOT))
+            .collect();
+        v.sort();
+        v
+    })
+}
+
+/// GETNEXT within the mxTurboRingV2 subtree: answer with the next mapped OID
+/// after the requested one that actually HAS a value.
+///
+/// Stepping over valueless OIDs must happen here, in-process: a GETNEXT that
+/// answers noSuchInstance ends the client's walk. (With per-OID registrations
+/// the master did this stepping itself — one AgentX round-trip per candidate,
+/// which is exactly what made it slow.)
+fn handle_getnext(requests: *mut c_void) -> c_int {
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => return agentx::SNMP_ERR_NOERROR,
+    };
+    let oids = tr2_oids();
+    // First mapped OID strictly greater than the requested one (OIDs compare
+    // lexicographically, which is exactly SNMP OID ordering).
+    let mut idx = oids.partition_point(|o| o.as_slice() <= oid.as_slice());
+    while let Some(next) = oids.get(idx) {
+        agentx::set_request_oid(requests, next);
+        handle_get(requests);
+        if agentx::get_var_type(requests) != agentx::SNMP_NOSUCHINSTANCE {
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        idx += 1;
+    }
+    // Past the end of our subtree: restore the varbind so net-snmp sees this
+    // registration as having produced no answer and moves on to the next one.
+    agentx::set_request_oid(requests, &oid);
+    agentx::clear_value(requests);
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Dispatch by net-snmp mode: GET in-process, SET via loopback REST PATCH.
+fn dispatch(reqinfo: *mut c_void, requests: *mut c_void) -> c_int {
+    match agentx::get_mode(reqinfo) {
+        agentx::MODE_GET => handle_get(requests),
+        // Only the TR2_ROOT subtree registration produces GETNEXT here; per-OID
+        // instance registrations are resolved to MODE_GET by net-snmp.
+        agentx::MODE_GETNEXT => handle_getnext(requests),
+        agentx::MODE_SET_RESERVE1 => {
+            let entry = request_entry(requests);
+            // Index columns (portsPbmp portIndex = 1, index-table index = 4) are
+            // read-only; value columns (2, 3) are writable (MODE_SET_ACTION).
+            if entry
+                .as_ref()
+                .map(|e| {
+                    e.table_col == col::ROW_INDEX
+                        || e.table_col == col::IDXTBL_INDEX
+                        || e.is_status
+                })
+                .unwrap_or(false)
+            {
+                agentx::set_error(requests, agentx::SNMP_ERR_NOTWRITABLE);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+            // Reject a SET whose type doesn't match the mapped OID's type.
+            let expected = match entry {
+                Some(e) if e.val_type == agentx::ASN_INTEGER => agentx::ASN_INTEGER,
+                _ => agentx::ASN_OCTET_STR,
+            };
+            if agentx::get_var_type(requests) != expected {
+                agentx::set_error(requests, agentx::SNMP_ERR_WRONGTYPE);
+            }
+            agentx::SNMP_ERR_NOERROR
+        }
+        agentx::MODE_SET_ACTION => handle_set(requests),
+        // RESERVE2 / COMMIT / FREE / UNDO: nothing to do (action already applied).
+        _ => agentx::SNMP_ERR_NOERROR,
+    }
+}
+
+/// net-snmp `Netsnmp_Node_Handler`. Panics must never cross into C, so the body
+/// runs under catch_unwind and degrades to genErr.
+extern "C" fn moxa_config_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let res =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(reqinfo, requests)));
+    match res {
+        Ok(code) => code,
+        Err(_) => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            agentx::SNMP_ERR_NOERROR
+        }
+    }
+}
+
+/// Parse a dotted IPv4 string ("192.168.1.5") to 4 bytes. None if malformed.
+fn ipv4_to_bytes(s: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut n = 0usize;
+    for part in s.split('.') {
+        if n >= 4 {
+            return None;
+        }
+        out[n] = part.parse::<u8>().ok()?;
+        n += 1;
+    }
+    if n == 4 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// trustedIp table OID (the table object; entry = ROOT.1, columns ROOT.1.c.row).
+const TRUSTEDIP_ROOT: &[agentx::Oid] = &[1, 3, 6, 1, 4, 1, 8691, 602, 1, 4, 1, 2];
+
+/// Live row count of the trustedIp config array (net-snmp iterator polls this on
+/// every walk). 0 on any error -> empty table.
+fn trustedip_rows() -> Vec<serde_json::Value> {
+    let Some(state) = STATE.get() else {
+        return Vec::new();
+    };
+    match read_config_value(state, "trustedAccess/trustedIp") {
+        Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+extern "C" fn trustedip_row_count() -> c_uint {
+    trustedip_rows().len() as c_uint
+}
+
+/// Plan E (ADR-0003, refresh-gap fix): net-snmp `table_iterator` node handler for
+/// trustedIp. Reads the CURRENT config each request (no startup snapshot), so GET
+/// reflects config changes with no reboot. Columns: 1=index(INTEGER),
+/// 2=ipAddress(IPADDRESS), 3=netmask(IPADDRESS), 4=rowStatus(INTEGER
+/// active(1)/notInService(2)) — byte-identical to the old table_data_set. GET-only
+/// (RONLY); SET stays in-master.
+extern "C" fn trustedip_iter_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    _reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // Instance OID = ROOT + [1 (entry), col, row]; net-snmp resolved it already.
+    let rl = TRUSTEDIP_ROOT.len();
+    if oid.len() < rl + 3 {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    let col = oid[rl + 1];
+    let row = oid[oid.len() - 1] as usize;
+
+    let rows = trustedip_rows();
+    let Some(item) = rows.get(row.wrapping_sub(1)) else {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    };
+    match col {
+        1 => {
+            agentx::set_int(requests, row as i64);
+        }
+        2 => match item.get("ipAddress").and_then(|v| v.as_str()).and_then(ipv4_to_bytes) {
+            Some(b) => {
+                agentx::set_ipaddress(requests, &b);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        3 => match item.get("netmask").and_then(|v| v.as_str()).and_then(ipv4_to_bytes) {
+            Some(b) => {
+                agentx::set_ipaddress(requests, &b);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        4 => {
+            // Mirror in-master / handle_rowstatus_get: valid==false -> notInService,
+            // else (true or absent) -> active.
+            let rs = match item.get("valid").and_then(|v| v.as_bool()) {
+                Some(false) => RS_NOT_IN_SERVICE,
+                _ => RS_ACTIVE,
+            };
+            agentx::set_int(requests, rs);
+        }
+        _ => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Register trustedIp as a LIVE read-only `table_iterator` (index INTEGER, cols
+/// 1..4). Replaces the startup-snapshot table_data_set so config changes show up
+/// in SNMP GET without a reboot.
+fn register_trustedip_table() {
+    agentx::register_iter_table(
+        "trustedIpTable",
+        TRUSTEDIP_ROOT,
+        agentx::ASN_INTEGER,
+        1,
+        4,
+        trustedip_row_count,
+        trustedip_iter_handler,
+    );
+}
+
+/// snmpTrap host table OID (the table object; entry = ROOT.1, columns ROOT.1.c.row).
+const SNMPTRAP_HOST_ROOT: &[agentx::Oid] = &[1, 3, 6, 1, 4, 1, 8691, 602, 7, 2, 1, 3];
+
+/// Live rows of the `snmpTrap/host` config array (net-snmp iterator polls the
+/// count on every walk). Empty on any error -> empty table. maxItems 2 (schema).
+fn snmptrap_host_rows() -> Vec<serde_json::Value> {
+    let Some(state) = STATE.get() else {
+        return Vec::new();
+    };
+    match read_config_value(state, "snmpTrap/host") {
+        Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+extern "C" fn snmptrap_host_row_count() -> c_uint {
+    snmptrap_host_rows().len() as c_uint
+}
+
+/// Plan E (ADR-0006): net-snmp `table_iterator` node handler for the snmpTrap host
+/// table. Reads the CURRENT config each request (no startup snapshot), so GET
+/// reflects config changes with no reboot. Columns: 1=index(INTEGER),
+/// 2=hostName(OCTET STRING), 3=mode(INTEGER 1..5), 4=v1v2cCommunity(OCTET STRING),
+/// 5=rowStatus(INTEGER active(1)/notInService(2)). GET-only (RONLY); SET (incl.
+/// rowStatus createAndGo/destroy) stays in-master via readCreate_v2_mxTrap_host.c.
+extern "C" fn snmptrap_host_iter_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    _reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // Instance OID = ROOT + [1 (entry), col, row]; net-snmp resolved it already.
+    let rl = SNMPTRAP_HOST_ROOT.len();
+    if oid.len() < rl + 3 {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    let col = oid[rl + 1];
+    let row = oid[oid.len() - 1] as usize;
+
+    let rows = snmptrap_host_rows();
+    let Some(item) = rows.get(row.wrapping_sub(1)) else {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    };
+    match col {
+        1 => {
+            agentx::set_int(requests, row as i64);
+        }
+        2 => match item.get("hostName").and_then(|v| v.as_str()) {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        3 => match item.get("mode").and_then(|v| v.as_i64()) {
+            Some(n) => {
+                agentx::set_int(requests, n);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        4 => match item.get("v1v2cCommunity").and_then(|v| v.as_str()) {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        5 => {
+            // Mirror in-master / handle_rowstatus_get: valid==false -> notInService,
+            // else (true or absent) -> active.
+            let rs = match item.get("valid").and_then(|v| v.as_bool()) {
+                Some(false) => RS_NOT_IN_SERVICE,
+                _ => RS_ACTIVE,
+            };
+            agentx::set_int(requests, rs);
+        }
+        _ => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Register the snmpTrap host table as a LIVE read-only `table_iterator` (index
+/// INTEGER, cols 1..5). Plan E (ADR-0006): GET served live here; SET (rowStatus
+/// createAndGo/destroy) stays in-master. The 2 scalars (informRetries/Timeout,
+/// .602.7.2.1.1/.2) are NOT under this ROOT and stay framework-served (Plan D).
+fn register_snmptrap_host_table() {
+    agentx::register_iter_table(
+        "snmpTrapHostTable",
+        SNMPTRAP_HOST_ROOT,
+        agentx::ASN_INTEGER,
+        1,
+        5,
+        snmptrap_host_row_count,
+        snmptrap_host_iter_handler,
+    );
+}
+
+/// ipifConfigIfMainTable OID (the table object; entry = ROOT.1, columns ROOT.1.c.row).
+const L3VLANIF_ROOT: &[agentx::Oid] = &[1, 3, 6, 1, 4, 1, 8691, 605, 1, 1, 1, 1];
+
+/// Live rows of the `ipInterface/l3VlanIfTable` config array (net-snmp iterator
+/// polls the count on every walk). Empty on any error -> empty table (maxItems 256).
+fn l3vlanif_rows() -> Vec<serde_json::Value> {
+    let Some(state) = STATE.get() else {
+        return Vec::new();
+    };
+    match read_config_value(state, "ipInterface/l3VlanIfTable") {
+        Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+extern "C" fn l3vlanif_row_count() -> c_uint {
+    l3vlanif_rows().len() as c_uint
+}
+
+/// Render a config field as SNMP INTEGER, mirroring the in-master / generic
+/// handler: JSON number as-is, JSON bool -> TruthValue (true->1, false->2).
+/// `None` -> noSuchInstance.
+fn set_int_or_truth(requests: *mut c_void, item: &serde_json::Value, key: &str) {
+    let n = item
+        .get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(|b| if b { 1 } else { 2 })));
+    match n {
+        Some(n) => {
+            agentx::set_int(requests, n);
+        }
+        None => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+}
+
+/// Plan E (ADR-0006, iss0 promotion): net-snmp `table_iterator` node handler for
+/// the L3 VLAN interface table. Reads the CURRENT config each request (no startup
+/// snapshot) so GET reflects config changes with no reboot. GET-only (RONLY); SET
+/// (incl. rowStatus createAndGo/destroy) stays in-master (readCreate_v2_mxIpif.c).
+/// Columns (byte-identical to the current in-master rendering, DUT-verified):
+///   1=index(INTEGER row), 2=ifVlanId(INTEGER — see note), 3=adminStatusUpEnable,
+///   4=mtu, 5=proxyArpEnable (all INTEGER, bool->1/2), 6=rowStatus(active(1)/
+///   notInService(2)), 7=ipv4.ipAddress(IpAddress), 8=ipv4.netmask(IpAddress).
+/// NOTE col2: in-master renders `ifName`="vlanN" through atoi() -> always 0 (the
+/// leading 'v' is non-numeric). This handler instead returns the parsed VLAN id
+/// (per MIB SYNTAX Integer32 0..4094) — a deliberate fix of that in-master bug.
+extern "C" fn l3vlanif_iter_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    _reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // Instance OID = ROOT + [1 (entry), col, row]; net-snmp resolved it already.
+    let rl = L3VLANIF_ROOT.len();
+    if oid.len() < rl + 3 {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    let col = oid[rl + 1];
+    let row = oid[oid.len() - 1] as usize;
+
+    let rows = l3vlanif_rows();
+    let Some(item) = rows.get(row.wrapping_sub(1)) else {
+        agentx::set_no_such_instance(requests);
+        return agentx::SNMP_ERR_NOERROR;
+    };
+    match col {
+        1 => {
+            agentx::set_int(requests, row as i64);
+        }
+        2 => {
+            // ifVlanId = the VLAN number parsed from ifName "vlanN" (MIB SYNTAX
+            // Integer32 0..4094). This deliberately FIXES the in-master atoi()
+            // rendering, which returned 0 because ifName starts with 'v'.
+            match item
+                .get("ifName")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.strip_prefix("vlan"))
+                .and_then(|d| d.parse::<i64>().ok())
+            {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        3 => set_int_or_truth(requests, item, "adminStatusUpEnable"),
+        4 => set_int_or_truth(requests, item, "mtu"),
+        5 => set_int_or_truth(requests, item, "proxyArpEnable"),
+        6 => {
+            // Mirror in-master / handle_rowstatus_get: valid==false -> notInService,
+            // else (true or absent) -> active.
+            let rs = match item.get("valid").and_then(|v| v.as_bool()) {
+                Some(false) => RS_NOT_IN_SERVICE,
+                _ => RS_ACTIVE,
+            };
+            agentx::set_int(requests, rs);
+        }
+        7 => match item
+            .get("ipv4")
+            .and_then(|v| v.get("ipAddress"))
+            .and_then(|v| v.as_str())
+            .and_then(ipv4_to_bytes)
+        {
+            Some(b) => {
+                agentx::set_ipaddress(requests, &b);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        8 => match item
+            .get("ipv4")
+            .and_then(|v| v.get("netmask"))
+            .and_then(|v| v.as_str())
+            .and_then(ipv4_to_bytes)
+        {
+            Some(b) => {
+                agentx::set_ipaddress(requests, &b);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+        _ => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Register the L3 VLAN interface table as a LIVE read-only `table_iterator` (index
+/// INTEGER, cols 1..8). Plan E: GET served live here; SET stays in-master. mxIpIf
+/// is NOT in g_reuse_srcs, so nothing else registers it on the framework side —
+/// no generic-loop skip needed (unlike trustedIp / snmpTrap).
+fn register_l3vlanif_table() {
+    agentx::register_iter_table(
+        "l3VlanIfTable",
+        L3VLANIF_ROOT,
+        agentx::ASN_INTEGER,
+        1,
+        8,
+        l3vlanif_row_count,
+        l3vlanif_iter_handler,
+    );
+}
+
+/// Start the AgentX subagent on its own thread (non-blocking). Registers every
+/// mapped config OID read-only and connects to the snmpd master.
+pub fn start_snmp_subagent(
+    plugins: Arc<Mutex<Plugins>>,
+    configs: Arc<Mutex<Configs>>,
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: Arc<Mutex<plugins_moxa_framework::status::Plugins>>,
+) {
+    let _ = STATE.set(SubagentState {
+        plugins,
+        configs,
+        status_operation,
+        plugins_status,
+        status_snap: Mutex::new(StatusSnap {
+            by_plugin: HashMap::new(),
+        }),
+    });
+
+    agentx::init("app_moxa_framework");
+    // Plan E (ADR-0003): trustedIp served as ONE LIVE read-only table_iterator
+    // (net-snmp sequences GET/GETNEXT/GETBULK; reads config per request so no
+    // reboot needed); SET stays in-master. Its per-OID regs are skipped below —
+    // the iterator owns the whole subtree.
+    register_trustedip_table();
+    // Plan E (ADR-0006): the snmpTrap host table is served the same way — one LIVE
+    // read-only table_iterator here, SET (rowStatus createAndGo/destroy) stays
+    // in-master (readCreate_v2_mxTrap_host.c). Its per-OID regs are skipped below.
+    register_snmptrap_host_table();
+    // Plan E (ADR-0006, iss0 promotion): L3 VLAN interface table — LIVE read-only
+    // table_iterator for GET; SET (incl. rowStatus) stays in-master
+    // (readCreate_v2_mxIpif.c, INIT_ENTRY active). mxIpIf is not in g_reuse_srcs,
+    // so it is not in all_oids() below — no generic-loop skip needed.
+    register_l3vlanif_table();
+    // mxTurboRingV2: ONE subtree handler covering the whole group, so a GETNEXT
+    // crossing an unregistered gap costs one AgentX round-trip instead of one
+    // per candidate OID (see TR2_ROOT). Its per-OID regs are skipped below.
+    agentx::register_handler(
+        "mxTurboRingV2",
+        TR2_ROOT,
+        agentx::HANDLER_CAN_RWRITE,
+        moxa_config_handler,
+    );
+    for oid in lib_moxa_rust_ies_auto_mibs::all_oids() {
+        let under_trustedip = oid.len() > TRUSTEDIP_ROOT.len()
+            && oid.iter().zip(TRUSTEDIP_ROOT.iter()).all(|(a, b)| a == b);
+        let under_snmptrap_host = oid.len() > SNMPTRAP_HOST_ROOT.len()
+            && oid.iter().zip(SNMPTRAP_HOST_ROOT.iter()).all(|(a, b)| a == b);
+        if under_trustedip || under_snmptrap_host {
+            continue; // served by the table_iterator registered above
+        }
+        if oid_under(&oid, TR2_ROOT) {
+            continue; // served by the TR2_ROOT subtree handler registered above
+        }
+        agentx::register_instance(
+            "moxaIesConfig",
+            &oid,
+            agentx::HANDLER_CAN_RWRITE,
+            moxa_config_handler,
+        );
+    }
+    agentx::run_in_thread();
+}

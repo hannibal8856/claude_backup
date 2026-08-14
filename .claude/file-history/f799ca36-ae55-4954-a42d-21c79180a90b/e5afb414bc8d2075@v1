@@ -1,0 +1,617 @@
+//! get snmp data of app_moxa_python_iss
+
+use std::cmp;
+use std::fs::{self, File};
+use std::io::{self, BufRead};
+use std::path::Path;
+use std::process::Command;
+use std::{thread, time};
+
+// Configuration
+const _SNMP_DATA_PATH: &str = "/moxa/run/issStatusPlugin/";
+const _ISS_CONTROLHOOK_CLIENT_PATH: &str = "/sbin/ies_uri_handle_client";
+
+const ISS_CLI_CMD: &str = "/sbin/iss_cli_cmd";
+
+#[derive(Debug)]
+pub struct LineObj {
+    dict_key: String,
+    value_type_idx: i32,
+    oid_value: String,
+    table_index_dict: serde_json::Value,
+}
+
+fn remove_colon(s: &str) -> String {
+    s.chars().filter(|c| c != &':').collect()
+}
+
+fn remove_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+// The output is wrapped in a Result to allow matching on errors
+// Returns an Iterator to the Reader of the lines of the file.
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
+}
+
+/// get file of snmp data from control hook.
+/// Args:
+///     uri (string): uri string for control hook
+///     file_name(string): data file name for control hook
+/// Returns:
+///         True for ok.
+///         False for fail
+fn _get_data_file(uri: &str, file_name: &str) -> bool {
+    let ret = match Command::new(_ISS_CONTROLHOOK_CLIENT_PATH)
+        .arg("--type")
+        .arg("read")
+        .arg("--uri")
+        .arg(uri)
+        .arg("--file")
+        .arg(format!("{}{}", _SNMP_DATA_PATH, file_name))
+        .status()
+    {
+        Err(_) => {
+            let snmp_cmd = format!(
+                "{} {} {} {} {} {} {}{}",
+                _ISS_CONTROLHOOK_CLIENT_PATH,
+                "--type",
+                "read",
+                "--uri",
+                uri,
+                "--file",
+                _SNMP_DATA_PATH,
+                file_name
+            );
+            println!("get_snmpdata:control hook fail, cmd[{}]", snmp_cmd);
+            return false;
+        }
+        Ok(t) => t,
+    };
+
+    if !ret.success() {
+        if let Some(code) = ret.code() {
+            println!(
+                "get_snmpdata:uri fail ,uri [{}], return code [{}]",
+                uri, code
+            );
+        }
+
+        return false;
+    }
+
+    true
+}
+
+/// filtering designate data from data file.
+/// Args:
+///     oid (string): designate oid string
+///     file_name(string): file name
+/// Returns:
+///     line_data(string list): oid data from control hook
+fn _get_line_data_from_file(oid: &str, file_name: &str) -> Vec<String> {
+    let mut line_data: Vec<String> = vec![];
+    let file_path = format!("{}{}", _SNMP_DATA_PATH, file_name);
+
+    if let Ok(file_content) = read_lines(file_path) {
+        for line in file_content.map_while(Result::ok) {
+            if let Some(char_first) = line.chars().next() {
+                if char_first != '#' && line.contains(oid) {
+                    line_data.push(line);
+                }
+            }
+        }
+    } else {
+        println!("get_snmpdata:file not found");
+    }
+
+    line_data
+}
+
+/// get scalar data from snmp
+/// Args:
+///     uri (string): uri string for control hook.
+///     oid (string): designate oid string
+///     var_type(int, bool, others): convert data by var_type
+///         * int: string to interger
+///         * bool: truthValue string to bool
+///         * others: do nothing
+///     default (any): if get fail, return this value
+/// Returns:
+///         value of scalar object
+pub fn get_scalar_object(
+    uri: &str,
+    oid: &str,
+    var_type: VarType,
+    default: serde_json::Value,
+) -> serde_json::Value {
+    if !_get_data_file(uri, "scalar_object") {
+        return default;
+    }
+
+    let line_data = _get_line_data_from_file(oid, "scalar_object");
+
+    if line_data.is_empty() {
+        return default;
+    }
+
+    // get row_value , only use first data
+    // line format: oid='oid_value'
+    let line_tuple: Vec<&str> = line_data[0].split('=').filter(|s| &"" != s).collect();
+    let row_value: &str = &line_tuple[1][1..line_tuple[1].len() - 1];
+
+    // convert data by var_type
+    match var_type {
+        VarType::Bool => serde_json::json!(row_value == "1"),
+        VarType::Int => serde_json::json!(row_value.parse::<i64>().unwrap_or(0)),
+        VarType::Str => serde_json::json!(row_value),
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum VarType {
+    Int,
+    Str,
+    Bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValueType {
+    pub name: &'static str,
+    pub var_type: VarType,
+    pub uri_name: Option<&'static str>,
+    pub remap_data: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+pub struct DataOfSnmpTable {
+    pub file_name: &'static str,
+    pub uri_of_table: &'static str,
+    pub oid_of_table: &'static str,
+    pub index_of_table: Vec<&'static str>,
+    pub value_type_idx_start: u32,
+    pub value_type: Vec<ValueType>,
+}
+
+#[derive(Debug)]
+pub struct GetSnmpdata {
+    pub data_of_snmp_table: DataOfSnmpTable,
+    line_obj_list: Vec<LineObj>,
+    pub snmp_data: serde_json::Value,
+    snmp_data_path: &'static str,
+    unitest_mode: bool,
+}
+
+/// get snmp data class
+impl GetSnmpdata {
+    /// ```text
+    /// intial GetSnmp
+    /// Snmp table oid format:
+    ///             oid_of_table.value_type_idx.index_of_table
+    /// Args:
+    ///     data_of_snmp_table = {
+    ///         "file_name"(str) - output file name
+    ///         "uri_of_table"(str) - table's uri of control hook
+    ///                                     ex:"mxportdb/portStatTable/"
+    ///         "oid_of_table"(str) - table's oid (include tableEntry), end with '.'
+    ///                         ex: "1.3.6.1.4.1.8691.603.1.1.2.1.1."
+    ///         "index_of_table"(str list): table's index
+    ///                         ex: ["port"]
+    ///         "value_type_idx_start"(int) - value type index start
+    ///                         ex: 2 in this case.
+    ///                             oid_of_table.1.index_of_table --> table_idx(not access)
+    ///                             oid_of_table.2.index_of_table --> data_1
+    ///         "value_type"(value type obj list) - value type obj list
+    ///                         ex:
+    ///                             [
+    ///                                 {"name": "mediaType", "var_type": str},
+    ///                                 {"name": "portState", "var_type": int},
+    ///                             ]
+    ///                         }
+    /// ```
+    pub fn new(data_of_snmp_table: DataOfSnmpTable) -> GetSnmpdata {
+        GetSnmpdata {
+            data_of_snmp_table,
+            line_obj_list: vec![],
+            snmp_data: serde_json::json!(null),
+            snmp_data_path: _SNMP_DATA_PATH,
+            unitest_mode: false,
+        }
+    }
+
+    /// clear data
+    fn _clear_data(&mut self) {
+        self.line_obj_list.clear(); // Rust: redundant code?
+
+        self.line_obj_list = vec![];
+        self.snmp_data = serde_json::json!(null);
+    }
+
+    fn _clear_file(&mut self) {
+        let file_name = self.data_of_snmp_table.file_name;
+        let file_path = format!("{_SNMP_DATA_PATH}{file_name}");
+        let _ = fs::remove_file(file_path);
+    }
+
+    /// set up debug environment & create directory
+    fn _set_runtime_env(&self) {
+        if !self.unitest_mode && !Path::new(&self.snmp_data_path).exists() {
+            let _ = fs::create_dir_all(self.snmp_data_path);
+        }
+    }
+
+    /// parsing line data
+    fn _prarsing_line(&self, line: &str) -> LineObj {
+        // get line tuple , line format - oid='oid_value'
+        let line_tuple: Vec<&str> = line.split('=').filter(|s| &"" != s).collect();
+        let oid = line_tuple[0];
+        let oid_value = &line_tuple[1]
+            .trim_start_matches('\'')
+            .trim_end_matches('\'');
+
+        // get oid index & type
+        //     oid_subfix_tuple[0] - oid type
+        //     oid_subfix_tuple[1:] - oid index
+        let oid_prefix_str_len = self.data_of_snmp_table.oid_of_table.len();
+        let oid_subfix_tuple: Vec<&str> = oid[oid_prefix_str_len..]
+            .split('.')
+            .filter(|s| &"" != s)
+            .collect();
+
+        // Rust: keep unwrap to make error appear ASAP
+        let value_type_idx: i32 = oid_subfix_tuple[0].parse::<i32>().unwrap()
+            - self.data_of_snmp_table.value_type_idx_start as i32;
+        let dict_key = oid_subfix_tuple[1..].join(".");
+
+        // generate line_obj
+        let mut line_obj = LineObj {
+            dict_key,
+            value_type_idx,
+            oid_value: oid_value.to_string(),
+            table_index_dict: serde_json::json!(null),
+        };
+
+        // generate table_index_dict from self.data_of_snmp_table["table_index"]
+        for (tuple_idx, table_idx_string) in
+            self.data_of_snmp_table.index_of_table.iter().enumerate()
+        {
+            // Rust: `+ 1` since Python use enumerate(..., 1)
+            line_obj.table_index_dict[table_idx_string] =
+                serde_json::json!(oid_subfix_tuple[tuple_idx + 1]);
+        }
+
+        line_obj
+    }
+
+    /// assemble  snmp_data from line_obj_list
+    fn _assemble_data(&mut self) {
+        // inner function
+        fn _data_getter(
+            line_obj: &LineObj,
+            value_type: &[ValueType],
+        ) -> Option<(String, String, serde_json::Value)> {
+            //  Rust: to cover python bug
+            if line_obj.value_type_idx < 0 {
+                return None;
+            }
+
+            let dict_key = &line_obj.dict_key;
+            let value_type_idx = line_obj.value_type_idx as usize;
+            let oid_value: &str = &line_obj.oid_value;
+            let oid_name = &value_type[value_type_idx].name;
+
+            let oid_value = if value_type[value_type_idx].var_type == VarType::Int {
+                serde_json::json!(match oid_value.parse::<i64>() {
+                    Err(_) => return None,
+                    Ok(t) => t,
+                })
+            } else if value_type[value_type_idx].var_type == VarType::Bool {
+                serde_json::json!(match oid_value.parse::<usize>() {
+                    Err(_) => return None,
+                    Ok(t) => t == 1,
+                })
+            } else {
+                serde_json::json!(oid_value)
+            };
+
+            Some((dict_key.to_owned(), oid_name.to_string(), oid_value))
+        }
+
+        // main function
+        for line_obj in &self.line_obj_list {
+            let (dict_key, oid_name, oid_value) =
+                match _data_getter(line_obj, &self.data_of_snmp_table.value_type) {
+                    None => continue,
+                    Some((t, u, v)) => (t, u, v),
+                };
+
+            // put data
+            if self.snmp_data[&dict_key].is_null() {
+                self.snmp_data[&dict_key] = serde_json::json!(null);
+            }
+            self.snmp_data[&dict_key][&oid_name] = oid_value;
+
+            if self.snmp_data[&dict_key]["table_index_dict"].is_null() {
+                self.snmp_data[&dict_key]["table_index_dict"] = line_obj.table_index_dict.clone();
+            }
+        }
+    }
+
+    fn _parsing_file(&mut self) {
+        let line_data = _get_line_data_from_file(
+            self.data_of_snmp_table.oid_of_table,
+            self.data_of_snmp_table.file_name,
+        );
+
+        for line in line_data {
+            self.line_obj_list.push(self._prarsing_line(&line));
+        }
+    }
+
+    /// get data list for literal
+    pub fn get_data_list(&mut self) -> Vec<serde_json::Value> {
+        self.get_data();
+        let mut snmp_data_values: Vec<serde_json::Value> = vec![];
+        if let Some(t) = self.snmp_data.as_object() {
+            for (_, value) in t {
+                snmp_data_values.push(value.clone());
+            }
+        }
+
+        snmp_data_values
+    }
+
+    /// get snmp data.
+    /// P.S keep this function for old plugins
+    pub fn get_data(&mut self) {
+        self._set_runtime_env();
+        self._clear_data();
+        // Should remove file before get data
+        // to avoid getting fail and parsing previous file
+        // Currently use _get_data_file return value
+        // to handle this case
+        //self._clear_file();
+        if !self.unitest_mode {
+            if _get_data_file(
+                self.data_of_snmp_table.uri_of_table,
+                self.data_of_snmp_table.file_name,
+            ) {
+                self._parsing_file();
+                self._assemble_data();
+            } else {
+                println!("_get_data_file:get fail\n");
+            }
+        }
+    }
+
+    /*
+    def return_data(self):
+        '''data getter.
+            P.S keep this function for old plugins
+        '''
+        return self.snmp_data
+
+    def set_unitest(self, snmp_data_path):
+        '''for unitest'''
+        self.unitest_mode = True
+        self.snmp_data_path = snmp_data_path
+    */
+}
+
+/// convert snmp hex string(little endian) to boolean list
+///
+/// Args:
+///     snmp_hex_string(string) :
+///             ex: FF00000000000000(length:16)
+/// Returns:
+///     boolean_list (list): bool list.
+///             ex: [True] * 8 + [False] * 54
+pub fn convert_snmp_hex_string_to_boolean_list(
+    snmp_hex_string: &str,
+    maximum_pbmp_length: u32,
+) -> Vec<bool> {
+    let maximum_pbmp_hex_string_length = maximum_pbmp_length.div_ceil(4);
+    let hex_str_length = std::cmp::min(
+        snmp_hex_string.len(),
+        maximum_pbmp_hex_string_length as usize,
+    );
+
+    let max_num_of_bool_list = hex_str_length * 4;
+    let mask = 1 << (hex_str_length * 4 - 1);
+
+    let snmp_string = &snmp_hex_string[..hex_str_length];
+    let mut boolean_list = vec![false; max_num_of_bool_list];
+
+    let snmp_int = match u128::from_str_radix(snmp_string, 16) {
+        Err(_) => return vec![],
+        Ok(t) => t,
+    };
+
+    for (index, value) in boolean_list.iter_mut().enumerate().take(max_num_of_bool_list) {
+        if (snmp_int & (mask >> index)) != 0 {
+            *value = true;
+        }
+    }
+
+    boolean_list
+}
+
+/// input CLI command to ISS.exe via socat
+fn _excute_iss_clicmd(iss_cli_cmd: &[&str], file_path: &str) {
+    // retry: Avoid being unable to get information due to busy ISS
+    for i in 0..5 {
+        if i != 0 {
+            thread::sleep(time::Duration::from_millis(500));
+        }
+
+        match Command::new(ISS_CLI_CMD)
+            .arg(iss_cli_cmd.join(" "))
+            .arg(file_path)
+            .status()
+        {
+            Err(_) => continue,
+            Ok(t) => {
+                if !t.success() {
+                    if let Some(code) = t.code() {
+                        println!(
+                            "CLI-socat:excute command [{:?}] error return code [{}]",
+                            iss_cli_cmd, code
+                        );
+                    }
+                    continue;
+                }
+            }
+        };
+
+        match fs::metadata(file_path) {
+            Err(_) => continue,
+            Ok(t) => match t.len() {
+                0 => continue,
+                _ => break,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SnmpDef {
+    // pub file_name: String,
+    pub file_name: &'static str,
+    pub index_of_table: Vec<&'static str>,
+    pub value_type: Vec<ValueType>,
+}
+
+/// ```text
+/// get snmp table data from cli
+/// Args:
+///         snmp_def - {
+///                         "file_name": "ifXTable",
+///                         "index_of_table": ["ifIndex"],
+///                         "value_type": [
+///                             {"name": "ifHighSpeed", "var_type": int},
+///                         ]
+///                     }
+/// Return:
+///         snmp_data - [{
+///                         "table_index_dict": {
+///                             "ifIndex": i + 1,
+///                         },
+///                         "ifHighSpeed": 1000,
+///                     } for i in range(28)]
+/// ```
+pub fn get_snmp_data_by_cli(snmp_def: SnmpDef) -> Vec<serde_json::Value> {
+    let mut snmp_data = serde_json::json!(null);
+    let mut snmp_file_name: Vec<String> = vec![];
+    let file_directory: &str = _SNMP_DATA_PATH;
+    let cli_cmd: Vec<&str> = vec!["snmpwalk", "mib", "name"];
+
+    // get all data from iss.exe
+    for val_obj in &snmp_def.value_type {
+        snmp_file_name.push(format!("{}_{}", snmp_def.file_name, val_obj.name));
+        let mut cli_cmd_tmp = cli_cmd.clone();
+        cli_cmd_tmp.push(val_obj.name);
+        _excute_iss_clicmd(
+            &cli_cmd_tmp,
+            &format!(
+                "{}{}",
+                file_directory,
+                snmp_file_name[snmp_file_name.len() - 1]
+            ),
+        )
+    }
+
+    // appen data to snmp_data{}
+    for (i, val_obj) in snmp_def.value_type.iter().enumerate() {
+        // Rust: to mimic zip
+        let file_name = match snmp_file_name.get(i) {
+            None => break,
+            Some(t) => t,
+        };
+
+        let file_path = format!("{}{}", file_directory, file_name);
+        if let Ok(file_content) = read_lines(file_path) {
+            for line in file_content.map_while(Result::ok) {
+                // parsing snmp data
+
+                let val_obj_name_len = val_obj.name.len();
+                let oid_tuple: Vec<&str> = match line.get(val_obj_name_len..) {
+                    None => continue,
+                    Some(t) => t.split("=:").filter(|s| &"" != s).collect(),
+                };
+
+                let oid_idx = match oid_tuple.first() {
+                    None => continue,
+                    Some(t) => t,
+                };
+                let oid_val = match oid_tuple.get(1) {
+                    None => continue,
+                    Some(t) => t,
+                };
+                let oid_val = remove_whitespace(oid_val);
+
+                // get value
+                let oid_val = if val_obj.var_type == VarType::Int {
+                    let oid_val_int: i64 = match oid_val.parse() {
+                        Err(_) => continue,
+                        Ok(t) => t,
+                    };
+                    serde_json::json!(oid_val_int)
+                } else if val_obj.var_type == VarType::Str {
+                    // ascii value string convert to string
+                    let oid_val_no_colon = remove_colon(&oid_val);
+                    // format:
+                    //     31:30:30:30:54:58:2c:52:4a:34:35:2c:50:54:50
+                    let decoded_string = match hex::decode(oid_val_no_colon) {
+                        Err(_) => continue,
+                        Ok(t) => match String::from_utf8(t) {
+                            Err(_) => continue,
+                            Ok(t) => t,
+                        },
+                    };
+                    serde_json::json!(decoded_string)
+                } else {
+                    serde_json::json!(oid_val)
+                };
+
+                // get index
+                let oid_idx = remove_whitespace(oid_idx);
+                let oid_idx_list: Vec<&str> = oid_idx.split('.').filter(|s| &"" != s).collect();
+
+                // append snmp_data
+                if snmp_data[&oid_idx].is_null() {
+                    let min_len = cmp::min(snmp_def.index_of_table.len(), oid_idx_list.len());
+
+                    let idx_name = match snmp_def.index_of_table.get(min_len - 1) {
+                        None => continue,
+                        Some(t) => t,
+                    };
+                    let idx_val = match oid_idx_list.get(min_len - 1) {
+                        None => continue,
+                        Some(t) => match t.parse::<usize>() {
+                            Err(_) => continue,
+                            Ok(t) => t,
+                        },
+                    };
+                    snmp_data[&oid_idx]["table_index_dict"][idx_name] = serde_json::json!(idx_val);
+                    snmp_data[&oid_idx][&val_obj.name] = oid_val;
+                } else {
+                    snmp_data[&oid_idx][&val_obj.name] = oid_val;
+                }
+            }
+        }
+    }
+
+    let mut snmp_data_values: Vec<serde_json::Value> = vec![];
+    if let Some(t) = snmp_data.as_object() {
+        for (_, value) in t {
+            snmp_data_values.push(value.clone());
+        }
+    }
+
+    snmp_data_values
+}

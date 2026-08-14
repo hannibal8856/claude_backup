@@ -1,0 +1,1262 @@
+
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file LICENSE for details.
+ */
+
+
+#include <stdio.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+
+#include <sys/ioctl.h>
+
+#include <net/if.h>
+
+
+#include <string.h>
+
+#include <stdarg.h>
+
+#include <sys/types.h>
+#include <dirent.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <stdlib.h>
+
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#include <errno.h>
+
+#include "libmoxa_util/util_shell_cmd.h"
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_encrypt/lib_moxa_encrypt.h"
+
+#include "parson/parson.h"
+
+#define SUCCESS                                      (0)
+#define FAILURE                                      (1)
+
+#define MAX_PLUGIN_CONF                              (4096)
+
+#define MOXA_SNMP_ENTERPRISE_ID                      (8691)
+#define MAX_SNMP_ENTERPRISE_ID                       (32)
+
+#define URI_CONFIG_PATH                              "/moxa/run/flask-moxa-config-layer/"
+#define URI_CONFIG_TEST                              "/moxa/run/test/"
+#define SNMP_PERMANENT                               "/moxa/permanent/snmp/"
+#define SNMP_CONF_RUNNING                            "/moxa/run/snmp/"
+
+#define SNMP_PLUGIN_CONF_PATH                        "/etc/moxa/netsnmp/config/"
+#define SNMP_CONF_PATH                               "/etc/moxa/config-moxa-snmp/"
+
+#define SNMP_CONF_FILE                               SNMP_CONF_RUNNING  "snmpd.conf"
+#define SNMP_CONF_FILE_BAK                           SNMP_CONF_RUNNING  "snmpd.conf.bak"
+#define SNMP_CONFIG_TMP_FILE                         SNMP_CONF_RUNNING  "tmp.txt"
+#define SNMP_CONF_INIT_SH                            SNMP_CONF_PATH     "init_snmpd.sh"
+#define SNMP_CONF_ENGINEID                           SNMP_PERMANENT     "snmp_engine.txt"
+#define SNMP_CONF_ENGINETIME                         SNMP_CONF_RUNNING  "snmp_time.txt"
+#define SNMPV3_CONF_GET_START_ENGINETIME_SH          "/usr/bin/moxa_get_snmpv3_engine_time.sh"
+
+#define TOKEN_SNMP_ENGINEID                          "moxa_engineID"
+#define TOKEN_SNMP_ENGINE_BOOT                       "engineBoots"
+#define TOKEN_SNMP_ENGINE_TIME                       "engineTime"
+#define TOKEN_SNMP_ENGINE_MSG_MAXSIZE                "engineMaxMessageSize"
+
+#define URI_CONFIG_PRE_RUNNING(_JSON_FILE_)          URI_CONFIG_PATH   "PrerunningConfig/" _JSON_FILE_
+#define URI_CONFIG_CUR_RUNNING(_JSON_FILE_)          URI_CONFIG_PATH   "RunningConfig/"    _JSON_FILE_
+#define URI_CONFIG_PRE_RUNNING_TEST(_JSON_FILE_)     URI_CONFIG_TEST   "PrerunningConfig/" _JSON_FILE_
+#define URI_CONFIG_CUR_RUNNING_TEST(_JSON_FILE_)     URI_CONFIG_TEST   "RunningConfig/"    _JSON_FILE_
+
+#define SNMP_ACCOUNT_LOCKOUT_CONF                    "/etc/moxa/netsnmp/loginPolicy.conf"
+
+typedef enum 
+{
+    STARTUP_SNMP_SERVICE = 1,
+    RELOAD_SNMP_SERVICE  = 2,
+} snmp_service_cmd_t;
+
+typedef enum 
+{
+    SNMP_SERV_USER = 1,
+    SNMP_TRAP_USER = 2,
+} snmp_userAccount_t;
+
+enum 
+{
+    SNMP_ACCESS_ENABLE              = 1,
+    SNMP_ACCESS_DISABLE             = 2,
+    SNMP_ACCESS_READ_ONLY           = 3,
+
+    SNMP_VERSION_V1_V2c_V3          = 1,
+    SNMP_VERSION_V1_V2c             = 2,
+    SNMP_VERSION_V3                 = 3,
+
+    SNMP_USER_AUTHORITY_READ_WRITE  = 1,
+    SNMP_USER_AUTHORITY_READ_ONLY   = 2,
+
+    SNMP_USER_AUTH_TYPE_NONE        = 1,
+    SNMP_USER_AUTH_TYPE_MD5         = 2,
+    SNMP_USER_AUTH_TYPE_SHA         = 3,
+    SNMP_USER_AUTH_TYPE_SHA_224     = 4,
+    SNMP_USER_AUTH_TYPE_SHA_256     = 5,
+    SNMP_USER_AUTH_TYPE_SHA_384     = 6,
+    SNMP_USER_AUTH_TYPE_SHA_512     = 7,
+
+    SNMP_USER_ENCRYPTION_DISABLE    = 1,
+    SNMP_USER_ENCRYPTION_DES        = 2,
+    SNMP_USER_ENCRYPTION_AES        = 3,
+
+    SNMP_TRAP_MODE_TRAP_V1          = 1,
+    SNMP_TRAP_MODE_TRAP_V2C         = 2,
+    SNMP_TRAP_MODE_INFORM_V2C       = 3,
+    SNMP_TRAP_MODE_TRAP_V3          = 4,
+    SNMP_TRAP_MODE_INFORM_V3        = 5,
+};
+
+
+struct snmp_engine_id
+{
+    char engine_id[MAX_SNMP_ENTERPRISE_ID];
+    int  engine_boot;
+};
+
+int32_t    gi4Uri_ipv6_support = 0;    /* AlanCC, use to check if IPv6 address support in the MOXA system */
+
+/*-------------------------------------------------------------------+
+ * Function           : utilString_strchr
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+char * utilString_strchr(char *buf, int   buf_len, char  token)
+{
+    char *end = buf + buf_len;
+
+    while( buf < end )
+    {
+        if( token == *buf )
+        {
+            return buf;
+        }
+        buf++;
+    }
+    return NULL;
+}
+
+/*-------------------------------------------------------------------+
+   Function Name   : util_str_sprintf
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+int util_str_sprintf(char *buf, int buf_max, int *buf_pos, char *fmt, ... )
+{
+
+    char   *buf_index;
+    int     buf_len;
+    int     len;
+
+    va_list ap;
+
+    buf_len   = buf_max - *buf_pos;
+    buf_index = &buf[*buf_pos];
+
+    va_start(ap, fmt);
+    len = vsnprintf(buf_index, buf_len, fmt, ap);
+    va_end(ap);
+
+    buf_len -= len;
+    if ( buf_len > 4 /* just in case */ ) 
+    {
+        *buf_pos += len;
+        return SUCCESS;
+    }
+    fprintf(stderr, "%s@%d : error \n",
+        __func__, __LINE__);
+    return FAILURE;
+}
+
+int util_get_hw_addr(char *dev_mac)
+{
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetMacAddress(dev_mac) )
+    {
+        fprintf(stderr, "%s@%d : error LibSystem_GetMacAddress \n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+    return SUCCESS;
+}
+
+int util_get_moxa_enterprise_id(char *enterprise_id, int max_enterprise_id)
+{
+    int buf_len = 0;
+    char dev_mac[12] = {0x0};
+    int i;
+    memset(enterprise_id, 0, max_enterprise_id);
+    if ( util_get_hw_addr(dev_mac) == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error util_get_hw_addr \n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+
+    if ( util_str_sprintf(enterprise_id, max_enterprise_id, &buf_len, "8000") == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error util_str_sprintf \n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+
+    if ( util_str_sprintf(enterprise_id, max_enterprise_id, &buf_len, "%04x", MOXA_SNMP_ENTERPRISE_ID) == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error util_str_sprintf \n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+
+    if ( util_str_sprintf(enterprise_id, max_enterprise_id, &buf_len, "03") == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error util_str_sprintf \n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+
+    for ( i = 0; i < 6; i++)
+    {
+        if ( util_str_sprintf(enterprise_id, max_enterprise_id, &buf_len, "%02x", dev_mac[i]) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error util_str_sprintf \n",
+                __func__, __LINE__);
+            return FAILURE;
+        }
+    }
+
+    return SUCCESS;
+}
+
+
+int util_check_file_exist(char *file_name)
+{
+
+    if( access(file_name, F_OK | R_OK | W_OK) == 0 )
+    {
+        fprintf(stderr, " %s %s found \n", __func__, file_name);
+        return -1;
+    }
+    else
+    {
+        fprintf(stderr, " %s %s NOT found \n", __func__, file_name);
+        return 0;
+    }
+}
+
+
+int get_file_snmp_engine_info(struct snmp_engine_id *engineID)
+{
+    char line[80] = {0x0};
+    FILE *fp  = NULL;
+    char *buf = NULL;
+    char *buf_end = NULL;
+    int   buf_len = 0;
+
+    fp = fopen(SNMP_CONF_ENGINEID, "r");
+    while( !feof(fp) )
+    {
+        fgets(line, sizeof(line), fp);
+        if ( 0 == strncmp(TOKEN_SNMP_ENGINEID, line, strlen(TOKEN_SNMP_ENGINEID) ) )
+        {
+
+            buf     = line + strlen(TOKEN_SNMP_ENGINEID) + 2;
+            buf_end = utilString_strchr(buf, strlen(buf), '\'');
+            if ( buf_end != NULL )
+            {
+                *buf_end = '\0';
+            }
+            buf_len = buf_end - buf;
+            memset(engineID->engine_id, 0, MAX_SNMP_ENTERPRISE_ID);
+            memcpy(engineID->engine_id, buf, buf_len);
+        }
+        else
+        if ( 0 == strncmp(TOKEN_SNMP_ENGINE_BOOT, line, strlen(TOKEN_SNMP_ENGINE_BOOT)) )
+        {
+            buf = line + strlen(TOKEN_SNMP_ENGINE_BOOT) + 2;
+            buf_end = utilString_strchr(buf, strlen(buf), '\'');
+            if ( buf_end != NULL )
+            {
+                *buf_end = '\0';
+            }
+            buf_len = buf_end - buf;
+            engineID->engine_boot = atoi(buf);
+        }
+    }
+    fclose(fp);
+    //fprintf(stderr, " %32s %16s  \'%s\'\n", __func__, TOKEN_SNMP_ENGINEID,    engineID->engine_id);
+    //fprintf(stderr, " %32s %16s  \'%d\'\n", __func__, TOKEN_SNMP_ENGINE_BOOT, engineID->engine_boot);
+    return SUCCESS;
+}
+
+int get_default_snmp_engine_info(struct snmp_engine_id *engineID)
+{
+    if ( util_get_moxa_enterprise_id(engineID->engine_id, MAX_SNMP_ENTERPRISE_ID) == FAILURE ) 
+    {
+        return FAILURE;
+    }
+    engineID->engine_boot = 1;
+
+    //fprintf(stderr, " %32s %16s  \'%s\'\n", __func__, TOKEN_SNMP_ENGINEID,    engineID->engine_id);
+    //fprintf(stderr, " %32s %16s  \'%d\'\n", __func__, TOKEN_SNMP_ENGINE_BOOT, engineID->engine_boot);
+
+    return SUCCESS;
+}
+
+int generate_snmp_engine_info(struct snmp_engine_id *engineID)
+{
+    FILE                  *fp = NULL;
+    struct snmp_engine_id  default_engineID;
+    struct snmp_engine_id  file_engineID;
+    struct snmp_engine_id *running_engineID = NULL; 
+    
+    if ( get_default_snmp_engine_info(&default_engineID) == FAILURE ) 
+    {
+        fprintf(stderr, "%s@%d : error get_default_snmp_engine_info\n",
+            __func__, __LINE__);
+        return FAILURE;
+    }
+    
+    if ( util_check_file_exist( SNMP_CONF_ENGINEID ) == 0 ) 
+    {
+        LibUtil_ExecShCmd(NULL, NULL , 0, "/bin/mkdir -p " SNMP_PERMANENT );
+        running_engineID = &default_engineID;
+    }
+    else
+    {
+        if ( get_file_snmp_engine_info(&file_engineID) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error get_file_snmp_engine_info\n",
+                __func__, __LINE__);
+            return FAILURE;
+        }
+
+        if ( strlen(file_engineID.engine_id) == strlen(default_engineID.engine_id) &&
+            0 == memcmp(default_engineID.engine_id, file_engineID.engine_id, strlen(default_engineID.engine_id)) )
+        {
+            file_engineID.engine_boot = file_engineID.engine_boot + 1;
+            running_engineID = &file_engineID;
+        }
+        else
+        {
+            running_engineID = &default_engineID;
+        }
+    }
+    memcpy(engineID, running_engineID, sizeof(*running_engineID));
+    fp = fopen(SNMP_CONF_ENGINEID, "w+");
+    fprintf(fp, TOKEN_SNMP_ENGINEID    "=\'%s\'\n", running_engineID->engine_id);
+    fprintf(fp, TOKEN_SNMP_ENGINE_BOOT "=\'%d\'\n", running_engineID->engine_boot);
+    fclose(fp);
+    
+    fp = fopen(SNMP_CONF_ENGINETIME, "w+");
+    fprintf(fp, TOKEN_SNMP_ENGINE_TIME "=\'%d\'\n", 0);
+    fprintf(fp, TOKEN_SNMP_ENGINE_MSG_MAXSIZE "=\'%d\'\n", 1472);
+    fclose(fp);
+    //fprintf(stderr, " %32s %16s  \'%s\'\n", __func__, TOKEN_SNMP_ENGINEID,    engineID->engine_id);
+    //fprintf(stderr, " %32s %16s  \'%d\'\n", __func__, TOKEN_SNMP_ENGINE_BOOT, engineID->engine_boot);
+    return SUCCESS;
+}
+
+
+int setup_snmpd_plugin_conf(char *plugINConf, int32_t maxPlugINConf)
+{
+
+    char     ret_buf[1024] = {0x0};
+    char     line[80] = {0x0};
+    int      ret      = FAILURE;
+    int32_t  ret_cmd  = 0;
+    int32_t  ret_find = 0;
+    int      pos      = 0;
+    FILE    *fp       = NULL;
+    char    *tmp      = NULL;
+
+
+    ret_cmd = LibUtil_ExecShCmd(&ret_find, ret_buf , sizeof(ret_buf), "/usr/bin/find %s -name \'*.conf\' > %s", SNMP_PLUGIN_CONF_PATH, SNMP_CONFIG_TMP_FILE);
+
+    if ( ret_cmd != 0 )
+    {
+        fprintf(stderr, "%s@%d : error LibUtil_ExecShCmd\n",
+            __func__, __LINE__);
+        goto out;
+    }
+    
+    if ( ret_find != 0 )
+    {
+        fprintf(stderr, "%s@%d : error /usr/bin/find  \n",
+            __func__, __LINE__);
+        goto out;
+    }
+
+    if ( util_str_sprintf(plugINConf, maxPlugINConf, &pos, "%s", SNMP_CONF_FILE) == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error util_str_sprintf  \n",
+            __func__, __LINE__);
+        goto out;
+    }
+
+    fp = fopen(SNMP_CONFIG_TMP_FILE, "r");
+
+    if ( fp == NULL )
+    {
+        fprintf(stderr, "%s@%d : error can't find fp  \n",
+            __func__, __LINE__);
+        goto out;
+    }
+    while ( !feof(fp) )
+    {
+        memset(line, 0, sizeof(line));
+        fgets(line, sizeof(line), fp);
+        tmp = utilString_strchr(line, strlen(line), '\r');
+        if ( tmp != NULL )
+        {
+            *tmp = '\0';
+        }
+        tmp = utilString_strchr(line, strlen(line), '\n');
+        if ( tmp != NULL )
+        {
+            *tmp = '\0';
+        }
+        tmp = utilString_strchr(line, strlen(line), ' ');
+        if ( tmp != NULL )
+        {
+            *tmp = '\0';
+        }
+        if ( strlen(line) <= strlen(SNMP_PLUGIN_CONF_PATH)) {
+            continue;
+        }
+        if ( util_str_sprintf(plugINConf, maxPlugINConf, &pos, ",%s", line) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error util_str_sprintf  \n",
+                __func__, __LINE__);
+            goto out;
+        }
+    }
+    // fprintf(stderr, "%s@%d: \'%s\'\n", __func__, __LINE__, plugINConf);
+    ret = SUCCESS;
+out:
+    if ( fp != NULL )
+    {
+        fclose(fp);
+    }
+    return ret;
+}
+
+int setup_snmpd_userAccount(FILE *fp, int32_t uri_accessMode, snmp_userAccount_t type, JSON_Array *uri_userAccountTable)
+{
+    JSON_Object *jobj_cfg_userAccount         = NULL;
+
+    char        *uri_userName                 = NULL;
+    int32_t      uri_authority;
+    int32_t      uri_authenticationType;
+    char        *uri_authenticationPasswd     = NULL;
+    int32_t      uri_dataEncryptionMethod;
+    char        *uri_dataEncryptionKey        = NULL;
+    int          count;
+    int          i;
+
+    char         uri_authenticationPasswdNoMark[(64+16)*2+128+1] = {0};
+    char         uri_authenticationPasswdDecrypted[64+1] = {0};
+    int          isAuthenticationPasswdEncrypted = 0;
+
+    char         uri_dataEncryptionKeyNoMark[(64+16)*2+128+1] = {0};
+    char         uri_dataEncryptionKeyNDecrypted[64+1] = {0};
+    int          isDataEncryptionKeyEncrypted = 0;
+
+    count = json_array_get_count(uri_userAccountTable);
+    for (i = 0; i < count; i++) 
+    {
+        jobj_cfg_userAccount     = json_array_get_object(uri_userAccountTable, i);
+        uri_userName             = (char  *) json_object_dotget_string(jobj_cfg_userAccount, "userName" );
+        uri_authenticationType   = (int32_t) json_object_dotget_number(jobj_cfg_userAccount, "authenticationType");
+        uri_dataEncryptionMethod = (int32_t) json_object_dotget_number(jobj_cfg_userAccount, "dataEncryptionMethod");
+
+        if ( type == SNMP_SERV_USER )
+        {
+            uri_authority  = json_object_dotget_number(jobj_cfg_userAccount, "authority");
+        }
+        else
+        {
+            uri_authority  = SNMP_USER_AUTHORITY_READ_ONLY;
+        }
+
+
+        if ( uri_authenticationType == SNMP_USER_AUTH_TYPE_NONE )
+        {
+            fprintf(fp, "%s %s  noauth\n", 
+                 (( uri_accessMode == SNMP_ACCESS_READ_ONLY ) || ( uri_authority == SNMP_USER_AUTHORITY_READ_ONLY)) ? 
+                 "rouser" : "rwuser", uri_userName);
+
+            fprintf(fp, "createUser %s\n", uri_userName);
+        }
+        else
+        {
+            uri_authenticationPasswd = (char *)json_object_dotget_string(jobj_cfg_userAccount, "authenticationPasswd" );
+
+#ifdef MOXA_PASSWORD_POLICY_CHECK
+            if (LibEncrypt_PasswordPolicyCheckTagRemove(uri_authenticationPasswd, uri_authenticationPasswdDecrypted) == LIB_ENCRYPT_DEF_TRUE) {
+                isAuthenticationPasswdEncrypted = 1;
+            }
+#else
+            if (LibEncrypt_IsEncryptedData(uri_authenticationPasswd) == LIB_ENCRYPT_DEF_TRUE) {
+                isAuthenticationPasswdEncrypted = 1;
+                LibEncrypt_KeyExtract(uri_authenticationPasswd, uri_authenticationPasswdNoMark);
+                LibEncrypt_AesDecryptWithFixedKey(uri_authenticationPasswdNoMark, uri_authenticationPasswdDecrypted);
+            }
+#endif
+
+            fprintf(fp, "%s %s  auth\n", 
+                 (( uri_accessMode == SNMP_ACCESS_READ_ONLY ) || ( uri_authority == SNMP_USER_AUTHORITY_READ_ONLY)) ? 
+                 "rouser" : "rwuser", uri_userName);
+
+	    char* szAuthenticationType = "";
+	    switch(uri_authenticationType)
+	    {
+		case SNMP_USER_AUTH_TYPE_MD5:
+			szAuthenticationType = "MD5";
+		break;
+                case SNMP_USER_AUTH_TYPE_SHA:
+                        szAuthenticationType = "SHA";
+                break;
+                case SNMP_USER_AUTH_TYPE_SHA_224:
+                        szAuthenticationType = "SHA-224";
+                break;
+                case SNMP_USER_AUTH_TYPE_SHA_256:
+                        szAuthenticationType = "SHA-256";
+                break;
+                case SNMP_USER_AUTH_TYPE_SHA_384:
+                        szAuthenticationType = "SHA-384";
+                break;
+                case SNMP_USER_AUTH_TYPE_SHA_512:
+                        szAuthenticationType = "SHA-512";
+                break;
+ 	    }
+
+            fprintf(fp, "createUser %s %s %s ", 
+                uri_userName, 
+                szAuthenticationType, 
+                isAuthenticationPasswdEncrypted ? uri_authenticationPasswdDecrypted : uri_authenticationPasswd);
+
+            if ( uri_dataEncryptionMethod == SNMP_USER_ENCRYPTION_DISABLE )
+            {
+                fprintf(fp, "\n");
+            }
+            else
+            {
+                uri_dataEncryptionKey = (char *)json_object_dotget_string(jobj_cfg_userAccount, "dataEncryptionKey" );
+
+#ifdef MOXA_PASSWORD_POLICY_CHECK
+                if (LibEncrypt_PasswordPolicyCheckTagRemove(uri_dataEncryptionKey, uri_dataEncryptionKeyNDecrypted) == LIB_ENCRYPT_DEF_TRUE) {
+                    isDataEncryptionKeyEncrypted = 1;
+                }
+#else
+                if (LibEncrypt_IsEncryptedData(uri_dataEncryptionKey) == LIB_ENCRYPT_DEF_TRUE) {
+                    isDataEncryptionKeyEncrypted = 1;
+                    LibEncrypt_KeyExtract(uri_dataEncryptionKey, uri_dataEncryptionKeyNoMark);
+                    LibEncrypt_AesDecryptWithFixedKey(uri_dataEncryptionKeyNoMark, uri_dataEncryptionKeyNDecrypted);
+                }
+#endif
+
+                fprintf(fp, "%s %s\n", 
+                    ( uri_dataEncryptionMethod == SNMP_USER_ENCRYPTION_AES ) ? "AES" : "DES", 
+                    isDataEncryptionKeyEncrypted ? uri_dataEncryptionKeyNDecrypted : uri_dataEncryptionKey);
+            }
+        }
+    }
+    return SUCCESS;
+}
+
+
+int replace_snmpd_config_engineID( char *snmpConfSource, char *snmpConfDest)
+{
+    FILE                  *fpSrc  = NULL;
+    FILE                  *fpDst  = NULL;
+    struct snmp_engine_id  engineID;
+    char                   fileBuf[400] = {0x0};
+    if ( generate_snmp_engine_info(&engineID) == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error generate_snmp_engine_info \n",
+            __func__, __LINE__ );
+        return FAILURE;
+    }
+    fpSrc = fopen(snmpConfSource, "r");
+    if ( fpSrc == NULL )
+    {
+        fprintf(stderr, "%s@%d : error fopen \n",
+            __func__, __LINE__ );
+        return FAILURE;
+    }
+    fpDst = fopen(snmpConfDest, "w+");
+    if ( fpDst == NULL )
+    {
+        fprintf(stderr, "%s@%d : error fopen \n",
+            __func__, __LINE__ );
+        fclose(fpSrc);
+        return FAILURE;
+    }
+
+    while(!feof(fpSrc))
+    {
+        memset(fileBuf, 0, sizeof(fileBuf));
+        if ( fgets(fileBuf, sizeof(fileBuf), fpSrc) == NULL )
+        {
+            fprintf(stderr, "%s@%d : \n", __func__, __LINE__ );
+            break;
+        }
+
+        if ( strncmp(fileBuf, TOKEN_SNMP_ENGINEID, strlen(TOKEN_SNMP_ENGINEID)) == 0 )
+        {
+            // replace engineID
+            fprintf(fpDst, "%s             %s\n", TOKEN_SNMP_ENGINEID, engineID.engine_id);
+        }
+        else
+        if ( strncmp(fileBuf, TOKEN_SNMP_ENGINE_BOOT, strlen(TOKEN_SNMP_ENGINE_BOOT)) == 0 )
+        {
+            // replace boot count
+            fprintf(fpDst, "%s             %d\n", TOKEN_SNMP_ENGINE_BOOT, engineID.engine_boot);
+        }
+        else
+        {
+            fprintf(fpDst, "%s", fileBuf);
+        }
+    }
+    fclose(fpSrc);
+    fclose(fpDst);
+    return SUCCESS;
+}
+
+
+static void _System(const char *aProgram, char * const *aArgList)
+{
+    pid_t child_pid = fork();
+    if (child_pid != 0) {
+        int child_status;
+        wait(&child_status);
+    } else {
+        execvp(aProgram, aArgList);
+        /* The execvp function returns only if an error occurs. */
+        fprintf(stderr, "%s:%d: execvp error: %s", __func__, __LINE__, strerror(errno));
+        abort();
+    }
+}
+
+static void _ControlIsSnmpd(const char *aCmd)
+{
+
+    FILE *fp               = NULL;
+    char plugIN_conf[MAX_PLUGIN_CONF] = {0x0};
+    char *arg_list[]       = { "/bin/systemctl", /* argv[0], the name of the program. */
+                               (char *)aCmd,
+                               "app_moxa_snmp_server.service",
+                               NULL /* The argument list must end with a NULL. */ };
+
+    if ( setup_snmpd_plugin_conf(plugIN_conf, sizeof(plugIN_conf)) == FAILURE )
+    {
+        fprintf(stderr, "%s@%d : error setup_snmpd_plugin_conf\n",
+            __func__, __LINE__);
+        return;
+    }
+
+    fp = fopen(SNMP_CONF_INIT_SH, "w");
+    if ( fp == NULL )
+    {
+        fprintf(stderr, "%s@%d : error fopen %s\n",
+            __func__, __LINE__, SNMP_CONF_INIT_SH);
+     
+        return;
+    }
+    fprintf(fp, "#!/bin/sh\n");
+    fprintf(fp, "/bin/snmpd -f -C -c  %s -p /var/run/snmpd.pid\n", plugIN_conf);
+    fclose(fp);
+
+    _System("/bin/systemctl", arg_list);
+}
+
+
+static void _ExecGetSNMPv3StartEngineTime()
+{
+    char *const arg_list[] = {SNMPV3_CONF_GET_START_ENGINETIME_SH, NULL};
+
+    if (access(SNMPV3_CONF_GET_START_ENGINETIME_SH, X_OK) != 0) {
+        fprintf(stderr, "%s %s NOT found\n", __func__, arg_list[0]);
+        return;
+    }
+
+    _System(SNMPV3_CONF_GET_START_ENGINETIME_SH, arg_list);
+}
+
+int setup_snmpd_config
+(
+    snmp_service_cmd_t    type, 
+    JSON_Value           *cfg_snmp, 
+    JSON_Value           *cfg_snmpTrap, 
+    JSON_Value           *cfg_uiService, 
+    JSON_Value           *cfg_managementIp
+)
+{
+    int32_t                ret                      = 0;
+    int32_t                ret_cmd                  = 0;
+    int32_t                ipv6_global_ucast_enable = 0;
+
+    FILE                  *fp                    = NULL;
+    JSON_Object           *jobj_cfg_snmp         = NULL;
+    JSON_Object           *jobj_cfg_snmpTrap     = NULL;
+    JSON_Object           *jobj_cfg_uiService    = NULL;
+    JSON_Object           *jobj_cfg_managementIp = NULL;
+
+    int32_t                uri_accessMode;
+    int32_t                uri_version;
+    char                  *uri_v1v2cCommunity_readWrite        = NULL;
+    char                  *uri_v1v2cCommunity_readOnly         = NULL;
+    JSON_Array            *uri_userAccountTable                = NULL;
+    
+    char                  *uri_ipv6_globalUnicastAddressPrefix = NULL;
+    int32_t                uri_ipv6_udp_port;
+
+    struct snmp_engine_id  engineID;
+
+    jobj_cfg_snmp = json_value_get_object(cfg_snmp);
+    if( jobj_cfg_snmp == NULL ) 
+    {
+        fprintf(stderr, "%s@%d : error json_value_get_object\n",
+            __func__, __LINE__ );
+        return FAILURE;
+    }
+
+    jobj_cfg_snmpTrap = json_value_get_object(cfg_snmpTrap);
+    if( jobj_cfg_snmpTrap == NULL ) 
+    {
+        fprintf(stderr, "%s@%d : error json_value_get_object \n",
+            __func__, __LINE__ );
+        return FAILURE;
+    }
+
+    jobj_cfg_uiService = json_value_get_object(cfg_uiService);
+    if( jobj_cfg_uiService == NULL ) 
+    {
+        fprintf(stderr, "%s@%d : error json_value_get_object \n",
+            __func__, __LINE__ );
+        return FAILURE;
+    }
+
+    if(gi4Uri_ipv6_support)
+    {
+        jobj_cfg_managementIp = json_value_get_object(cfg_managementIp);
+        if( jobj_cfg_managementIp == NULL ) 
+        {
+            fprintf(stderr, "%s@%d : error json_value_get_object \n",
+                __func__, __LINE__ );
+            return FAILURE;
+        }
+    }
+
+    if( type == STARTUP_SNMP_SERVICE)
+    {
+        LibUtil_ExecShCmd(NULL, NULL , 0, "/bin/mkdir -p " SNMP_CONF_RUNNING);
+        fp = fopen(SNMP_CONF_FILE, "w+");
+        if ( generate_snmp_engine_info(&engineID) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error generate_snmp_engine_info \n",
+                __func__, __LINE__ );
+            return FAILURE;
+        }
+    }
+    else
+    {
+        fp = fopen(SNMP_CONF_FILE_BAK, "w+");
+        if ( get_file_snmp_engine_info(&engineID) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error get_file_snmp_engine_info \n",
+                __func__, __LINE__ );
+            return FAILURE;
+        }
+    }
+
+    /* Plan C PoC: enable AgentX master so ISS subagent can attach (tcp:127.0.0.1:705) */
+    fprintf(fp, "master         agentx\n");
+    fprintf(fp, "agentXSocket   tcp:127.0.0.1:705\n");
+    fprintf(fp, "agentXTimeout  5\n");
+    fprintf(fp, "agentXRetries  1\n");
+
+    uri_version                         = (int32_t)json_object_dotget_number(jobj_cfg_snmp,         "version");
+    uri_accessMode                      = (int32_t)json_object_dotget_number(jobj_cfg_uiService,    "snmpService.mode");
+    uri_v1v2cCommunity_readWrite        = (char  *)json_object_dotget_string(jobj_cfg_snmp,         "v1v2cCommunity.readWrite");
+    uri_v1v2cCommunity_readOnly         = (char  *)json_object_dotget_string(jobj_cfg_snmp,         "v1v2cCommunity.readOnly");
+    if(gi4Uri_ipv6_support) 
+    {
+        uri_ipv6_globalUnicastAddressPrefix = (char  *)json_object_dotget_string(jobj_cfg_managementIp, "ipv6.globalUnicastAddressPrefix");
+        uri_ipv6_udp_port                   = (int32_t)json_object_dotget_number(jobj_cfg_uiService,    "snmpService.port");
+    
+        ipv6_global_ucast_enable = ( strlen(uri_ipv6_globalUnicastAddressPrefix) > strlen("::") ) ? 1 : 0;
+    }
+    else
+    {
+        uri_ipv6_udp_port                   = (int32_t)json_object_dotget_number(jobj_cfg_uiService,    "snmpService.port");
+        ipv6_global_ucast_enable = 0;
+    }
+
+    if ( uri_version == SNMP_VERSION_V1_V2c_V3 || uri_version == SNMP_VERSION_V1_V2c )
+    {
+        if ( uri_accessMode == SNMP_ACCESS_ENABLE )
+        {
+            fprintf(fp, "com2sec   readwrite  0.0.0.0/0 %s\n", uri_v1v2cCommunity_readWrite);
+            fprintf(fp, "com2sec   readonly   0.0.0.0/0 %s\n", uri_v1v2cCommunity_readOnly);
+            if ( ipv6_global_ucast_enable ) 
+            {
+                fprintf(fp, "com2sec6  readwrite  %s/64     %s\n", uri_ipv6_globalUnicastAddressPrefix, uri_v1v2cCommunity_readWrite);
+                fprintf(fp, "com2sec6  readonly   %s/64     %s\n", uri_ipv6_globalUnicastAddressPrefix, uri_v1v2cCommunity_readOnly);
+            }
+            else
+            {
+                fprintf(fp, "com2sec6  readwrite  fe80::/64  %s\n", uri_v1v2cCommunity_readWrite);
+                fprintf(fp, "com2sec6  readonly   fe80::/64  %s\n", uri_v1v2cCommunity_readOnly);
+            }
+
+        }
+        else
+        if ( uri_accessMode == SNMP_ACCESS_DISABLE )
+        {
+            fprintf(fp, "com2sec  readwrite  127.0.0.1/0 %s\n", uri_v1v2cCommunity_readWrite);
+            fprintf(fp, "com2sec  readonly   127.0.0.1/0 %s\n", uri_v1v2cCommunity_readOnly);
+        }
+        else
+        if ( uri_accessMode == SNMP_ACCESS_READ_ONLY )
+        {
+            fprintf(fp, "com2sec  readonly   0.0.0.0/0 %s\n", uri_v1v2cCommunity_readOnly);
+            if ( ipv6_global_ucast_enable ) 
+            {
+                fprintf(fp, "com2sec6  readonly   %s/64     %s\n", uri_ipv6_globalUnicastAddressPrefix, uri_v1v2cCommunity_readOnly);
+            }
+            else
+            {
+                fprintf(fp, "com2sec6  readonly   fe80::/64  %s\n", uri_v1v2cCommunity_readOnly);
+            }
+        }
+
+        if ( uri_accessMode == SNMP_ACCESS_ENABLE || uri_accessMode == SNMP_ACCESS_DISABLE )
+        {
+            fprintf(fp, "group MyRWGroup v1         readwrite\n");
+            fprintf(fp, "group MyRWGroup v2c        readwrite\n");
+            fprintf(fp, "group MyROGroup v1         readonly \n");
+            fprintf(fp, "group MyROGroup v2c        readonly \n");
+            fprintf(fp, "view all    included  .1   80       \n");
+            /* Plan C: hide MIBs the framework does NOT register (ISS-leaked) so the
+               exposed surface matches mainline; .68 (VRRP) is a framework vrrpdb
+               handler bug that truncates walks — masked here, fix tracked separately. */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.6\n");     /* tcp */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.23\n");    /* rip2 */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.26\n");    /* mau */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.47\n");    /* entity */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.67\n");    /* radius-std */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.83\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.85\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.97\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.185\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.241\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.29\n");  /* icmpStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.30\n");  /* icmpMsgStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.7\n");   /* udpEndpointTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.8\n");   /* udpHCInDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.9\n");   /* udpHCOutDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.68\n");    /* vrrp (framework bug) */
+            fprintf(fp, "access MyRWGroup \"\"      any       noauth    exact  all    all    none\n");
+            fprintf(fp, "access MyROGroup \"\"      any       noauth    exact  all    none   none\n");
+        }
+        else
+        if ( uri_accessMode == SNMP_ACCESS_READ_ONLY )
+        {
+            fprintf(fp, "group MyROGroup v1         readonly \n");
+            fprintf(fp, "group MyROGroup v2c        readonly \n");
+            fprintf(fp, "view all    included  .1   80       \n");
+            /* Plan C: hide MIBs the framework does NOT register (ISS-leaked) so the
+               exposed surface matches mainline; .68 (VRRP) is a framework vrrpdb
+               handler bug that truncates walks — masked here, fix tracked separately. */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.6\n");     /* tcp */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.23\n");    /* rip2 */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.26\n");    /* mau */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.47\n");    /* entity */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.67\n");    /* radius-std */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.83\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.85\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.97\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.185\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.241\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.29\n");  /* icmpStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.30\n");  /* icmpMsgStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.7\n");   /* udpEndpointTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.8\n");   /* udpHCInDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.9\n");   /* udpHCOutDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.68\n");    /* vrrp (framework bug) */
+            fprintf(fp, "access MyROGroup \"\"      any       noauth    exact  all    none   none\n");
+        }
+
+    }
+
+    fprintf(fp, "agentAddress udp6:%d\n", uri_ipv6_udp_port);
+
+    fprintf(fp, "sysservices            2 \n");
+    fprintf(fp, "authtrapenable         1 \n");
+
+
+    if ( uri_version == SNMP_VERSION_V1_V2c_V3 || uri_version == SNMP_VERSION_V3 )
+    {
+
+        fprintf(fp, "%s             %s\n", TOKEN_SNMP_ENGINEID, engineID.engine_id);
+        fprintf(fp, "%s             %d\n", TOKEN_SNMP_ENGINE_BOOT, engineID.engine_boot);
+
+        if ( uri_accessMode == SNMP_ACCESS_ENABLE ||  uri_accessMode == SNMP_ACCESS_READ_ONLY )
+        {
+            fprintf(fp, "engineIDNic tap0\n");
+        }
+        else
+        if ( uri_accessMode == SNMP_ACCESS_DISABLE )
+        {
+            fprintf(fp, "engineIDNic  lo \n");
+        }
+        uri_userAccountTable = json_object_get_array(jobj_cfg_snmp, "userAccountTable");
+        if ( setup_snmpd_userAccount(fp, uri_accessMode, SNMP_SERV_USER, uri_userAccountTable) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error setup_snmpd_userAccount SNMP_SERV_USER \n",
+                __func__, __LINE__ );
+            return FAILURE;
+        }
+    }
+    fclose(fp);
+    
+    
+    if ( type == STARTUP_SNMP_SERVICE )
+    {
+        if ( uri_accessMode == SNMP_ACCESS_DISABLE)
+        {
+            _ControlIsSnmpd("stop");
+        }
+        else
+        {
+            _ControlIsSnmpd("restart");
+            if (uri_version == SNMP_VERSION_V1_V2c_V3 || uri_version == SNMP_VERSION_V3) {
+                _ExecGetSNMPv3StartEngineTime();
+            }
+        }
+    }
+    else
+    {
+        ret = LibUtil_ExecShCmd(&ret_cmd, NULL , 0, "/usr/bin/diff " SNMP_CONF_FILE " " SNMP_CONF_FILE_BAK " " );
+        if ( ret_cmd != 0 )
+        {
+            ret = replace_snmpd_config_engineID(SNMP_CONF_FILE_BAK, SNMP_CONF_FILE);
+            if ( ret != SUCCESS )
+            {
+                fprintf(stderr, "%s@%d : error replace_snmpd_config_engineID \n",
+                    __func__, __LINE__ );
+            }
+            else
+            {
+                if ( uri_accessMode == SNMP_ACCESS_DISABLE)
+                {
+                    _ControlIsSnmpd("stop");
+                }
+                else
+                {
+                    _ControlIsSnmpd("restart");
+                    if (uri_version == SNMP_VERSION_V1_V2c_V3 || uri_version == SNMP_VERSION_V3) {
+                        _ExecGetSNMPv3StartEngineTime();
+                    }
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+void setup_loginPolicy_config(JSON_Value *cfg)
+{
+    JSON_Object* jobj_cfg = json_value_get_object(cfg);
+
+    FILE *fp = fopen(SNMP_ACCOUNT_LOCKOUT_CONF, "w+");
+    if (fp) {
+        fprintf(fp, "enable %d\n", json_object_get_boolean(jobj_cfg, "enableFailureLockout"));
+        fprintf(fp, "retry %d\n", (int32_t)json_object_get_number(jobj_cfg, "retryFailureThreshold"));
+        fprintf(fp, "lockTime %d\n", (int32_t)json_object_get_number(jobj_cfg, "failureLockoutTime")*60);
+        fclose(fp);
+    }
+
+}
+
+
+int main(int argc, char **argv)
+{
+    JSON_Value *cfg_snmp_pre         = NULL;
+    JSON_Value *cfg_snmp_cur         = NULL;
+    JSON_Value *cfg_snmpTrap_pre     = NULL;
+    JSON_Value *cfg_snmpTrap_cur     = NULL;
+    JSON_Value *cfg_uiService_pre    = NULL;
+    JSON_Value *cfg_uiService_cur    = NULL;
+    JSON_Value *cfg_managementIp_pre = NULL;
+    JSON_Value *cfg_managementIp_cur = NULL;
+    JSON_Value *cfg_loginPolicy_pre = NULL;
+    JSON_Value *cfg_loginPolicy_cur = NULL;
+    int         ret              = FAILURE;
+    int         isIpConfigChanged = 0;
+
+    cfg_managementIp_cur = json_parse_file(URI_CONFIG_CUR_RUNNING("managementIp.json"));
+    if(cfg_managementIp_cur == NULL)
+    {
+        gi4Uri_ipv6_support = 0;
+        //snprintf(logCmd, sizeof(logCmd),
+        //                  "moxa_logger -p debug -t SNMP 'snmpd config without IPv6 address started'");
+    }
+    else
+    {
+        gi4Uri_ipv6_support = 1;
+        //snprintf(logCmd, sizeof(logCmd),
+        //                  "moxa_logger -p debug -t SNMP 'snmpd config with IPv6 address started'");
+    }
+    
+    if ( argc == 2 && strcmp(argv[1],"start") == 0 )
+    {
+        cfg_snmp_cur         = json_parse_file(URI_CONFIG_CUR_RUNNING("snmp.json"));
+        cfg_snmpTrap_cur     = json_parse_file(URI_CONFIG_CUR_RUNNING("snmpTrap.json"));
+        cfg_uiService_cur    = json_parse_file(URI_CONFIG_CUR_RUNNING("uiServiceManagement.json"));
+        cfg_loginPolicy_cur = json_parse_file(URI_CONFIG_CUR_RUNNING("loginPolicy.json"));
+
+        if( setup_snmpd_config(STARTUP_SNMP_SERVICE, 
+            cfg_snmp_cur, cfg_snmpTrap_cur, 
+            cfg_uiService_cur, cfg_managementIp_cur) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error setup_snmpd_config \n",
+                __func__, __LINE__ );
+        }
+        else 
+        {
+            ret = SUCCESS;
+        }
+
+
+        setup_loginPolicy_config(cfg_loginPolicy_cur);
+        json_value_free(cfg_snmp_cur);
+        cfg_snmp_cur = NULL;
+        json_value_free(cfg_snmpTrap_cur);
+        cfg_snmpTrap_cur = NULL;
+        json_value_free(cfg_uiService_cur);
+        cfg_uiService_cur = NULL;
+        json_value_free(cfg_loginPolicy_cur);
+        cfg_loginPolicy_cur = NULL;
+    }
+    else 
+    if ( argc == 2 && strcmp(argv[1],"reload") == 0 )
+    {
+
+        cfg_snmp_pre         = json_parse_file(URI_CONFIG_PRE_RUNNING("snmp.json"));
+        cfg_snmp_cur         = json_parse_file(URI_CONFIG_CUR_RUNNING("snmp.json"));
+        cfg_snmpTrap_pre     = json_parse_file(URI_CONFIG_PRE_RUNNING("snmpTrap.json"));
+        cfg_snmpTrap_cur     = json_parse_file(URI_CONFIG_CUR_RUNNING("snmpTrap.json"));
+        cfg_uiService_pre    = json_parse_file(URI_CONFIG_PRE_RUNNING("uiServiceManagement.json"));
+        cfg_uiService_cur    = json_parse_file(URI_CONFIG_CUR_RUNNING("uiServiceManagement.json"));
+        if(gi4Uri_ipv6_support)
+        {
+            cfg_managementIp_pre = json_parse_file(URI_CONFIG_PRE_RUNNING("managementIp.json"));
+            isIpConfigChanged = json_value_equals(cfg_managementIp_pre, cfg_managementIp_cur);            
+        }
+        cfg_loginPolicy_pre = json_parse_file(URI_CONFIG_PRE_RUNNING("loginPolicy.json"));
+        cfg_loginPolicy_cur = json_parse_file(URI_CONFIG_CUR_RUNNING("loginPolicy.json"));
+
+        if( json_value_equals(cfg_snmp_pre,         cfg_snmp_cur          ) != 1 || 
+            json_value_equals(cfg_snmpTrap_pre,     cfg_snmpTrap_cur      ) != 1 || 
+            json_value_equals(cfg_uiService_pre,    cfg_uiService_cur     ) != 1 || 
+            isIpConfigChanged)
+
+        {
+            if( setup_snmpd_config(RELOAD_SNMP_SERVICE, cfg_snmp_pre, cfg_snmpTrap_pre, 
+                cfg_uiService_pre, cfg_managementIp_pre) == FAILURE )
+            {
+                fprintf(stderr, "%s@%d : error setup_snmpd_config \n",
+                    __func__, __LINE__ );
+            }
+            else
+            {
+                ret = SUCCESS;
+            }
+
+        }
+        else 
+        {
+            ret = SUCCESS;
+        }
+
+        if( json_value_equals(cfg_loginPolicy_pre, cfg_loginPolicy_cur) != 1) {
+            setup_loginPolicy_config(cfg_loginPolicy_pre);
+        }
+        json_value_free(cfg_snmp_pre);
+        cfg_snmp_pre = NULL;
+        json_value_free(cfg_snmp_cur);
+        cfg_snmp_cur = NULL;
+        json_value_free(cfg_snmpTrap_pre);
+        cfg_snmpTrap_pre = NULL;
+        json_value_free(cfg_snmpTrap_cur);
+        cfg_snmpTrap_cur = NULL;
+        json_value_free(cfg_uiService_pre);
+        cfg_uiService_pre = NULL;
+        json_value_free(cfg_uiService_cur);
+        cfg_uiService_cur = NULL;
+        if(cfg_managementIp_pre != NULL)
+        {
+            json_value_free(cfg_managementIp_pre);
+            cfg_managementIp_pre = NULL;
+        }
+
+        json_value_free(cfg_loginPolicy_pre);
+        cfg_loginPolicy_pre = NULL;
+        json_value_free(cfg_loginPolicy_cur);
+        cfg_loginPolicy_cur = NULL;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_start") == 0 )
+    {
+        cfg_snmp_cur         = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("snmp.json"));
+        cfg_snmpTrap_cur     = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("snmpTrap.json"));
+        cfg_uiService_cur    = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("uiServiceManagement.json"));
+
+        if( setup_snmpd_config(STARTUP_SNMP_SERVICE, 
+            cfg_snmp_cur, cfg_snmpTrap_cur, 
+            cfg_uiService_cur, cfg_managementIp_cur) == FAILURE )
+        {
+            fprintf(stderr, "%s@%d : error setup_snmpd_config \n",
+                __func__, __LINE__ );
+
+        }
+        else 
+        {
+            ret = SUCCESS;
+        }
+
+        json_value_free(cfg_snmp_cur);
+        cfg_snmp_cur = NULL;
+        json_value_free(cfg_snmpTrap_cur);
+        cfg_snmpTrap_cur = NULL;
+        json_value_free(cfg_uiService_cur);        
+        cfg_uiService_cur = NULL;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_reload") == 0 )
+    {
+        cfg_snmp_pre         = json_parse_file(URI_CONFIG_PRE_RUNNING_TEST("snmp.json"));
+        cfg_snmp_cur         = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("snmp.json"));
+        cfg_snmpTrap_pre     = json_parse_file(URI_CONFIG_PRE_RUNNING_TEST("snmpTrap.json"));
+        cfg_snmpTrap_cur     = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("snmpTrap.json"));
+        cfg_uiService_pre    = json_parse_file(URI_CONFIG_PRE_RUNNING_TEST("uiServiceManagement.json"));
+        cfg_uiService_cur    = json_parse_file(URI_CONFIG_CUR_RUNNING_TEST("uiServiceManagement.json"));
+        if(gi4Uri_ipv6_support)
+        {
+            cfg_managementIp_pre = json_parse_file(URI_CONFIG_PRE_RUNNING_TEST("managementIp.json"));
+            isIpConfigChanged = json_value_equals(cfg_managementIp_pre, cfg_managementIp_cur);
+        }
+
+        if( json_value_equals(cfg_snmp_pre,         cfg_snmp_cur          ) == 1 || 
+            json_value_equals(cfg_snmpTrap_pre,     cfg_snmpTrap_cur      ) == 1 || 
+            json_value_equals(cfg_uiService_pre,    cfg_uiService_cur     ) == 1 ||
+            isIpConfigChanged)
+        {
+            if( setup_snmpd_config(RELOAD_SNMP_SERVICE, cfg_snmp_pre, cfg_snmpTrap_pre, 
+                cfg_uiService_pre, cfg_managementIp_pre) == FAILURE )
+            {
+                fprintf(stderr, "%s@%d : error setup_snmpd_config \n",
+                    __func__, __LINE__ );
+            }
+            else
+            {
+                ret = SUCCESS;
+            }
+
+        }
+        else 
+        {
+            ret = SUCCESS;
+        }
+
+        json_value_free(cfg_snmp_pre);
+        cfg_snmp_pre = NULL;
+        json_value_free(cfg_snmp_cur);
+        cfg_snmp_cur = NULL;
+        json_value_free(cfg_snmpTrap_pre);
+        cfg_snmpTrap_pre = NULL;
+        json_value_free(cfg_snmpTrap_cur);
+        cfg_snmpTrap_cur = NULL;
+        json_value_free(cfg_uiService_pre);
+        cfg_uiService_pre = NULL;
+        json_value_free(cfg_uiService_cur);
+        cfg_uiService_cur = NULL;
+        json_value_free(cfg_managementIp_pre);
+        cfg_managementIp_pre = NULL;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_path") == 0 )
+    {
+        char        plugIN_conf[MAX_PLUGIN_CONF]  = {0x0};
+        setup_snmpd_plugin_conf(plugIN_conf, sizeof(plugIN_conf));
+        fprintf(stderr, "plugIN_conf(%d) = \'%s\'\n", strlen(plugIN_conf), plugIN_conf);
+        ret = SUCCESS;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_default_engineID") == 0 )
+    {
+        struct snmp_engine_id engineID;
+        if ( get_default_snmp_engine_info(&engineID) == FAILURE ) 
+        {
+            fprintf(stderr, "%s@%d : error get_default_snmp_engine_info \n",
+                __func__, __LINE__ );
+        }
+        ret = SUCCESS;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_file_engineID") == 0 )
+    {
+        struct snmp_engine_id engineID;
+        if ( get_file_snmp_engine_info(&engineID) == FAILURE ) 
+        {
+            fprintf(stderr, "%s@%d : error get_file_snmp_engine_info \n",
+                __func__, __LINE__ );
+        }
+        ret = SUCCESS;
+    }
+    else
+    if ( argc == 2 && strcmp(argv[1],"test_generate_snmp_engine_info") == 0 )
+    {
+        struct snmp_engine_id engineID;
+        if ( generate_snmp_engine_info(&engineID) == FAILURE ) 
+        {
+            fprintf(stderr, "%s@%d : error generate_snmp_engine_info \n",
+                __func__, __LINE__ );
+        }
+        ret = SUCCESS;
+    }
+
+    json_value_free(cfg_managementIp_cur);
+    cfg_managementIp_cur = NULL;
+
+    if (ret == FAILURE)
+    {
+        fprintf(stderr, "%s@%d : error handle setup_snmpd_config \n",
+            __func__, __LINE__ );
+    }
+
+    return ret;
+}
+

@@ -1,0 +1,101 @@
+# ADR-0015: 候選篩選改為兩道獨立關卡 —— 先「ISS 是否真的服務」再「walk 是否夠慢」
+
+Status:
+  **Accepted（2026-08-08）** —— 已對全部候選跑過一輪,並據此挑出 `mxrstpdb/`(ADR-0016)。
+  本 ADR 取代 ADR-0013 的單軸規則(僅看 walk 耗時)。
+
+Date: 2026-08-08
+
+Context:
+  ADR-0013 確立了「先量 `snmpwalk` 耗時,再談其他」,理由是:ISS 的註冊與
+  `agentx_owned.list` 無關、本來就存在,該 list 只控制「in-master 要不要**也**註冊」。
+  若 walk 已經很快,代表 ISS 早已贏得 wire,委派只是移除 in-master 的註冊,
+  不會改善任何事卻可能踩到拆表問題(`stdladb/` 就是這樣被否決的:-12 筆、零加速)。
+
+  這條規則是對的,但**只擋得住「沒有收益」,擋不住「會刪掉 OID」**。
+  2026-08-08 對 42 支候選做逐 OID 的 ISS 涵蓋比對時,`mxigmpdb/` 暴露了第二種失敗模式:
+  它的 16 個 entry `iss_build` 全是 1、mod_uri 前綴看起來正常、在「所有 `db.h`」的
+  比對下涵蓋率 100% —— **但它的 ISS 模組根本沒編進這個 image**。直接委派會讓那 16 個
+  OID 從樹上消失。同一輪還抓到 `fsladb/` / `fscfadb/` / `fsvlandb/` 涵蓋率 0%,
+  正是既有結論「mxLa 委派會直接刪掉 OID」的來源。
+
+  兩種失敗模式互不涵蓋,單靠耗時或單靠涵蓋率都會漏。
+
+Decision:
+  候選必須**同時**通過兩道關卡,順序是先涵蓋、後耗時(涵蓋是純靜態、便宜,且否決是硬的)。
+
+  **關卡一:ISS 是否真的服務這個子樹(能不能搬)**
+  比對該模組在 `net_*.h` 的 entry OID 與 ISS `<mod>db.h` 宣告的物件 OID,
+  **且只採用有編進 image 的 ISS 模組** —— 判定方式是該模組目錄在
+  `output/build/app_moxa_iss_10_1_0-custom/` 底下有沒有編出 `.o`。
+  收緊前 464 份 `db.h`、收緊後 228 份;`mxigmpdb/` 的涵蓋率就是在這一步從 100% 掉到 0%。
+  對照組驗證:已委派且實測可行的 `ifmibdb/` / `stdethdb/` / `mxportdb/` 都是 100%。
+
+  ⚠️ **`db.h` 有宣告是必要條件,不是充分條件。** `mxRstpdb.h` 宣告了
+  `.603.3.2.2.1.1.1`,但委派後該欄 targeted walk 與 exact GET 都是 `No Such Instance`
+  —— index 欄在 ISS 側是 not-accessible。所以 100% 會**高估**,差額要用 MIB 解釋
+  (見 ADR-0010、ADR-0016)。
+
+  **關卡二:walk 是否夠慢(值不值得搬)**
+  沿用 ADR-0013 的判準。委派後的參考單價約 **2.7 ms/varbind**
+  (ifTable 委派後 330 vb / 0.895s),明顯高於此才有壓縮空間。
+
+  **量測必須用足夠的 timeout 與 retry。** 2026-08-08 第一輪掃描用了 `-t 3 -r 0`,
+  walk 被截斷,`mxrstpdb/` 量成 7.38s —— 實際是 **31.9s**,低估 4 倍以上。
+  掃描一律用 `-t 5`(預設 retry),慢的候選尤其會被截斷,而慢的候選正是我們要找的。
+
+Alternatives Considered:
+  - **維持 ADR-0013 的單軸(只看耗時)** —— 擋不住 `mxigmpdb/` 這類「慢且會刪 OID」的候選。
+    耗時慢正好是它會被選中的原因,後果卻是刪掉 16 個 OID。否決。
+  - **只看 ISS 涵蓋率** —— 擋不住 `stdladb/` 這類「ISS 本來就在服務、委派零收益還 -12」的候選。
+    ADR-0013 已用實測否決。否決。
+  - **用 `iss_build` 旗標篩** —— 假陽性。42 支候選裡 24 支 private MIB 的 `iss_build`
+    **全部 100% 是 1**,包含 4 支 ISS 根本沒編的。`iss_build` 講的是
+    「in-master 從哪裡取值」(`BUILD_FROM_URI=0` / `BUILD_FROM_ISS=1`),不是「誰服務 SNMP」。
+  - **用 mod_uri 前綴篩** —— 假陽性。`fsladb/` 與 `fscfadb/` 共用 root `.603.1.2`,
+    前綴本身就有歧義。
+
+Consequences:
+  - 42 支候選(45 支 `*db/` 模組扣掉已委派的 3 支)分成:
+    **可委派 36 支**、部分涵蓋 2 支(`std1d1db/` 83%、`mxmacsecdb/` 90%)、
+    **不可委派 4 支**(`mxigmpdb/`、`fsladb/`、`fscfadb/`、`fsvlandb/`)。
+  - `stdrmodb/` 依 ADR-0013 已**永久移除**(產品未啟用 RMON),不在上述 42 支的評估範圍內
+    —— 即使耗時掃描把它排在前面也不得選用。
+  - 第一輪耗時掃描的數字**兩個方向都錯,已全數作廢**:
+    (a) `-t 3 -r 0` 截斷 walk → **低估**慢的模組(`mxrstpdb/` 掃到 7.38s,實際 31.9s);
+    (b) 子 root 彼此重疊、時間與 varbind 重複計算 → **高估**有多層子樹的模組
+    (`stdospdb/` 掃到 8.07s / 138 vb,實際 1.52s / 70 vb)。
+    → 掃描必須用 `-t 5` 且**每個模組只走一個互斥的 root**;root 若與其他模組共用
+    則改逐欄 walk,但要知道逐欄會因來回次數變多而**高估**(LLDP 逐欄加總 5.83s
+    vs 整棵 walk 3.51s),不能直接跟 tree 量法的數字並排比較。
+
+  - **重掃結果(2026-08-09,34 支,image `2026_0808_1743`):`mxrstpdb/` 之後沒有大魚。**
+    以委派後單價 2.7 ms/vb 估算可省秒數,最高的是 `stdospdb/` **1.33s**
+    (1.52s / 70 vb / 21.8 ms/vb),其次 `stdpnodb/` 0.60s、`mxtcstdb/` 0.49s、
+    `stdvladb/` 0.26s,其餘 30 支都在 0.14s 以下。
+    LLDP 全家(981 vb)與 bridge 全家(840 vb)雖然量大,整棵 walk 單價已是
+    3.6 / 3.1 ms/vb,逼近委派後水準 —— 即 ADR-0013 用 `stdladb/` 證明過的
+    「ISS 本來就在服務,委派零收益」情形。
+    → **投入產出比已翻轉**:再搬一支要一輪完整的 build + 燒錄 + 驗收(約 40 分鐘)
+    換 0.3–1.3 秒,而 `mxrstpdb/` 那一輪換到 31.2 秒。後續應以正確性/完整性缺口
+    為委派理由,不再以效能為理由。
+  - 篩選腳本沒有落地成工具;目前是一次性的 shell/awk。若要重複做,值得收進
+    `~/mds4xgl3/tools/`。
+
+Constraints / Assumptions:
+  - 涵蓋率比對的鍵是**欄位 OID**(不含 instance),兩側取法一致才可比。
+  - 「有編進 image」的判定依賴 `output/build/` 是當次建置的產物;換 defconfig 要重算。
+  - 本 ADR 只處理 `*db/` 形態的 ISS 模組。`*Event/` / `*Trap/` 是 trap 定義、
+    非可 walk 的表,不在候選池;小型 config 群組(`config/`、`snmp/`、`turboringv2/` …)
+    由 framework subagent 或 in-master 服務,亦不在池內。
+
+Related Files / Modules:
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_*.h` —— in-master entry 的 OID / uri / iss_build
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/**/inc/*db.h` —— ISS 宣告的物件 OID
+  - `buildroot/output/build/app_moxa_iss_10_1_0-custom/` —— 判定模組有沒有真的編
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list` —— 委派清單
+  - `~/mds4xgl3/tools/iss_roots.txt` —— ISS OID 符號傾印(輔助)
+
+Related ADRs:
+  取代 ADR-0013(單軸:僅 walk 耗時);
+  ADR-0010(MIB 為權威)、ADR-0011、ADR-0012、ADR-0014、ADR-0016

@@ -1,0 +1,319 @@
+# Handoff — SNMP Plan E(session `snmp-plan-E reopen 7`,2026-08-13/14)
+
+接續 `~/handoff-snmp-plan-E-2026-08-12-reopen6.md`。
+**handoff 一律不進版控**(使用者裁示),所以只有 `~/` 這一份。
+
+---
+
+## 🔴 接手前三件會害你踩坑的
+
+### ① DUT 現在是**壞的**,而且是使用者指示保留的
+
+```
+p1(執行中) BUILD_TIME = 2026_0813_0905    fwrbootpart = 1
+p2          mainline    2026_0805_2335     ← 對照組,全程未動,不可覆蓋
+bind mount  /tmp/list_S2 掛在 /etc/moxa/netsnmp/agentx_owned.list  ← 還掛著
+mxlldp      .603.5.1 整支消失(25 → 0 varbind)                      ← 壞的
+/tmp        留有 reg.pcap / reg.err / s2.pcap / s2.err / list_S1 / list_S2
+```
+
+**使用者說「測試完成後請保留環境」,所以我沒有還原。**
+`umount` + moxash 重啟即可回到 25 vb;燒錄新 image 也會自然還原。
+
+⚠️ **燒錄方向仍然是反的**:停在 p1,直接燒會蓋掉 p2 的 mainline。要寫 p1 必須**先切到 p2**
+(`printf 'Y\nY\n' | /moxa/fwr_change.sh`),再用 `examinate-plan-e-swu` 的雙守衛確認。
+
+### ② 這個 image(`2026_0813_0905`)**可以量時間**
+
+它是第一顆把 GETFWD trace 收進編譯期開關(預設關)的 build,出貨 `.so` 內 `GETFWD` 字串 = 0(已實查)。
+`0812_*` 那批全部不能用來計時。
+
+### ③ 判斷 snmpd 有沒有重載,**看行程年齡,不要看 `sysUpTime`**
+
+這台的 `sysUpTime` 追的是**系統開機**,不是 snmpd 重啟。我差點據此誤判「moxash 重啟沒生效」。
+正確讀法:`awk '{print $22}' /proc/<snmpd-pid>/stat` 對比 `/proc/uptime`。
+
+---
+
+## ★ 第一順位:三個修法,設計已完整、已 review、可行性已驗
+
+**使用者已指示:改 code + 完整重編驗證,不要再用 hot-swap 疊狀態。**
+`snmp-plan-E trace 3` review 過並推翻了我兩個判斷(下方標了)。**他願意再 review diff。**
+
+起因:`mxlldp/` 加 `+getfwd` 之後**整支 MIB 消失**(25 → 0),沒有錯誤訊息,
+而且 pcap 證明**連轉發都沒發生**(`.603.5.1` 位元組在含兩個 subagent 的擷取裡出現 0 次)。
+機制是三個缺陷串聯:推導走太高 → 撞到非 subagent 的本機 handler → 無條件回報成功。
+
+### A. 把否定測試換成肯定測試(`ies_auto_mibs.c`)
+
+net-snmp master 在 subagent 註冊時(`net-snmp-5.9.3/agent/mibgroup/agentx/master_admin.c`):
+
+```c
+:209  sprintf(buf, "AgentX subagent %ld, session %8p, subsession %8p", ...);
+:223  reg = netsnmp_create_handler_registration(buf, agentx_master_handler, ...);
+:232  reg->handler->myvoid = session;
+```
+
+```c
+/* 現行 :3273 mox_snmp_reg_is_local() —— 只問「是不是我們的」,不是就放行 */
+/* 改為: */
+static int mox_snmp_reg_is_agentx(netsnmp_handler_registration *reginfo,
+                                  netsnmp_session **sess)
+{
+    netsnmp_mib_handler *h;
+    for (h = reginfo->handler; h != NULL; h = h->next)
+        if (h->access_method == agentx_master_handler) {
+            if (sess) *sess = (netsnmp_session *) h->myvoid;
+            return 1;
+        }
+    return 0;
+}
+```
+`mox_snmp_probe_derive:3328-3333` 的接受條件由 `!mox_snmp_reg_is_local(...)` 改為
+`mox_snmp_reg_is_agentx(..., NULL)`。
+
+**可行性已驗**:`libnetsnmpmibs.so` 的 NEEDED 已含 `libnetsnmpagent.so.40`,
+且已有 49 個未定義 `netsnmp_*` 符號從那裡解析;`agentx_master_handler` 是該 `.so` 的匯出動態符號。
+**引用它不新增任何連結相依。** `#include "agentx/master.h"`(`snmp_agent.c:107` 有先例,
+編譯 `-I` 含 `../agent`)。
+⚠️ 只驗了這個 build;其他機種組態未查。
+
+⚠️ **不要快取 `sess` 指標**。斷線時 `close_agentx_session`(`master_admin.c:124`)會
+`unregister_mibs_by_session()` 真的摘掉 subtree,所以不會留下懸空 registration ——
+但 net-snmp 自己都在 `master.c:458` 檢查 `if (!ax_session)`。每次重新解析。
+現有 `gAgentXDerived[]` 快取的是 **OID** 不是指標,那是安全的,維持原設計。
+
+### B. `!delegated` + 錯誤檢查(**必要,不是可選**)
+
+`mox_snmp_forward_get_to_iss:3597-3600` 現在是:
+
+```c
+    (void) netsnmp_call_handlers(iss_sub->reginfo, reqinfo, request);   /* 回傳值丟棄 */
+    request->next = saved_next;
+    return 0;                                                           /* 無條件成功 */
+```
+
+**我原本判斷 B 在 A 之後只是縱深防禦 —— `trace 3` 推翻了,而且給了具體路徑:**
+
+```c
+/* master.c:443 agentx_master_handler */
+:448    netsnmp_session *ax_session = (netsnmp_session *) handler->myvoid;
+:458    if (!ax_session) {
+:459        netsnmp_set_request_error(reqinfo, requests, SNMP_ERR_GENERR);
+:460        return SNMP_ERR_NOERROR;      /* 同步返回,delegated 從未設定 */
+        }
+```
+
+這是**貨真價實的 AgentX registration**(A 會通過),但 `myvoid == NULL` 時同步設錯誤就返回。
+A 放行 → 同步回來 → 我們 `return 0` → 呼叫端跳過本地讀取 → **值又沒了。**
+
+判別依據:AgentX master 送出請求時會 `netsnmp_handler_mark_requests_as_delegated`
+(`master.c:238,280`),回應才清掉(`:355,399,420`)。所以 `call_handlers` 返回當下:
+
+| `request->delegated` | 意義 | 可否檢查 varbind |
+|---|---|---|
+| 已設定 | 真的走了 AgentX,答案稍後才到 | **不能**(這是當初撤回這道檢查的正確理由)|
+| 仍為 0 | **同步答完 = 本機 handler 答的** | **可以,答案已經在裡面** |
+
+⚠️ **條件要放寬**:`:459` 走的是 `netsnmp_set_request_error(..., SNMP_ERR_GENERR)`,
+**不一定會把 varbind type 設成 `SNMP_NOSUCHOBJECT`**。條件應為
+「`!delegated` 且(有錯誤狀態 **或** varbind 仍是 `ASN_NULL` **或** 是例外型別)」。
+
+⚠️ **退回本地前必須清掉那次失敗轉發留下的錯誤狀態**,否則本地讀到的正確值會被既有
+error-status 蓋掉,變成「值對了但整個 PDU 仍回錯」。**確切欄位名稱 `trace 3` 沒釘到,實作時要確認。**
+
+### C. 推導下限(**不要丟掉** —— 我原本說可以丟,`trace 3` 推翻了)
+
+A 只保證「目標是某個 subagent」,**不保證是對的那個**。走太高可能撞到另一個 subagent 或
+同一 subagent 的另一個 MIB root —— **兩者都會正常委派,所以 B 的檢查不觸發**,
+noSuchObject 非同步回來就靜默掉值。
+
+成本只要**一個 int**(我原本高估成 OID 陣列):
+
+```c
+static int gAgentXRootLen[AGENTX_OWNED_MAX];   /* 該 group 的 OID root 長度 */
+```
+root = 該 list 前綴底下所有 entry 的最長共同 OID 前綴,註冊期算一次。
+`mox_snmp_probe_derive:3323` 的 `len >= 3` 改為 `len >= gAgentXRootLen[prefix_idx]`。
+
+### 三者都補不掉的一格(**請明寫進 ADR**)
+
+轉給**對的** subagent、但它**不服務**那個 OID → 非同步回 noSuchObject。
+只能靠事前 ISS 涵蓋篩選 + 事後完整性 gate。
+**不要讓 ADR-0031 的宣稱再一次比實際強。**
+
+### 三個修法都要做 —— 這句話請不要打折
+
+我在 `trace 3` review **之前**的傾向是「A 為主、B 可選、下限可丟」。**那個版本會做出一個
+「看起來修好了、但仍然靜默掉值」的修法。** 兩個都被具體程式碼路徑推翻(理由見上)。
+**只做 A 會重演今天掉掉 25 個 varbind 的同一種錯。**
+
+### 延伸閱讀
+
+`trace 3` 把設計細節寫進 memory 的 **`project_getfwd_probe_sources_and_silent_value_loss`
+的「修法設計定案」節** —— ⚠️ **索引行只有一句,要讀 body 才有內容。**
+
+### mainline 基準線(p2,`time /usr/bin/snmpwalk`,3 reps 穩定)
+
+```
+mxstcldb  .603.4.4   36 vb / 3 欄   0.195s
+mxrlpsdb  .603.4.8   26 vb / 4 欄   0.282s
+mxlldp    .603.5.1   25 vb / 5 欄   0.334s
+```
+⚠️ `mxlldp` 的 `~.1.4.1.3` 只有 10 列(缺埠 3、4)—— **mainline 就是如此,不是搬遷造成的。**
+⚠️ 時間欄跨 image 單次未交錯,**不可引用**。
+
+### `mxlldp/` 沒有進版控 —— 不用清
+
+`trace 3` 提醒「交接前先把 `mxlldp/` 從 list 移除」。**版控裡從來沒有它** ——
+已確認 `plugin_moxa_snmp/app/script/agentx_owned.list` 只有 5 行
+(`ifmibdb/` `stdethdb/` `mxportdb/` `mxrstpdb/` `mxqosdb/`),working tree 乾淨。
+`mxlldp/` 只存在於 DUT 上 bind-mount 的 `/tmp/list_S2`,**`umount` 或重開機就消失**。
+
+### 驗收標準(事前寫下)
+
+```
+mxlldp/    +getfwd  →  25 vb / 5 欄保住,線路無轉發
+mxstcldb/  +getfwd  →  36 vb / 3 欄,線路有轉發(不得回歸)
+mxrlpsdb/  +getfwd  →  26 vb / 4 欄,線路有轉發
+既有四個前綴        →  完整性不變
+```
+
+---
+
+## 本輪已確立的事實
+
+### mxstcl / mxrlps / mxlldp(文件:`~/WORK/SNMP_50ms/snmp-plan-E_reopen/mxstcl-mxrlps-mxlldp-*.md`)
+
+```
+mxstcldb/  +getfwd +nodelegate  →  轉發成功(122 次),完整性不變   ✅ 可行
+mxrlpsdb/  +getfwd +nodelegate  →  轉發成功( 90 次),完整性不變   ✅ 可行
+mxlldp/    +getfwd +nodelegate  →  整支消失,連轉發都沒發生         🔴 上面在修的就是它
+```
+
+判別依據是 **ISS 有沒有這個 root**。`+nodelegate` 對**全 RW** 前綴是純 no-op(RW 判斷在最前面),
+所以 mxlldp 掉值**純由 `+getfwd` 造成**。
+
+### GETNEXT 邊界缺陷:**三個案例,已是通例不是特例**
+
+| 案例 | 直接 GET | walk |
+|---|---|---|
+| mxQos `.1.3.1.2` | `INTEGER: 3` | 走不到 |
+| mxstcldb `.1.1.1.1` | `INTEGER: 1` | 走不到 |
+| mxrlpsdb `.1.3.1.1` | `INTEGER: 1` | 走不到 |
+
+成因在 `entry_handle_exception()`(`ies_auto_mibs.c:1834-1879`)—— 整個 mxQos 系列沒用
+net-snmp 的 table helper,所有跨欄跨表邊界都落在這一個手寫函式。
+`trace 3` 的根因候選 (a):`netsnmp_subtree_find_prev()` 用 `req_oid` 定位,skip 迴圈卻用
+`reginfo->rootoid` 當門檻 → **修法是把門檻改成 `req_oid`**。三個案例可逐一驗證。
+
+⚠️ **這個缺陷讓被擋住的欄位落進量測盲區** —— 新舊兩臂都看不到,會被讀成「沒有回歸」。
+做完整性比對時**必須主動列出這些欄位**,不能靠 walk 差異抓。
+
+### mxQos:「不搬」的結論**已撤回**(ADR-0032 Status = Proposed)
+
+量測數據仍有效(A 1.4033/1.4117s、B 1.6144/1.5960s、+14.0%、雙對照有效),
+**失效的是從它推導出的判斷**。撤回理由只剩一條但足夠:
+**兩臂都把 registration 留在 in-master**(`+nodelegate` 的定義),
+所以「換 ISS 服務能否讓 walk 從 17% 變 100%」**從未被測到**。
+
+已排除的假說:「轉發從未發生」——arm B 的 pcap 有 201 GetNext / 608 次 OID 位元組。
+**轉發確實發生,而且比本地讀快取檔慢**(中段讀快取 2–8 ms/請求,AgentX 往返更貴)。
+
+### 其他
+
+- **具象化**:mxQos/ifTable 走同一條路,每次開表把整張表寫到 `/moxa/run/auto_mibs/`(tmpfs);
+  快取是**單一全域槽、換表時 `unlink` 前一張**、200 ms idle TTL;**一次 table view 付兩次**。
+  Plan E 相對 mainline 省下一次 fork+exec(四張表裡三張都是 41.2 ± 0.7 ms)。
+  ⚠️ 800 ms 絕對壽命檢查是 **dead code**(`:2100-2109` if/else 兩邊都 return)。
+- **每個成功 GET 都做一次 SHM attach**:`util_timeDiff` 無條件呼叫 `LibUtil_DbgTrace`,
+  旗標檢查在函式內部。`git blame` = `280b1b7f`(2022),**產品既有、mainline 也付**。
+  ⚠️ 約 5 個 syscall、無檔案寫入,**不足以解釋毫秒級差異,不要拿來歸因**。
+- **`iss_build == 1` 的假陽性,三個實測案例**(mxstcldb/mxrlpsdb/mxlldp 全部宣告 1,執行期 ISS 都沒服務)。
+- **mainline 的 ISS AgentX 子代理程式碼層級預設關閉**(啟用碼 `44e97bc3b` 只在 Plan D/E 分支)——
+  ADR-0011/0012 的歸因因此成立。
+- **合成 index entry 繼承 `iss_build`**(`moxa_snmp_handle_util.c:164` 整包 `memcpy`),
+  卻以 `HANDLER_CAN_RONLY` 本地註冊 → 遮蔽 ISS。**這種 entry 不在任何靜態表裡。**
+
+---
+
+## 量測紀律:今天踩到的陷阱
+
+**共同形狀:工具給出一個由工具自己決定、看起來卻很合理的數字。**
+
+1. **`tcpdump -G N -W 1`**(`measure-snmp-walk/walkpcap.sh` 的寫法)在 walk **之前**就結束,
+   stderr 照印「N packets captured / 0 dropped」。→ **該 skill 的舊 pcap 全部有嫌疑**,1–2 KB 的幾乎是空的。
+   **可用寫法**:同 session 記 PID + `kill -INT`,加三道自我檢查
+   (`kill -0` 確認活著、回報 walk 的 varbind 數、結束後 `ps | grep -c tcpdump`)。
+2. **DUT 上沒有 `timeout` 指令**(`exit 127`)。
+3. **`walk.sh` 的 `-t 5` 未指定 `-r`** → 一個不回應的 OID = **30 秒逾時常數**。
+   語料庫裡所有「慢」的數字都是 `30 + 小數`(31.9 / 31.7 / 31.0 / 30.994 / 30.953 / 37.355),
+   1–29 秒之間完全空白。**ADR-0016 的 48×、ADR-0018 的 27×、簡報頭條都可能建立在它上面。**
+   ⚠️ 真值未知,**不要用替代數字**。判定要 `-r 0` + 交錯 + 兩側都量 + **逐輪記 varbind 數**。
+4. **`/etc/os-release` 的 `VERSION` 是死標籤**(寫 `EDS-G4100_...`,連機種都錯)。
+   image 身分讀 `/etc/moxa/version/BUILD_TIME`。
+5. **`snmpwalk -Cc` 會無限迴圈**(不遞增時重送同一 OID),不能拿來繞過邊界缺陷。
+6. **rtk hook 會改寫輸出,可能虛構條目** —— `snmp-plan-F1 designer` 在缺套件的樹上
+   `ls -d lib_moxa_*` 拿到三個**不存在**的目錄。我在完整的樹上重現不出來(那三個在我這裡真的存在)。
+   → **任何「存在 / 不存在」的結論一律用 `python3` 或 `rtk proxy`。**
+7. **`nm`/`strings` 查錯檔案**:`agentx_master_handler` 在 `libnetsnmpagent.so` 不在 `libnetsnmpmibs.so`,
+   我差點得出「AgentX master 沒編進去」——而當天才剛抓到 AgentX 封包。
+
+### 兩條判準(比上面的清單耐久)
+
+> **① 凡結論形如「X 不存在 / 沒有發生」,必須另外證明觀測管道走到了 X 應該在的位置。**
+> 錯的數字會被下一個人對帳而露餡,**缺席不會**。今天同一形狀踩了三次。
+
+> **② 下結論前問「我把什麼固定住了?」** —— 看 A/B 表,**兩臂相同的那些欄位就是這組量測
+> 看不見的東西**。它們不會出現在任何比較表上,所以要主動列。
+> 這一類**所有品質檢查都會通過**(交錯做了、對照做了、重複性算了),錯的是問題不是執行。
+
+---
+
+## 東西在哪
+
+```
+~/WORK/SNMP_50ms/snmp-plan-E_reopen/     ← 每個 MIB group 一份驗證文件(使用者指定的慣例)
+    README.md                            慣例、最低要求、兩條判準、篩選陷阱
+    mxqos-manual-test-summary-2026-08-13.md              (結論已撤回,見第 10 節)
+    mxstcl-mxrlps-mxlldp-manual-test-summary-2026-08-13.md
+~/mds4xgl3/.adr/ADR-0032-*.md            Status = Proposed,結論已撤回重審(未 commit)
+~/pcap/2026-08-13-*                      本輪四份 pcap,全部附 .tcpdump.log 有效性中繼資料
+~/mxqos_check.py                         完整性 gate(比 OID 不比名字)
+~/mxqosdb-oracle-*-2026-08-13.txt        29 欄 oracle
+~/mds4xgl3/tools/dutget.exp              本輪新增(dutscp.exp 只能 push)
+~/moxash_snmp_restart.exp                重啟 snmpd 的支援路徑(已處理 [y/N])
+~/mds4xgl3/rebuild_snmp_plan_e.sh        唯一的建置入口,順序寫死
+```
+
+**版控**:`3rdparty_net_snmp` `b1536f33` / `plugin_moxa_snmp` `e7f6889` 已 push origin
+(由 `trace 3` 代推,fast-forward,無 Claude trailer)。
+`~/WORK/SNMP_50ms` 是 git repo,我的資料夾已 commit `27867d0`(`develop`,**未 push**;
+該 repo 有 github + gitlab 兩個 remote,push 是使用者的決定)。
+
+---
+
+## 跨 session
+
+- **`snmp-plan-E trace 3`** —— 唯讀原始碼與 pcap 分析,**非常準**,今天修正我五處。
+  願意 review diff。**不碰 DUT、不改 code。**
+- **`snmp-plan-E document 4`** —— Confluence 簡報與工程文件。
+  ⚠️ **mxQos 目前四份 deliverable 都 0 命中**,使用者裁示「先不處理」。
+  他抓到 `-t 5` 逾時污染那條,很敏銳。
+- **`snmp-plan-E-edsg4000`** —— EDS-G4100 移植,共用那幾個 repo 但分支不同。
+- **`snmp-plan-F1 designer`** —— ⚠️ **使用者明示與本線脫鉤,沒必要不用通知他。**
+- **DUT 操作權在本 session,交接給你。** 記得重新廣播。
+
+## 我犯的錯,引以為戒
+
+1. **用靜態推理取代實驗** —— 我量了「搬之前」,從程式碼推論「搬之後會一樣」,就宣布「不能搬」。
+   使用者指出後補做實驗,結果**兩個可行、一個整支消失**,與推論不同。
+   **使用者明示:之後一律以實驗為準。**
+2. **「mainline 沒有 mxQos」** —— 只讀了 `snmpwalk` 輸出的第二行,忽略第一行的 `badValue`。
+   walk 在第一個請求就中止,`.1.4`–`.1.7` 從未被查詢。**已傳播給兩個 peer 才更正。**
+3. **結論作用域過寬** —— 「在連續 walk 形狀下慢 14%」是對的,「mxQos 不值得搬」是錯的。
+4. **過度更正** —— 更正 ②時把「ISS 沒服務」也說死了,而那需要不同的證據。`trace 3` 擋下來。
+5. **判斷 B 是「可選」、下限「可以丟」** —— 兩個都被 `trace 3` 用具體程式碼路徑推翻。
+
+**共通形狀:在證據足以支撐的範圍之外多走了一步。** 每一次都是往「更確定」的方向多走,
+而不是往「更不確定」的方向。

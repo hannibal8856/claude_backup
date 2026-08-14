@@ -1,0 +1,13 @@
+SILENCE=@
+
+APP_NAME=lib_moxa_rust_ies_auto_mibs
+
+all: rust_clippy_scan
+
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	${SILENCE}cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR}
+	${SILENCE}cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --message-format=json > rust_clippy_scan_result/${APP_NAME}.json
+endif

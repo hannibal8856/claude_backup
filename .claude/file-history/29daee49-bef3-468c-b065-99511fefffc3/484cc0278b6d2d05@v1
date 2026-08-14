@@ -1,0 +1,407 @@
+# Handoff — SNMP Plan E(2026-08-09)
+
+接續 `~/handoff-snmp-plan-E-getfwd-2026-08-08.md`。
+**操作性交接**:讓新 session 不必重新推導就能繼續。
+
+---
+
+## ⚠️ 接手第一件事
+
+**所有 repo 的 working tree 都 clean,兩個 debug writer 已 commit 並 push(`3f26e2c`)。**
+
+但**第三個 debug writer 還在,使用者已決定移除**:
+`lib_moxa_utility/src/util_shell_cmd.c:168–190` 的 `exec_sh_cmd_time` 區塊。
+**這是待辦 1 的一部分**,詳見「遺留 debug writer」一節(移除前先看它抓到什麼)。
+
+⚠️ 目前 DUT 上跑的 `2026_0808_1743` **仍含全部三個 debug writer** —— 移除只在原始碼,
+尚未重建燒錄。所以這顆 image 量到的所有延遲數字都帶著這份開銷,
+**Plan E 的真實優勢比已量到的更大**。
+
+---
+
+## TL;DR
+
+`+getfwd` 逐行 opt-in 完成並上線(效能回到基準線),`mxrstpdb/` 委派完成
+(**31.0s → 0.658s,47 倍**)。候選篩選改成兩道關卡並重掃,結論是
+**效能路線走到頭了** —— 剩下最好的候選只值 1.3 秒。
+ADR 補到 0017 並納入版控。**下一步應以正確性為理由,不再以效能為理由。**
+
+---
+
+## 現況
+
+| 項目 | 狀態 |
+|---|---|
+| DUT `192.168.127.253` | **partition 1**,BUILD_TIME `2026_0808_1743` |
+| partition 2 | mainline 對照組 `2026_0805_2335`(護欄鎖定,勿覆蓋) |
+| `3rdparty_net_snmp` | branch `snmp-plan-E`,HEAD `e605314`,**已 push** |
+| `plugin_moxa_snmp` | branch `snmp-plan-E`,HEAD `b5e6745`,**已 push** |
+| `moxabuild`(`~/mds4xgl3`) | branch **`snmp-plan-E`**(新開,從 `develop` 分出),HEAD `7a2f421`,**未 push**(ADR 純紀錄) |
+| `.swu` | `~/swu/` 與 `/tftpboot/` 各 5 份,最新 `2026_0808_1743` |
+
+`agentx_owned.list` 目前內容:
+
+```
+ifmibdb/	+getfwd
+stdethdb/
+mxportdb/
+mxrstpdb/
+```
+
+---
+
+## 本輪完成的事
+
+### 1. `+getfwd` 逐行 opt-in(`e605314` + `a7f3b02`,ADR-0014)
+
+自動推導版讓「委派 group 裡每個 RW 欄」都 forward,walk 慢 13.5%。
+改成 `agentx_owned.list` 每行可帶 `+getfwd`,預設關閉。只有 `ifmibdb/` 帶旗標
+—— 出貨版手列的 4 條規則全在該前綴底下,故行為等價。
+
+**連帶修掉一個既有 loader 地雷**:行 buffer 原本等於 prefix 長度(64),長註解被
+`fgets` 切半後續行被當成新 prefix。已 commit 的檔案實際解析出 19 條、**16 條是垃圾**
+(`n`、`er`、`is`、`or`…),剛好都沒撞到真實 URI 前綴 —— **純屬運氣**。
+本輪新增的註解會生出 prefix `s`,命中全部 17 個 `std*db/`。
+修法:拆出 `AGENTX_OWNED_LINE_LEN`(256)+ 吞掉超長行尾巴。
+**改這個檔或 loader 前,先在 host 端跑獨立 parser 小程式驗一次** —— build 不會報錯。
+
+### 2. `mxrstpdb/` 委派(`b5e6745`,ADR-0016)
+
+| | mainline | before(planE) | **after** |
+|---|---|---|---|
+| `.603.3.2` | 30.994s / 235 | 31.9s / 235 | **0.658s / 227** |
+
+RO/RW 分界正好落在子樹邊界(`.1` config 全 RW 留本地、`.2` status 全 RO 委派),
+所以 ADR-0011 的拆表缺陷不適用。不帶 `+getfwd`(config 側本地讀只要 0.41s)。
+
+**完整性**:欄位層級 25 → 27 欄,24 個 accessible 欄位全保留。
+唯一消失的 `.2.1.1.1`(`rstpStatPortIndex`)MIB 標 **`not-accessible`** → 是修正。
+一列 index 由 `13` 變 `29`:ifTable 實際 index 是 `1–12, 29, 130, 131`,**沒有 13**,
+所以 ISS 對。**已知缺陷**:config 表仍用 13、status 表用 29,兩表對同一 port 鍵不一致。
+
+### 3. 候選篩選改兩道關卡(ADR-0015,取代 ADR-0013)
+
+- **關卡一 ISS 涵蓋**(能不能搬):比對 `net_*.h` entry OID 與 ISS `<mod>db.h`,
+  **且只採用有編進 image 的模組**(看 `output/build/app_moxa_iss_10_1_0-custom/` 有無 `.o`)。
+  `mxigmpdb/` 就是在這步從 100% 掉到 0%(ISS 模組沒編)。
+- **關卡二 walk 耗時**(值不值得搬):沿用 ADR-0013。委派後參考單價 **2.7 ms/vb**。
+
+結果:42 支候選 → 可委派 36、部分 2(`std1d1db/` 83%、`mxmacsecdb/` 90%)、
+不可委派 4(`mxigmpdb/`、`fsladb/`、`fscfadb/`、`fsvlandb/`)。
+
+**重掃結論:`mxrstpdb/` 之後沒有大魚。** 最好的 `stdospdb/` 只值 1.33s,
+其餘多在 0.14s 以下。LLDP(981 vb)與 bridge(840 vb)整棵已是 3.6 / 3.1 ms/vb,
+逼近委派後水準 —— 即 ADR-0013 用 `stdladb/` 證明的「ISS 本來就在服務」。
+
+### 4. ADR 0014–0017 + 納入版控
+
+`~/mds4xgl3/.adr/` 共 17 份,已 `git add`(branch `snmp-plan-E`,未 push)。
+
+- **ADR-0014** GET-forward 推導 + `+getfwd` opt-in
+- **ADR-0015** 兩道關卡篩選(**取代 ADR-0013**)
+- **ADR-0016** 委派 `mxrstpdb/`
+- **ADR-0017** 第 1 欄消失在 mainline 也存在(**補正 ADR-0011:134**);
+  完整性一律以「MIB 物件集合」判定
+
+---
+
+## 已確立的判準(最重要,不要再重新推導)
+
+### A. 完整性比「欄位集合」,不比 varbind 總數
+
+本週**兩次**因為只比總數而誤判:dot3 594→581、mxRstp 235→227,兩次都不是回歸。
+
+```bash
+sed 's/ =.*//' walk.txt | sort -u > oid.txt              # OID 集合
+sed 's/\.[0-9]*$//' oid.txt | sort -u > col.txt          # 欄位集合
+comm -23 main_col.txt pe_col.txt                          # 我們少了什麼
+```
+
+### B. 少掉的欄位 → 查 MAX-ACCESS;多出的欄位 → 查 MIB 有沒有定義
+
+**兩個方向都出現過,不能預設哪邊對:**
+
+| 實例 | MIB | 誰對 |
+|---|---|---|
+| mxTurboRingV2 index 欄 | `read-only` | mainline 少回,**我們對** |
+| mxRstp `rstpStatPortIndex` | `not-accessible` | mainline 多回,**我們對** |
+| mxPort `portStatIndex` | `read-only` | mainline 漏實作,**我們對** |
+| mxPort `PortConfigTid` | **MIB 沒定義** | **我們多註冊,不算效益** |
+
+使用者 2026-08-09 明示:**多出來的 OID 一律要確認是 `.mib` 定義的物件而非我們多註冊的,
+並主動回報。**
+
+### C. 量測參數與 root 選擇
+
+- **一律 `-t 5` 帶重試。** `-t 3 -r 0` 會截斷慢的 walk(`mxrstpdb/` 因此被低估 4 倍)。
+- **每個模組只走一個互斥 root。** 子 root 重疊會重複計算(`stdospdb/` 因此被高估 5 倍)。
+  root 與其他模組共用時改逐欄 walk,但逐欄會因來回變多而**高估**
+  (LLDP 逐欄 5.83s vs 整棵 3.51s),不能與 tree 量法並排比較。
+- `snmpwalk` 是**逐 varbind GETNEXT**(pcap 實測 970 req / 970 resp 對應 5×193+5,
+  無 GETBULK)→ **ms/vb 就是每次請求的平均延遲**。程序啟動成本僅 ~9ms,可忽略。
+
+---
+
+## ISS0(framework subagent)的完整鏈路
+
+```
+net_mx_*.h 的 entry(.iss_build = 0)
+  │  ① mapping_reuse.c:315/:356  if (e->iss_build != 0) continue;
+  ▼
+g_reuse_srcs[]  (mapping_reuse.c:76)  ← 逐 group 手列白名單,15 個
+  │  ② build_reuse_table() 展開成逐 OID 的 ies_map
+  ▼
+lib_moxa_ies_auto_mibs::ies_map_count()/entry_at()  →  Rust all_oids() (lib.rs:95)
+  ▼
+snmp_subagent.rs:1451
+  ├─ for g in GROUPS       → register_group()     4 個(表/subtree)
+  └─ for oid in all_oids() → register_instance()  其餘逐 OID(RWRITE)
+```
+
+**分流機制有三種,不是一種**(核實過程式碼):
+
+| 機制 | 適用 | 依據 |
+|---|---|---|
+| 依能力分流 | `trustedIpTable`、`snmpTrapHostTable`、`l3VlanIfTable` | framework **RONLY** + priority 200(`lib_moxa_snmp_agentx/src/agentx.c:93-99`);in-master RWRITE 127 → GET 落 framework、SET 落 in-master |
+| **in-master 退出** | 13 個已註解掉 `MOX_SNMP_INIT_ENTRY` 的 group | 沒有競爭者。含 `mxTurboRingV2`(`ies_auto_mibs_setup.c:377`)、`mx_deviceIO`、`mx_email`、`mx_syslogServer`、`mx_RMON`、`mx_LoginPolicy`、`mx_PasswordPolicy`、6 個 `mx_event_*` |
+| priority | per-OID fallback | in-master 127 贏 framework 200 → 那些註冊不贏 wire |
+
+⚠️ **`mxTurboRingV2` 是 `HANDLER_CAN_RWRITE` 註冊的**(`snmp_subagent.rs:981`),
+不是唯讀 —— 它靠的是 in-master 退出。所以「把 framework 註冊成唯讀就自動分流」
+這個說法**只適用於三張 IterTable**,不能拿來概括。
+
+**ADR-0004 的死碼記載已核實屬實**:`mox_snmp_forward_get_to_framework()` 從未執行
+(PlanE-DBG trace 空白),已於 2026-07-27 移除;全樹 grep 零命中。
+Plan C 的 `mox_snmp_forward_get_to_iss`(iss_build==1)不受影響、保留。
+
+---
+
+## 對 mainline 的量測結果(整棵 walk,PC 端,各 5 次)
+
+| group | mainline 平均 / 最壞 / vb | planE 平均 / 最壞 / vb | 改善 |
+|---|---|---|---|
+| mxRstp `.603.3.2` | 30.994s / 31.037s / 235 | **0.658s** / 0.674s / 227 | **−97.9%** |
+| stdvladb `.17.7.1` | 1.897s / 1.908s / 159 | **0.703s** / 0.717s / 160 | **−63.0%** |
+| stdcipdb `.5.8556.1` | 0.833s / 0.870s / 120 | **0.408s** / 0.434s / 132 | **−51.0%** |
+| ifXTable `.31.1.1` | 1.378s / 1.395s / 285 | **0.796s** / 0.848s / 285 | −42.2% |
+| stdospdb `.14` | 2.434s / 2.469s / 69 | **1.523s** / 1.563s / 70 | −37.5% |
+| ifTable `.2.2` | 1.449s / 1.497s / 330 | **0.906s** / 0.953s / 330 | −37.5% |
+| mxPort `.603.1.1` | 0.871s / 1.260s / 154 | **0.699s** / 0.737s / 193 | −19.8% |
+| dot3 `.10.7` | 1.135s / 1.153s / **329** | 1.577s / 1.610s / **581** | 總時間 +39%,**每 vb −21%** |
+
+多出的 OID 都已依判準 B 查證:dot3 的 252 個(6 物件)全在標準 `EtherLike-MIB.mib`
+且 `read-only`;`stdvladb/` `stdcipdb/` `stdospdb/` 多出的也都是標準 MIB 定義的;
+**只有 mxPort 的 12 個 `PortConfigTid` 是 MIB 外的**。
+
+---
+
+## 🔎 2026-08-09 下半場的新發現(全部已完成查證)
+
+### A. 根因:in-master 註冊表縮小,不是 AgentX 服務比較快
+
+原待辦 1 已完成。`stdvladb/` / `stdcipdb/` / `stdospdb/` 三個 group **沒有被委派也沒搬到
+framework**(`iss_build == 1`,走 ISS 檔案往返),卻比 mainline 快 38–66%。
+
+**排除法(每步都有證據):**
+
+| 假設 | 排除依據 |
+|---|---|
+| 網路差異 | ❌ DUT **本機** localhost 量,差距一樣(−66.4 / −57.5 / −38.1%) |
+| framework readpath(ADR-0007/0008) | ❌ 三者 `iss_build==1`,根本不走 framework |
+| ISS 取值路徑被改寫 | ❌ `develop..HEAD` diff 對 `iss_value_file` / `ChkEntryGetValue` / `get_value_from_file` **零改動** |
+| debug trace 在 mainline 開著 | ❌ 走一次 walk 前後 `debug_log_5` **delta = 0** |
+
+**結論(強推論)**:`MOX_SNMP_INIT_ENTRY` 仍註冊數 mainline **67** vs planE **54**;
+Plan E 從 in-master 移走 **約 710 個註冊**(13 個註解掉的 group 共 597 entry
++ agentx_owned RO skip 約 113)。`snmpwalk` 逐 varbind 發 GETNEXT,每次都要
+`netsnmp_subtree_find_next()` 在排序的 subtree 串列裡查找,**串列變短 → 每次 GETNEXT 都變便宜**
+→ 連完全沒被搬走的 group 也受惠。
+
+佐證:所有 varbind 數相同的 tree 量法 group,planE/mainline 時間比一致落在 **0.38–0.70**
+(`mxdualdb/` 0.38、`mxpsspdb/` 0.45、`mxmabdb/` 0.51、`ifXTable` 0.56、`ifTable` 0.67…)。
+
+⚠️ **未直接 instrument `netsnmp_subtree_find_next()`,所以是強推論不是直接證據。**
+**尚未排除的替代解釋:兩顆 image 的編譯器旗標/最佳化等級是否相同(未驗證)。**
+
+**要變成直接證據的做法**(建議做,約 30 分鐘,不需 12 package 全鏈):
+從 `snmp-plan-E` 只 revert `ies_auto_mibs_setup.c` 的 13 個註解、其餘全留,重建一顆對照
+image,量同樣的 group。若速度回到 mainline 水準 → 機制證實。
+
+### B. ISS0 → AgentX 的實測:有提升,但不比「沒搬的」多
+
+三個**完全搬遷**的 iss0 group(in-master 已註解掉,framework 服務),各 5 次 walk,
+pcap 逐回應延遲(`~/WORK/SNMP_50ms/tools/latency_stats.sh <pcap> 50`):
+
+| group | | n | avg | worst | >50ms |
+|---|---|---|---|---|---|
+| evtSwitching `.602.7.1.3.1` | mainline | 965 | 13.9 ms | 42.1 ms | 0.00% |
+| | **planE** | 965 | **8.9 ms** | **23.3 ms** | 0.00% |
+| evtGeneral `.602.7.1.1.1` | mainline | 455 | 16.7 ms | 40.3 ms | 0.00% |
+| | **planE** | 455 | **13.5 ms** | **28.8 ms** | 0.00% |
+| evtPort `.602.7.1.2.1` | mainline | 695 | 8.4 ms | 72.6 ms | **0.86%** |
+| | **planE** | 1415 | **4.9 ms** | **56.1 ms** | **0.14%** |
+
+pcap 在 `~/pcap/2026-08-09_{evtSwitching,evtGeneral,evtPort}_{planE,mainline}.pcap`。
+
+**關鍵判讀**:改善幅度 −19%~−42%,**落在甚至低於「完全沒搬遷」那批的 −30%~−62%**。
+→ **目前沒有證據顯示「搬到 AgentX」本身帶來超出註冊表縮小的額外好處。**
+對 iss0 這條路,AgentX 的價值在架構統一與可維護性,**不在速度**。
+真正靠 AgentX 拿到量級改善的是 **ISS 委派**(mxRstp 31.0s → 0.658s),不是 iss0 → framework。
+
+### C. evtPort 多出 24 欄是 MIB 未定義的(第二個實例)
+
+evtPort:mainline 49 欄 → planE **73 欄**,mainline 有而 planE 沒有 = 0。
+多出的 24 欄全部是 **`chainProtectEvent`**(`.602.7.1.2.1.8` / `.9`,chainProtectOn/Off)。
+**全樹 `snmp_moxa_mib/` 搜 `chainProtect` 零命中** → 與 mxPort 的 `PortConfigTid` 同類,
+**是我們多註冊的,不算效益**。
+
+這是第二個實例,兩次都出現在「多出來」那側 → 使用者的規則(多出的 OID 一律查 MIB)
+確實有必要。
+
+### D. 遺留 debug writer(mainline 沒有,只在 `snmp-plan-E`)
+
+| 位置 | 寫到 | 觸發頻率 | commit | 狀態 |
+|---|---|---|---|---|
+| `net-snmp-5.9.3/snmplib/snmp_client.c:130` | `/run/util_debug/sssssss` | **每次 `snmp_pdu_create()`** | `22bb079` | **已刪,未 commit** |
+| `ies-auto-mibs/ies_auto_mibs.c:2209` | `/run/util_debug/ggggggg` | **每次 ISS 取值**(`entry_handle_generate_iss_value_file`) | `de8c606` | **已刪,未 commit** |
+| `lib_moxa_utility/src/util_shell_cmd.c:171` | `/run/util_debug/exec_sh_cmd_time` | 每次外部命令 | `be7dfe6` | **⬅ 待 reopen 4 移除(使用者 2026-08-09 決定)** |
+
+**單次 `stdvladb/` walk(160 varbinds)實測三個檔的增長:**
+
+| 檔案 | 增長 | 換算 |
+|---|---|---|
+| `ggggggg` | 10,450 B | ~65 B/varbind |
+| `sssssss` | 6,392 B | ~40 B/varbind |
+| `exec_sh_cmd_time` | 241 B | 每次外部命令(量級小 40 倍) |
+
+`/run` 是 **202 MB tmpfs,目前用 1.0 MB**。前兩個各約 40–65 B/varbind ——
+一次全樹 walk(約 1 萬 varbind)就 ~1 MB,網管系統持續輪詢**一天內可能填滿 tmpfs**。
+
+**`exec_sh_cmd_time` 移除前要知道它正在抓什麼**(移除後這個觀測點就沒了):
+
+```
+pid=1323 elapsed=15.000994 ms
+cmd=/bin/iss_snmp_makeup_index /moxa/run/auto_mibs/stdvladb_dot1qFdbTable_tbl
+    /moxa/run/auto_mibs/stdvladb_dot1qFdbTable_tbl_result 765 1.3.6.1.2.1.17.7.1.2.1.1.
+```
+
+**SNMP walk 過程中會 fork+exec 外部程式,單次 15 ms**,而且正好是 `stdvladb/`
+—— 那三個「變快」group 之一。這是架構文件「③ 啟動外部程式」慢路徑的直接實證,
+也可能與 `mx_device_io` 每輪第一次 stall 10 秒有關。
+使用者已決定移除;若日後要重查那兩件事,記得這個工具存在過(commit `be7dfe6`)。
+
+⚠️ **一個已更正的旁證**:先前曾從檔案 mtime 推測「ISS value-file 路徑沒被 walk 走到」,
+**那是錯的** —— 檔案在切 partition 重開機後歸零,mtime 只反映該次開機。
+before/after 實測證實 `ggggggg` 一次 walk 就長 10 KB,**ISS 路徑每次都走**。
+此更正不影響發現 A 的結論(那是靠 localhost 對比與排除法得到的)。
+
+DUT 實測:`ggggggg` 176KB、`sssssss` 68KB 且持續增長。**`/run` 是 tmpfs,吃 RAM,無上限。**
+
+前兩個是同一輪 debug 的遺留(`OOXX!` 標記、每次呼叫 fopen/fprintf/fclose),已依使用者指示刪除;
+全樹 grep `OOXX` 已零命中。**第三個沒動** —— 它性質不同(static `FILE*` + line buffering、
+記錄每個 shell 命令精確耗時),看起來是刻意的量測工具,且可能還在用於
+`mx_device_io` 每輪第一次 stall 10 秒的調查。**要刪需先問使用者。**
+
+含意:Plan E **背著這些額外開銷還快 38–66%**,真實差距比量到的更大。
+
+---
+
+## 待辦(依重要性)
+
+### 1. ⭐ 移除 `exec_sh_cmd_time`,並建對照組驗證根因
+
+前兩個 debug writer **已 commit 並 push**(`3f26e2c`),`3rdparty_net_snmp` working tree clean。
+
+兩件事可以合成一輪:
+
+1. **移除第三個 debug writer**:`lib_moxa_utility/src/util_shell_cmd.c:168–190` 的
+   `exec_sh_cmd_time` 區塊(使用者 2026-08-09 決定移除)。注意 `lib_moxa_utility`
+   是**另一個 repo**,branch 也是 `snmp-plan-E`,commit `be7dfe6` 引入。
+   移除後那個「fork+exec 15 ms」的觀測點就沒了 —— 見發現 D 的說明。
+   `lib_moxa_utility` 在建置序列的第一個(`make lib_moxa_utility-rebuild`),
+   改它要走 12 package 全鏈。
+2. **同一輪順便建根因對照組**(見發現 A):從 `snmp-plan-E` 只 revert
+   `ies_auto_mibs_setup.c` 的 13 個註解、其餘全留 → 建 image → 量
+   `stdvladb/` `stdcipdb/` `stdospdb/`。若速度回到 mainline 水準,註冊表假說成立。
+   **注意這顆是實驗用,不要覆蓋 p2 對照組。**
+
+建置序列(只改 C,不含 rust plugin):
+`make 3rdparty_net_snmp-rebuild && make` —— 但要確認 `lib_moxa_ies_auto_mibs` 是否需連帶重建。
+保守起見用 memory `project_build_seq_needs_3rdparty_net_snmp` 的 12 package 全鏈(約 40 分鐘)。
+
+### 2. `agentx_owned.list` 後續委派改以正確性為理由
+
+效能路線已到頭(ADR-0015 Consequences)。值得看的:
+
+| 項目 | 性質 |
+|---|---|
+| `mxrstpdb/` config/status index 不一致(13 vs 29) | ADR-0016 記的已知缺陷,正確性問題 |
+| `mxmacsecdb/` 90%、`std1d1db/` 83% | 委派會掉 OID,先查那幾欄的 MAX-ACCESS |
+| `vrrpdb/` / `vrrp3db/` 缺標準 MIB | 依 ADR-0010 不得委派,須先補 VRRP-MIB / VRRPv3-MIB |
+| 空表候選(`stdcipdb/` 等) | 可用 moxash 開功能填資料再驗 |
+
+### 3. outline CIC 簡報文件
+
+主要工作檔:`~/WORK/SNMP_50ms/outline_CIC/confluence-snmp-agentx-v1.md`
+(另有 handoff `session-handoff-snmp-confluence-doc-2026-08-08.md`)
+
+本輪已加:
+- `## 先講結果` → `### 另一個維度:整棵 MIB 走完的時間`(4 個 group 的 walk 對照)
+- `### 附帶效益` → mxPort 39 個 varbind 的組成說明(27 算數、12 是 `PortConfigTid`)
+- 兩節數字的對帳註記(**發表前應統一成同一次量測**)
+
+未做:
+- `### 機制二:framework 自建 subagent` 若要展開講分流原理,**要寫成上面那三種機制**,
+  不能簡化成「註冊成唯讀就自動分流」—— 一看 `mxTurboRingV2` 的 RWRITE 註冊就對不上。
+- dot3 的 +252 查證結果(使用者明示**不放進** outline CIC)
+- **⚠️ 歸因問題(重要)**:發現 A 之後,「導入 AgentX 的效益」不能涵蓋
+  `stdvladb/` 那類未搬遷 group 的加速。正確說法是「搬走 710 個 in-master 註冊之後,
+  連未搬遷的 MIB 也普遍快 30–62%」。這其實**更好賣**(整台機器都受惠),
+  但講錯機制的話,任何人一問「`stdvladb/` 走 AgentX 嗎」就會破功。
+  **在對照組(待辦 1)做完之前,不要把這段寫死進文件。**
+- 發現 B(iss0 → AgentX 速度提升不比未搬遷的多)要不要揭露,以及怎麼寫,待決定。
+
+### 4. 其他(較低優先)
+
+- `moxabuild` 的 ADR commit 未 push(使用者說 ADR 純紀錄不用 push)
+- `~/mds4xgl3` 還有 untracked:`.claude/`、`.agents/`、`tools/`、`__pycache__/`、
+  `rust_clippy_*` —— 未處理,不在交辦範圍
+- `mx_device_io` 每輪第一次請求 stall ~10 秒(outline CIC 文件記為最優先待解)
+
+---
+
+## 環境陷阱(本輪新踩到的)
+
+- **`until ! pgrep -f "<字串>"` 會匹配到自己的 wrapper shell** —— 那個 wrapper 的
+  cmdline 含完整指令。用字元類別打斷字面匹配:`pgrep -f "make plugin[_]moxa_snmp"`。
+- **`run_in_background: true` 的 `sleep` 不會阻塞本回合**,會立刻返回並在背景睡。
+  要真的等,用前景 Bash + 長 timeout,或 `until <條件>; do sleep N; done`。
+- **`| wc -l`、`grep -c` 會被 shell hook 改寫**產生雜訊輸出。用 `awk 'END{print NR}'`。
+- 燒錄一輪約 15 分鐘(scp 65MB + swupdate 寫兩個分割區 + sha256 驗證)。
+  `flash.exp` 的 swupdate timeout 是 900s。輸出是 block-buffered,結束前 log 是空的。
+- 前一輪的建置序列(12 package)約 40 分鐘,含 HSM 簽章 CI pipeline(會自動跑完)。
+  **只改 `agentx_owned.list` 不需要 C 重編**,`plugin_moxa_snmp-rebuild` →
+  `rust_moxa_build-rebuild` → `make` 即可,約 20 分鐘。
+
+---
+
+## 護欄(不因授權放寬)
+
+- 燒錄一律**從 mainline(p2)那側**跑,`--protect 2` 與
+  `--control-build 2026_0805_2335` 維持開啟,寫入 partition 1。
+- 燒錄前一定先跑 stage 1(不帶 `--flash`)並確認
+  `will WRITE: partition 1` + `control: running the expected control group`。
+- 切 partition(`fwr_change.sh`)不具破壞性,量測用可自由來回。
+
+---
+
+## 產出索引
+
+| 類別 | 位置 |
+|---|---|
+| ADR(17 份) | `~/mds4xgl3/.adr/`,git branch `snmp-plan-E`(未 push) |
+| 工具 | `~/mds4xgl3/tools/` — `walkmeasure.sh`、`dutroot.exp`、`getpcap.exp`、`lat.py`、`iss_roots.txt` |
+| 簡報文件 | `~/WORK/SNMP_50ms/outline_CIC/` |
+| `.swu`(5 份) | `~/swu/` 與 `/tftpboot/` |
+| build log | `~/build_getfwd_optin.log`、`~/build_mxrstp.log`、`~/flash_1743.log` |
+| memory | 已更新;新增「parser 地雷」「委派完整性用 MIB 判」「多出的 OID 要查 MIB」三則 |

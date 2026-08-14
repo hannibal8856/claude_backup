@@ -1,0 +1,206 @@
+#!/bin/bash -x
+BUILDROOT_VARS="${BUILD_DIR}/printvars"
+TIMESEC=$(date +%s)
+TIMEFORMAT=${TIMEFORMAT:-"+%Y_%m%d_%H%M"}
+BUILDTIME=$(date --date="@$TIMESEC" $TIMEFORMAT)
+FWR_VERSION_PATH=
+
+### Extract Variables in Buildroot
+rm ${BUILDROOT_VARS}
+make -s -C ${BR2_CONFIG%/*} printvars VARS=% > ${BUILDROOT_VARS}
+
+eval $(grep ^TOPDIR= ${BUILDROOT_VARS})
+eval $(grep ^TARGET_DIR= ${BUILDROOT_VARS})
+eval $(grep ^BUILD_DIR= ${BUILDROOT_VARS})
+eval $(grep ^BR2_MOXA_PRODUCT_NAME= ${BUILDROOT_VARS})
+eval $(grep ^BR2_MOXA_PRODUCT_VERSION= ${BUILDROOT_VARS})
+eval $(grep ^BR2_MOXA_PRODUCT_MODEL= ${BUILDROOT_VARS})
+eval $(grep ^STAGING_DIR= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_PLUGIN_MOXA_TIME= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_AUDIT= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_3RDPARTY_OPENSSH_7_4= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_NTP_NTPD= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_SYSTEMD= ${BUILDROOT_VARS})
+eval $(grep ^BR2_MOXA_HSM_SIGN= ${BUILDROOT_VARS})
+eval $(grep ^BR2_EXTERNAL_MOXA_PATH= ${BUILDROOT_VARS})
+eval $(grep ^HOST_DIR= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_ZSH= ${BUILDROOT_VARS})
+eval $(grep ^BR2_MOXA_OPTIMIZE_ROOTFS_SIZE= ${BUILDROOT_VARS})
+eval $(grep ^BR2_PACKAGE_APP_MOXA_DAST= ${BUILDROOT_VARS})
+eval $(grep ^LINUX_DIR= ${BUILDROOT_VARS})
+
+### Making FWR_VERSION and BUILD_TIME
+VERSION_PATH=${TARGET_DIR}/etc/moxa/version
+FWR_VERSION_PATH=${VERSION_PATH}/FWR_VERSION
+BUILD_TIME_PATH=${VERSION_PATH}/BUILD_TIME
+mkdir -p ${VERSION_PATH}
+echo -n ${BR2_MOXA_PRODUCT_VERSION} > ${FWR_VERSION_PATH}
+echo "Build Time: "${BUILDTIME}
+echo -n ${BUILDTIME} > ${BUILD_TIME_PATH}
+
+### Copy Product Config to DUT
+CFG_NAME=FWR_${BR2_MOXA_PRODUCT_NAME}_v${BR2_MOXA_PRODUCT_VERSION}_${BUILDTIME}.config
+${TOPDIR}/moxa/gen_prdcfg_with_commit_rev.sh
+mv ${BINARIES_DIR}/product_config ${BINARIES_DIR}/${CFG_NAME}
+cp ${BINARIES_DIR}/${CFG_NAME} ${TARGET_DIR}/etc/moxa/
+
+### Backup Kernel Config to BINARIES_DIR
+KERNEL_CFG_NAME=FWR_${BR2_MOXA_PRODUCT_NAME}_v${BR2_MOXA_PRODUCT_VERSION}_${BUILDTIME}.kernel.config
+cp ${LINUX_DIR}/.config ${BINARIES_DIR}/${KERNEL_CFG_NAME}
+cp ${BINARIES_DIR}/${KERNEL_CFG_NAME} ${TARGET_DIR}/etc/moxa/
+
+### Making HW revision for model
+HWREV_PATH=${TARGET_DIR}/etc/hwrevision
+echo "${BR2_MOXA_PRODUCT_MODEL} 0.0" > ${HWREV_PATH}
+
+### Copy zic from host tool-chain to target
+if [ "${BR2_PACKAGE_PLUGIN_MOXA_TIME}" == "y" ]; then
+    cp ${STAGING_DIR}/sbin/zic ${TARGET_DIR}/sbin
+fi
+
+### Remove service files from Audit's target in order to eliminate unnecessary messages during startup
+if [ "${BR2_PACKAGE_3RDPARTY_OPENSSH_7_4}" == "y" ] && [ "${BR2_PACKAGE_AUDIT}" == "y" ]; then
+    TARGET_USR_LIB_SYSTEMD_DIR=${TARGET_DIR}/usr/lib/systemd/system
+    TARGET_ETC_SYSTEMD_DIR=${TARGET_DIR}/etc/systemd/system
+    rm -f ${TARGET_USR_LIB_SYSTEMD_DIR}/auditd.service
+    rm -f ${TARGET_USR_LIB_SYSTEMD_DIR}/systemd-journald-audit.socket
+    rm -f ${TARGET_USR_LIB_SYSTEMD_DIR}/sockets.target.wants/systemd-journald-audit.socket
+    rm -f ${TARGET_ETC_SYSTEMD_DIR}/multi-user.target.wants/auditd.service
+fi
+
+if [ "${BR2_PACKAGE_NTP_NTPD}" == "y" ]; then
+    rm -f ${TARGET_DIR}/etc/systemd/system/multi-user.target.wants/ntpd.service
+fi
+
+### Force systemd reset sysrq value to 0 which means force to disable sysrq
+if [ "${BR2_PACKAGE_SYSTEMD}" == "y" ]; then
+    sed -i 's/kernel.sysrq = 16/kernel.sysrq = 0/' ${TARGET_DIR}/usr/lib/sysctl.d/50-default.conf
+fi
+
+### Force remove systemd-analyze to optimize rootfs size
+if [ "${BR2_MOXA_OPTIMIZE_ROOTFS_SIZE}" == "y" ]; then
+    rm -f ${TARGET_DIR}/usr/bin/systemd-analyze
+    rm -f ${TARGET_DIR}/usr/sbin/unbound-control
+    rm -f ${TARGET_DIR}/usr/sbin/unbound-checkconf
+    rm -f ${TARGET_DIR}/usr/sbin/unbound-anchor
+    rm -f ${TARGET_DIR}/usr/sbin/unbound-control-setup
+    rm -f ${TARGET_DIR}/usr/sbin/unbound-host
+fi
+
+### Change Root Shell to zsh
+if [ "${BR2_PACKAGE_ZSH}" == "y" ]; then
+    sed -i '/^root:/s,:/bin/sh$,:/bin/zsh,' ${TARGET_DIR}/etc/passwd
+    sed -i '/^root:/s,:/bin/dash$,:/bin/zsh,' ${TARGET_DIR}/etc/passwd
+
+    ### Profile for zsh
+    echo "TERM=xterm" > ${TARGET_DIR}/root/.zshrc
+    echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" >> ${TARGET_DIR}/root/.zshrc
+fi
+
+### Get HSM Account
+if [ "${BR2_MOXA_HSM_SIGN}" == "y" ]; then
+	. ${BR2_EXTERNAL_MOXA_PATH}/board/net/common/hsm_tool/hsm_account.sh set
+fi
+
+### Compile target python py to pyc, currently we only focus on /etc/moxa folder under target_dir
+if [ "${BR2_PACKAGE_PYTHON3_PY_PYC}" == "y" ]; then
+    PYTHONPATH="${PYTHON3_PATH}" \
+    ${HOST_DIR}/bin/python${PYTHON3_VERSION_MAJOR} \
+    ${TOPDIR}/support/scripts/pycompile.py \
+    ${TARGET_DIR}/etc/moxa
+fi
+
+### Add retry to sshd.service
+if [ -f ${TARGET_DIR}/lib/systemd/system/sshd.service ]; then
+    # clear prvious insert
+    sed -i -z 's/KillMode=process\nRestart=on-failure\nRestartPreventExitStatus=255\nType=notify\n//g' ${TARGET_DIR}/lib/systemd/system/sshd.service
+    # insert retry
+    sed -i '9iKillMode=process\nRestart=on-failure\nRestartPreventExitStatus=255\nType=notify' ${TARGET_DIR}/lib/systemd/system/sshd.service
+fi
+
+### Change sshd.server systemd dependency
+if [ -f ${TARGET_DIR}/lib/systemd/system/sshd.service ]; then
+    # clear prvious insert
+    sed -i 's/ system_ready.service//g' ${TARGET_DIR}/lib/systemd/system/sshd.service
+
+    # Postpond sshd.service after system_ready.service to enhance boot-up time
+    sed -i 's/After=syslog.target network.target auditd.service/After=syslog.target network.target auditd.service system_ready.service/g' ${TARGET_DIR}/lib/systemd/system/sshd.service
+fi
+
+if [ "${BR2_PACKAGE_APP_MOXA_DAST}" == "y" ]; then
+    APP_MOXA_DAST_INSTALL_DIR=${TARGET_DIR}/usr/share/dast_runner/
+    APP_MOXA_DAST_DIR=${BUILD_DIR}/app_moxa_dast-custom
+    GEN_DAST_LIST_PYTHON=${APP_MOXA_DAST_DIR}/app/gen_dast_list/main.py
+    GEN_DAST_LIST_CFG=${APP_MOXA_DAST_INSTALL_DIR}/config/cfg_nos.yml
+    BIN_LIST_DAST_FILE=${APP_MOXA_DAST_INSTALL_DIR}/config/dast_binary_list.yml
+    BIN_LIST_FULL_FILE=${BINARIES_DIR}/target_install_executable_list.yml
+
+    # Run with buildroot host-python
+    python3 ${GEN_DAST_LIST_PYTHON} \
+            --cfg ${GEN_DAST_LIST_CFG} \
+            --in_bin_file ${BIN_LIST_FULL_FILE} \
+            --out_bin_file ${BIN_LIST_DAST_FILE} || exit_code=$?
+    if [ "${exit_code}" -ne "0" ]; then
+        echo ${exit_code}
+        exit 1
+    fi
+fi
+
+### Check if Rust packages dependencies are consistent between Cargo.toml and buildroot pkg.mk
+exit_code=0
+python3 ${TOPDIR}/moxa/check_rust_pkg_br_dependency.py ${TOPDIR} || exit_code=$?
+if [ "${exit_code}" -ne "0" ]; then
+    echo ${exit_code}
+    exit 1
+fi
+
+### Check if all Rust packages are scanned for Clippy
+if [ "${RUST_CLIPPY_SCAN_CONFIG}" == "true" ]; then
+    # Temporary disable debug mode to suppress the output
+    set +x
+    RUST_DUMMY_PKG_TOML_KEYWORD="Automatically generated by rust_moxa_create_dummy_package.sh"
+    RUST_PKG_TOML_DIRS=$(find ${BUILD_DIR} -type f -name 'Cargo.toml' \( -path '*_moxa_*' -o -path '*3rdparty_*' \))
+    RUST_PKGS=()
+    for rust_pkg_toml in ${RUST_PKG_TOML_DIRS}; do
+        pkg_name=$(echo "${rust_pkg_toml}" | sed -E 's|-custom||;s|^'"${BUILD_DIR}"'/||' | awk -F'/' '{print $1}')
+        if grep -q "${RUST_DUMMY_PKG_TOML_KEYWORD}" "${rust_pkg_toml}"; then
+            echo "Dummy package \"${pkg_name}\" is ignored for Rust Clippy scan."
+        else
+            RUST_PKGS+=("${pkg_name}")
+        fi
+    done
+
+    RUST_PKGS_SCANNED=$(find ${TOPDIR}/output/images/cargo -type f -name '*.json')
+
+    # 1) Every application package whose pkg.mk exports a scan result must have produced its json
+    APP_PKGS=$(grep -rl 'rust_clippy_scan_result' ${BR2_EXTERNAL_MOXA_PATH}/package --include='*.mk' | xargs -rn1 basename | sed 's/\.mk$//')
+    PKG_NOT_SCANNED=()
+    for pkg in ${APP_PKGS}; do
+        [ -d "${BUILD_DIR}/${pkg}-custom" ] || continue
+        if ! echo "${RUST_PKGS_SCANNED}" | grep -q "/cargo/${pkg}/"; then
+            PKG_NOT_SCANNED+=("${pkg}")
+        fi
+    done
+    if [ ${#PKG_NOT_SCANNED[@]} -ne 0 ]; then
+        echo "Error: The following application packages did not produce a Rust Clippy scan result."
+        echo "       Please check their rust_clippy_scan target."
+        for pkg in "${PKG_NOT_SCANNED[@]}"; do
+            echo "  - ${pkg}"
+        done
+        exit 1
+    fi
+
+    # 2) Informational only: list Rust libraries not referenced by any application
+    #    closure scan. A library only gets linted through the applications that
+    #    depend on it, so an unreferenced library is not an error.
+    #    ("<pkg>-custom" matches normal path deps; "/<pkg>#" matches workspace
+    #     members reached through a symlink, e.g. rust_moxa_build members)
+    for pkg in ${RUST_PKGS[@]}; do
+        if ! grep -q -e "${pkg}-custom" -e "/${pkg}#" ${RUST_PKGS_SCANNED} 2>/dev/null; then
+            echo "Note: Rust package \"${pkg}\" is not referenced by any application, no Clippy scan covers it."
+        fi
+    done
+    set -x
+fi
+
+exit 0

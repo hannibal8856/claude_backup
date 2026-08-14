@@ -1,0 +1,88 @@
+============================================================
+Repository: 3rdparty_net_snmp
+============================================================
+Current branch: snmp-plan-E
+Current commit: 798e5f0
+
+Working tree: DIRTY
+ M ies-auto-mibs/ies_auto_mibs.c
+
+============================================================
+Repository: app_moxa_iss_10_1_0
+============================================================
+Current branch: snmp-plan-E
+Current commit: 8baa185cf
+
+Working tree: clean
+
+============================================================
+Repository: lib_moxa_utility
+============================================================
+Current branch: snmp-plan-E
+Current commit: 4e32be8
+
+Working tree: clean
+
+============================================================
+Repository: plugin_moxa_snmp
+============================================================
+Current branch: snmp-plan-E
+Current commit: 376fa49
+
+Working tree: clean
+
+============================================================
+Repository: app_moxa_fiber_check
+============================================================
+Current branch: snmp-plan-E
+Current commit: 630a991
+
+Working tree: clean
+
+============================================================
+Repository: plugin_moxa_fiber_check
+============================================================
+Current branch: snmp-agentx
+Current commit: d277473
+
+Working tree: clean
+
+============================================================
+Repository: app_moxa_framework
+============================================================
+Current branch: snmp-plan-E
+Current commit: e27e5fc
+
+Working tree: clean
+
+============================================================
+Repository: lib_moxa_rust_snmp_agentx
+============================================================
+Current branch: snmp-plan-E
+Current commit: 13fe696
+
+Working tree: clean
+
+============================================================
+Repository: lib_moxa_ies_auto_mibs
+============================================================
+Current branch: snmp-plan-E
+Current commit: 16a9c68
+
+Working tree: clean
+
+============================================================
+Repository: lib_moxa_rust_ies_auto_mibs
+============================================================
+Current branch: snmp-plan-E
+Current commit: 579deef
+
+Working tree: clean
+
+============================================================
+Repository: plugin_moxa_system_information
+============================================================
+Current branch: snmp-plan-E
+Current commit: f7543c1
+
+Working tree: clean

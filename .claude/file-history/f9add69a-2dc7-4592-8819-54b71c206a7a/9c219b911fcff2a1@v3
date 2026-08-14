@@ -1,0 +1,249 @@
+# Handoff — SNMP AgentX 簡報文件(2026-08-11)
+
+取代 `session-handoff-2026-08-10.md`。**該份已過時,不要讀** —— 裡面的關鍵數據與 Confluence 流程都已改變。
+
+---
+
+## 1. 在做什麼
+
+替使用者撰寫一份 **Confluence 頁面**,主題是「用 AgentX 優化 SNMP GET 效能」,**使用者會拿去向主管簡報**(聽眾另有 RD / SQA / PM)。
+
+這是文件工作,但**所有數字都必須有實測依據**。這一輪已經因為數字不夠嚴謹而砍掉重練過一次(見 §6)。
+
+---
+
+## 2. ⚠️ Confluence 現在的狀態 —— 最重要的一節
+
+**頁面已經被使用者 review 過,不可以整頁刪除重貼。**
+
+- 使用者原本同意整份重貼,**後來明確收回**:「Conluence那邊已經review過, 全部刪掉怕會有問題」。
+- **`confluence-PATCH-2026-08-10.md`(B0–B10)已經作廢** —— 它產生於 8/10 13:01,之後文件被大幅改寫(頭條整個換掉、Performance 整節重寫、FAQ 從 3 則變 9 則、Appendix B/C 重寫)。**不要拿它去比對,可以刪掉。**
+- **不確定使用者套用了哪些 B0–B10 區塊**,所以無法從假設出發產生補丁。
+- **約定的作法**:使用者會再匯一份 PDF 給你(跟 8/10 那次一樣),你**逐節 diff 現況與 `confluence-snmp-agentx-CLEAN.md`,只產真正有差異的區塊與插入位置**。
+- 使用者說「我等下提供1, 但是還有一些要請您修改」—— 也就是**先把內容改完,最後才匯 PDF 產清單**。中途匯出的版本會馬上過期。
+
+**PDF 的已知失真**:匯出時**所有 code block 內的中文字會被吃掉**(等寬字型沒有 CJK glyph)。已實測。所以 code block 的內容一律以 `confluence-snmp-agentx-v1.md` 為準,不可用 PDF 判斷是否遺漏。
+
+**貼上方式**(Confluence 是 **Data Center 不是 Cloud**):Insert → Markup(`Ctrl+Shift+D`)→ 選 **Markdown**。
+
+**整頁重貼才需要的收尾**(現在用不到,但記著):三張圖要重新插入、刪掉兩處 `【此處插入彩色架構圖】` 與底下的 ASCII 圖、FAQ 九則要包 Expand macro、刪掉 FAQ 開頭那句工作備註。
+
+---
+
+## 3. 檔案與工具
+
+全部在 `~/WORK/SNMP_50ms/outline_CIC/`:
+
+| 檔案 | 用途 |
+|---|---|
+| **`confluence-snmp-agentx-v1.md`** | **工作版,改內容改這份** |
+| **`confluence-snmp-agentx-CLEAN.md`** | 貼上版,**由 `make_clean.py` 產生,不要手改** |
+| **`make_clean.py`** | 產生 CLEAN。含清理規則 + **標題層級上調**(拿掉檔頭 H1,其餘各升一級,fence 內的 `#` 不動)|
+| `confluence-PATCH-2026-08-10.md` | **已作廢** |
+| `*.drawio` ×3 | 四條路 / 收斂後兩條 / 重用組成 |
+| `*.bak-*` | 每次大改前的備份(`outline_CIC/` **未納入版控**,備份是唯一的退路)|
+
+工具在 `~/WORK/SNMP_50ms/tools/`:
+
+| 工具 | 用途 |
+|---|---|
+| `latency_stats.sh <pcap>` | 由 pcap 算 平均 / 最壞 / >50 ms 佔比(整體)|
+| **`latency_stats_bygroup.sh <pcap>`** | **本輪新增。** 同上但**分三組監控情境**。已用 7/08 那份 AgentX pcap 驗證過,重算結果與既有數字吻合 |
+| `drawio_audit.py` | 圖表版面稽核 |
+
+**量測腳本**:`~/WORK/SNMP_50ms/test_snmp_get_loop.sh`(三組監控 OID 的迴圈壓測)。
+
+**量測 skill**:`~/.claude/skills/measure-snmp-walk/` —— **量任何數字之前先用它**。含 `walk.sh`(交錯量測、varbind 數不一致直接判 INVALID)與 `fwdcheck.sh`(pcap 判定是否真的走 AgentX,正負對照必填)。
+
+---
+
+## 4. 硬規則(違反會被退回)
+
+1. **所有數字必須有實測依據。** 版本歸屬要標清楚,**NOS v5.x 與 NOS 7 的數據不可混用或相減**。
+2. **報告不提 ADR。** `~/mds4xgl3/.adr/` 照常維護,但報告不引用、不出現 ADR 編號。
+3. **不提 Plan C / Plan D,只講 Plan E。** 圖與文字都不出現 Plan 編號。
+4. **效能一律用「平均 / 最壞 / 超過 50 ms 佔比」**,對外**不用中位數**。
+5. **完整性用「MIB 定義的欄位」比,不用 varbind 總數。** varbind 會隨埠數與 index 編碼變動。
+6. **基準線必須交錯量測**(A → B → A2),不可分別在不同時段各量一次就相減。
+7. **「有沒有走 AgentX」必須由封包判定**,回得到值不算數;要正對照 + 負對照。
+8. **同一份資料不重複出現。** 使用者明確要求過(壓測結果只留在「先講結果」,其他地方引用)。
+
+---
+
+## 5. 架構的正確說法
+
+**收斂目標:四條路 → 兩條**
+
+| 原本 | 收斂後 |
+|---|---|
+| ① 在 snmpd 內取值 / 呼叫 shared library | **維持原狀**(ns 等級)|
+| ② 問 ISS | **AgentX**(ISS subagent)|
+| ③ 問 framework | **AgentX**(framework subagent)|
+| ④ dlmod 模組 | **AgentX**(併入 framework subagent)|
+
+判斷規則一句話:**資料在 snmpd 行程內的就留在 snmpd,在別的行程的一律走 AgentX。**
+
+**GET / SET 分流的正確機制(這一輪推導修正過)**:分流**發生在開機註冊那一刻**,不是請求進來時。
+- 唯讀欄位命中前綴 → **本地完全不註冊** → 註冊表只剩 subagent 一筆 → GET 走 AgentX。
+- 可寫欄位 → **本地一律註冊**,而那筆同時具備讀寫能力 → **GET 與 SET 都留在本地**。
+- **能力閘門(`agent_handler.c:599/610`)的角色是防呆,不是路由** —— 它只讓被選中的那筆拒絕,**不會轉給別人**。
+- **不要用相同 namelen 雙重註冊** —— 排序是 namelen 降冪、priority 升冪,`ies-auto-mibs`(127)會勝過 subagent(200),subagent 收不到請求。
+
+**`+getfwd`**:逐群組 opt-in,把該群組可寫欄的 GET **明確轉發**給 subagent(`ies_auto_mibs.c:3268-3290`),SET 仍留本地。**這是本案自己寫的轉發,與「已判定死碼移除的 forward 邏輯」是兩回事。**
+
+---
+
+## 6. 關鍵數據(全部本輪實測,含出處)
+
+### 頭條:mxRstp `.603.3.2` 整棵 walk —— 交錯量測
+
+| Arm | Partition / Build | varbinds | median |
+|---|---|---|---|
+| A | p1 / `2026_0810_0021`(Plan E)| 227(9 輪全同)| **0.620 s** |
+| B | p2 / `2026_0805_2335`(mainline)| 235(9 輪全同)| **30.987 s** |
+| A2 | p1 / `2026_0810_0021` | 227(9 輪全同)| **0.653 s** |
+
+`|A−A2| = 0.033 s` vs `|A−B| = 30.367 s` → 差 920 倍,**VALID**。改善約 **48 倍**。完整性 **25 → 27 個 MIB 欄位**(varbind 反而 235 → 227)。
+
+> mainline 9 輪離散度僅 0.2%(30.958–31.027 s)—— **舊的 ~31 s 不是離群值**,peer 的疑慮已排除。
+
+### 三組監控情境(北交控的監控項目)
+
+| 測試項目 | mainline 平均/最壞/超標 | AgentX 平均/最壞/超標 | 參考:北交控 proxy |
+|---|---|---|---|
+| Link Status | 54.99 / 649.66 ms / 8.33% | **2.39 / 44.35 ms / 0%** | 3 / 59 ms |
+| Traffic & Bandwidth | **1,215.96** / 1,297.73 ms / **100%** | **3.28 / 20.65 ms / 0%** | 4 / 52 ms |
+| Fiber Statistics | 22.42 / 172.76 ms / 8.46% | **12.25 / 72.68 ms / 0.03%** | 15 / 122 ms |
+
+- **mainline**:2026-08-10 實測,p2 `2026_0805_2335`,**66 輪**(不是 100 輪 —— 每輪含 30 秒間隔約 45 秒,50 分鐘裝不下),每組 n≈792。pcap `~/pcap/2026-08-10_loop-mainline_2026_0805_2335_100rounds.pcapng`。2,376 次 GET 中僅 2 次逾時。
+- **AgentX**:build `2026_0701_1329` 的 **24.4 小時** pcap(2026-07-07 15:19 → 07-08 15:42,`capinfos` 實測 87,782 秒),每組 n≈34,600,合計約 103,800 次 GET。**期間零連線中斷、零 subagent 重連。**
+- **兩者非交錯**(相隔一個月、不同 build)。Traffic 差 370 倍、Link Status 23 倍,漂移不可能解釋;**Fiber 只差 1.8 倍,若要強調該組應先交錯重量**。
+- **北交控欄是 NOS v5.x + proxy**,不同版本不同方案,**只能當水準對照,不可相減**。
+
+### Code Size(2026-08-10 同輪重量)
+
+| 產物 | mainline | 導入後 | 差 |
+|---|---|---|---|
+| `usr/bin/snmpd` | 25.3 KB | 25.3 KB | 0 |
+| **`libnetsnmpagent.so`** | 349.2 KB | 469.3 KB | **+120.1 KB** |
+| `libnetsnmpmibs.so` | 4,100.0 KB | 4,104.0 KB | +4.0 KB |
+| `app_moxa_framework` | 14,794.7 KB | 14,830.8 KB | +36.1 KB |
+| `libmoxaiesautomibs.so` | — | 1,077.6 KB | 新增 |
+| `libmoxasnmpagentx.so` | — | 9.1 KB | 新增 |
+| **合計** | | | **+1,246.9 KB**(另設定檔 +7.7 KB)|
+
+> **rootfs 尺寸已從報告移除。** 兩棵樹 squashfs 差 +1.55 MiB,但未壓縮的 target 樹差 **+10.36 MiB**,其中 **+9.61 MiB 是 `/etc/moxa/FWR_*.config` 每次建置累積的組態快照**(94 個檔案),與 SNMP 無關。壓縮比約 6.7:1,壓縮值與未壓縮值本就不可相減。
+
+### OID 分布(2026-08-10 重量)
+
+- `ies-auto-mibs`:**72 個 MIB 定義檔、2,162 個 entry**;`iss_build==1` **1,391**(64.3%)、`iss_build==0` **771**(35.7%);104 個 URI 前綴。
+- **RO / RW**:RO **1,000**、RW **1,140(53.3%)**。
+- **dlmod**:mainline **36 個啟用**;Plan E **33 個啟用 + 3 個已搬遷**(`mms_setting`、`fiber_check`、`systemInformation`,目的地都是 framework subagent)。
+  **判定只能看 `.conf` 裡未被註解的 `dlmod` 行** —— `plugin/` 底下有 37 個 `.so`,其中一個沒被任何 conf 載入。
+- **已委派前綴與 RO/RW 分布**:
+
+| 前綴 | RO(走 AgentX) | RW(走本地) | `+getfwd` |
+|---|---|---|---|
+| `ifmibdb/` | 40 | 7 | **有** |
+| `stdethdb/` | 33 | 1 | 無(加了也**靜默無效**)|
+| `mxportdb/` | 9 | 8 | 無(加了也**靜默無效**)|
+| `mxrstpdb/` | 18 | 9 | **原始碼有,image 沒有** |
+
+---
+
+## 7. ⚠️ 待辦:重建 image 並重新量測 mxRstp(使用者已裁示)
+
+**`mxrstpdb/ +getfwd` 已 commit 到原始碼(`plugin_moxa_snmp` `6de149f`,2026-08-10),但沒有進入任何已燒錄的 image。**
+
+現行頭條的 **0.62 s 取自 `2026_0810_0021`,那顆不含該旗標**,所以是「唯讀欄走 AgentX、可寫欄走 `ies-auto-mibs`」的混合狀態。
+
+**使用者已裁示:選 2 —— 重建 image 再量一次**,讓文件與實機一致。文件已加註「待重新量測」,Next 也列為第一項。
+
+**要做的事**
+1. 重建 image(建置序列:`plugin_moxa_snmp` → `rust_moxa_build` → 最後 `make`;**別漏 `3rdparty_net_snmp`**,`ies_auto_mibs.c` 由它編)。**HSM 簽章由使用者跑。**
+2. 燒錄到 p1(可用 `examinate-plan-e-swu` skill;**p2 是 mainline 對照組,絕對不可覆蓋**)。
+3. 用 `measure-snmp-walk` 的 `walk.sh` 以 **A→B→A2 交錯**重量 `.1.3.6.1.4.1.8691.603.3.2`,9 輪。
+4. 更新「先講結果」與 Comparison → Performance 的兩張表,並拿掉「待重新量測」那段註記。
+
+> ADR-0024 記載該旗標會讓這棵樹**再快一些**(`.603.3.2` 0.66→0.63 s、config 子樹 0.20→0.17 s),完整性不變。所以預期是小幅改善,不會推翻 48 倍的結論。
+
+## 8. 本輪查出並修正的文件錯誤(共 8 處)
+
+記在這裡是因為**它們有共同的模式:把「這個專案的 diff」當成「全部的事實」**。下一個 session 寫任何斷言前請套用同樣的懷疑。
+
+| # | 原本寫的 | 事實 |
+|---|---|---|
+| 1 | ISS subagent「**一行未改**」 | ISS 有 **15 個檔案 / +249 −64**,是既有 AgentX 實作的缺陷修正 |
+| 2 | net-snmp「**本體一行未改**」 | 本案淨變更為零 ✓,但**這棵樹本來就帶 26 個檔案的 Moxa 改動**(+1,075 −12)|
+| 3 | 「重新套用既有的 patch:`agent_make.patch`」 | **那個 patch 是死的**,沒有任何地方套用它,`PATCH_LDPATH` 從未定義 |
+| 4 | GET/SET 分流靠「net-snmp 能力閘門仲裁」 | 推導後**不成立**;真正機制是「本地要不要註冊」,閘門只是防呆 |
+| 5 | 轉發規則「目前四筆,`ies_auto_mibs.c:3099`」 | 已被群組層級 `+getfwd` 取代,程式碼註解明寫 `no hand-maintained column list` |
+| 6 | Appendix B 七處統計數字 | 全部過時(70→72 檔、2,140→2,162 entry、749→771、dlmod 37→36、第 10 名換人)|
+| 7 | dlmod「`mms_setting` 已搬遷,下一個是 `fiber_check`」 | **已搬三個**,`fiber_check` 早就完成 |
+| 8 | `stdrmodb/`「**產品未提供 RMON**」 | 使用者說**尚未核實**,已移除;只留實測事實「整棵子樹回 `No Such Object`」(我在 DUT 上驗過)|
+
+另外移除的:**13.5% 那個 `+getfwd` 代價數字** —— 它是**中位數**算的,違反規則 4,使用者裁示「先不要寫」。原始 pcap 還在(`~/pcap/2026-08-07_mxPort_planE_*_RO-only.pcap` 與 `*_RW-getfwd-flashed.pcap`),要用可以重算成 平均/最壞/>50ms。
+
+---
+
+## 9. mxPort 數據為什麼全部拿掉
+
+使用者裁示「把簡報裡所有 mxPort 相關的數據拿掉」。三個理由:
+
+1. **mainline 基準線是離群值** —— 舊表寫 0.871 s,交錯實測是 **0.768 s**,改善是 −11.3% 不是 −19.8%。
+2. **`+getfwd` 那組數據來自壞掉的 image**(`2026_0807_1842` 的 `+getfwd` 是壞的,walk 從 193 崩到 12 個 varbind)。
+3. **`+getfwd` 在 `mxportdb/` 上完全不轉發** —— 已知缺陷,根因未定位。
+
+**頭條因此改用 mxRstp。** 文件中 mxPort 只剩非數據性引用(委派狀態、缺陷紀錄、entry 數、工具路徑)。
+
+---
+
+## 10. 文件現況
+
+`confluence-snmp-agentx-CLEAN.md` 約 **54,000 字元 / 1,340 行**。章節:
+
+問題 / 先講結果(+另一個維度 +附帶效益)/ 目標與限制 / 方案與取捨 / Original Architecture / Enhanced Architecture / Comparison(Code Size、Performance、Maintenance、**FAQ Q1–Q9**)/ Test(Functional、Stress)/ Maintenance(升級 net-snmp、新增 OID SOP、Trouble shooting)/ Next / Appendix A、B、C
+
+**FAQ 九則**:
+Q1 GET/SET 分流機制 · Q2 ISS 穩定度 · Q3 改了哪些 package 和檔案 · Q4 `MOXA_CUST` 與 sysORTable · Q5 受影響的 OID 範圍 · Q6 自建 subagent · Q7 搬移時程 · Q8 改善幅度光譜 · Q9 會不會弄壞東西
+
+---
+
+## 11. 使用者已裁示的四件事(2026-08-11,均已套用)
+
+| 項目 | 裁示 | 已做的處理 |
+|---|---|---|
+| 目標與限制 → **限制** | **整節拿掉** | 已移除;章節改名為「目標」;三處指向「限制」的引用已改寫成自我說明(Q4 的 sysOR 段、Appendix A 表格) |
+| **FAQ Q2 第一處** | 「已修正 ISS 內部通聯測試發現的 bug」,出處指向 git history | 已填,不逐筆列 commit,只寫範圍(15 檔、連線重建 / PDU 編碼 / 連續 GET)並指向 `app_moxa_iss_10_1_0` |
+| **FAQ Q2 第二處 / Stress Test** | 目前只有北交控環境整天測試,**之後會擴大規模測 `snmpwalk`** | 已在兩處加上後續規劃 |
+| **壓測情境措辭** | **確認是情境模擬** | 已改成「以北交控的監控情境在實驗室 DUT 上模擬(非客戶現場設備)」 |
+
+**文件現在沒有任何【待填】。** 唯一未完成的是 §7 的重建 + 重量。
+
+## 12. DUT 狀態
+
+```
+IP          192.168.127.253
+partition   1(Plan E,build 2026_0810_0021)
+p2          mainline 2026_0805_2335,完好未動
+bind mount  無
+snmpd       正常
+本輪新增     ~/pcap/2026-08-10_loop-mainline_2026_0805_2335_100rounds.pcapng (660 KB)
+```
+
+**操作注意**
+
+- **`snmp*` 指令一律用 `/usr/bin/` 絕對路徑** —— `~/.local/bin` 的 pysnmp 版會假裝成「DUT 卡死」。
+- 切 partition:`printf 'Y\nY\n' | /moxa/fwr_change.sh`(在 DUT 上),不具破壞性,重開約 3 分鐘,**量測前等 uptime > 200 s**,並用 `cat /etc/moxa/version/BUILD_TIME` 確認。
+- SSH:`~/.claude/skills/measure-snmp-walk/dutssh.exp`(admin/moxa → su moxa)。**多命令會卡住,一次送一條比較穩。**
+- **不要在量測進行中對 DUT 下其他指令** —— 本輪犯過:診斷指令跟正在跑的 31 秒 walk 搶裝置,看到逾時就誤判「裝置卡死」,其實 walk 全程正常。
+- **`pkill -f <pattern>` 會命中自己那行指令**,本輪連續踩兩次,把要跑的工作一起殺掉。用 PID,或把 pkill 與工作分開執行。
+- `~/pcap/` **未納入版控**,單機留存,部分檔案屬 root。
+
+---
+
+## 13. 驗收紀錄在哪
+
+**不在 `snmpwalk/`,在 `~/mds4xgl3/.adr/`。** `snmpwalk/` 的 RESULT 檔最新只到 2026-08-06;後期案例(`mxrstpdb`、`ifmibdb`、三個 dlmod)的驗收紀錄都在 ADR,每份都標了 Status 與燒錄的 build。報告不引用 ADR,但**查證時要去那裡找**。
+
+相關:ADR-0011(stdethdb)、0012(mxportdb)、0014(getfwd 推導)、0017(完整性比欄位)、0018(註冊表縮小假說被推翻)、0020(mxMms)、0021(mxFiberCheck)、0024(mxRstp +getfwd)、0025(getfwd 在兩組上是 no-op)。

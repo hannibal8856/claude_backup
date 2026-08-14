@@ -1,0 +1,171 @@
+RESULT-phase3-task3.txt — lib_moxa_ies_auto_mibs, one truth source for OID -> URI
+=================================================================================
+Date: 2026-08-05
+
+THE FINDING THAT CHANGED THE TASK
+
+  The plan's build rule says this library should "#include the existing
+  net_*.h and expand them into a runtime table". Following that literally
+  produces a table with every flag zero, and nothing says so.
+
+  Flags are not in the headers. snmpd applies them one layer up:
+
+    mox_snmp_init_entry()            ies_auto_mibs.c:3437
+      -> ies_auto_mibs_setup_entry_flags()   ies_auto_mibs_setup.c:513
+           -> ies_auto_mibs_setup_entry_flags_net_<mib>()
+
+  The set of arrays is not in the headers either. Which arrays exist for this
+  product is decided by ies_auto_mibs_setup.c's 67 MOX_SNMP_INIT_ENTRY calls
+  under 9 #if guards (INCLUDE_MOXA_L3, MOXA_TRACKING, MOXA_MACSEC and friends).
+  Re-listing them here would be a copy, and copies drift.
+
+  So the library includes ies_auto_mibs_setup.c itself, with MOX_SNMP_INIT_ENTRY
+  redefined from "register with net-snmp" to "append to my table". The array
+  set, the #if guards and the flag setup all stay in snmpd's own source. That
+  is what section 5.1 asks for; the header-only reading of it does not deliver
+  it.
+
+WHAT HAD TO CHANGE IN ies-auto-mibs, AND WHY IT IS SAFE
+
+  ies_auto_mibs_setup.c could not be included as-is: 15 of the files it pulls
+  in mix flag setup with in-master handler bodies (setEntryValue_*,
+  CheckEntryDependency_*, and the *_MibEntry_setup callback registration), and
+  those reference MXCFG_*, gMaxPortInDevice, LA_PORT_CHANNEL and the rest of
+  the machinery D6 keeps out of the framework process.
+
+  The handler bodies are now wrapped in
+
+      #ifndef IES_AUTO_MIBS_TABLE_ONLY  ...  #endif
+
+  in all 15 files, one guard pair each. Every one of those files has the same
+  shape - handlers first, a single *_MibEntry_setup() carrying the flag setup
+  last - so the guard opens before the first handler and closes before that
+  function. The shared explanation lives at
+  snmp_tools/inc/ies_auto_mibs_handle.h, next to MOX_SNMP_INIT_ENTRY.
+
+  This was chosen over moving ~1000 lines of handler code into new files: the
+  guard cannot change snmpd's output, a move can.
+
+  PROOF THAT snmpd IS UNAFFECTED - the compiled artefacts are byte-identical:
+
+    before -> after      md5
+    ies_auto_mibs.o      4103645cc2b26b8891dc3a7f263787bc   unchanged
+    snmpd                c9576db7aef5b7dff8097651c7961338   unchanged
+
+  (cmp reports IDENTICAL for both, after a full 3rdparty_net_snmp-rebuild.)
+  snmpd never defines the macro, so this is what should happen - but it was
+  measured rather than argued. This is stronger evidence than re-running the
+  Task 1 latency measurement would have been, and it needs no DUT.
+
+  The flag setup keeps its calls to moxaSnmpHandle_RegEntry{Get,Set}Value and
+  RegEntryDep. The table build defines those away; the macros discard their
+  arguments, so the handler symbols are never referenced.
+
+THE MACRO SET - TAKEN, NOT COPIED
+
+  3RDPARTY_NET_SNMP_CFLAGS is not a fixed list. It is assembled from about
+  twenty `ifeq (${BR2_...}, y)` conditions in 3rdparty_net_snmp.mk:44-127.
+  Every Buildroot .mk is read into one make process and _BUILD_CMDS expands
+  when the recipe runs, so lib_moxa_ies_auto_mibs.mk takes the result directly:
+
+    LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS=$(filter -D%,$(3RDPARTY_NET_SNMP_CFLAGS))
+
+  Only -D% - the variable also carries -I$(@D)/... paths relative to net-snmp's
+  own build directory, which would expand to the wrong place here.
+
+  There is therefore no second copy to keep in sync. Current expansion, for the
+  record:
+
+    -DMDS_G4000_L3_4XGS -DCPSS -DINCLUDE_MOXA_L3 -DMDSG40004XGS
+    -DMOXA_MULTICOUPLING -DMOXA_TRACKING -DMOXA_DI -DMOXA_DO_RELAY
+    -DMOXA_MACSEC -DMOXA_GOOSE_CHECK -DMOXA_RSTP_SWIFT
+    -DMOXA_MIRROR_VLAN_MIRROR -DMOXA_CUST
+
+  That matches the snapshot in the plan's Global Constraints, which is the
+  point: it matches today, and it will keep matching without anyone noticing
+  it has to.
+
+THREE CONSTANTS IN THE PLAN THAT WERE WRONG                       ALL CAUGHT
+
+  1. struct iesmap_result declared `const unsigned int *flags`.
+     ies_flag_t is unsigned char (ies_flag_bits.h:11). Reading a bit array
+     through the wrong element type does not fail, it reads the wrong bits.
+     The header now says unsigned char and exposes iesmap_flag_is_set() so
+     callers never index it themselves.
+
+  2. IES_FLAG_SNMP_REPLACE_TRUTH_VALUE is 16, not 18. 18 is
+     IES_FLAG_SNMP_REPLACE_BIT_2OCT. Task 7 reading flag 18 would have
+     converted nothing and reported no error.
+
+  3. Task 3 Step 5 asserts 1.3.6.1.4.1.8691.602.8.6.2.1.1.1 -> uri "io/di/".
+     It is "io/power/system/" (net_mx_device_io.h:8).
+
+  1 and 2 were caught by compile-time assertions in iesmap.c that check the
+  library's public constants against the upstream enum. They are the reason
+  this task did not ship a plausible-looking wrong answer. Those assertions
+  stay: a renumbering upstream now breaks the build.
+
+TEST                                                              PASS
+
+  make -C dl/lib_moxa_ies_auto_mibs/test check STAGING_DIR=... MOXA_DEFS=...
+
+    iesmap_entry_count() = 1936
+      device_io  uri=io/power/system/         iss_build=0 mode=1 val_type=2
+      index      column and instance agree on uri=io/power/system/
+      portMirror uri=portMirror/enable        truth_value=1
+      no_match   unknown arc rejected
+    OK
+
+  The portMirror line is the one that matters: REPLACE_TRUTH_VALUE is set,
+  which means the flag setup ran. Under the plan's header-only reading it
+  would read 0 and Task 7 would silently convert nothing.
+
+  The test builds for the host so it can actually be run, from the same source
+  and the same -D set as the target library. Host and target differ in the
+  width of net-snmp's oid typedef, which changes struct layout but not which
+  entries exist or what they say.
+
+BUILD                                                             PASS
+
+    file    ELF 32-bit LSB shared object, ARM, EABI5
+    NEEDED  libnetsnmp.so.40, libmoxa_util.so, libgcc_s.so.1, libc.so.6
+
+  No libnetsnmpmibs - and no libnetsnmpagent either: net-snmp is a header-only
+  dependency here (the oid typedef, HANDLER_CAN_*, SNMP_DATA_TYPE_*).
+  libmoxa_util is needed because the shared flag setup logs through
+  LibUtil_DbgTrace on its error paths.
+
+  Exports: iesmap_lookup, iesmap_flag_is_set, iesmap_entry_count.
+
+ON THE PLAN'S STEP 4 CONSISTENCY CHECK
+
+  Step 4 says to compare iesmap_entry_count() against
+
+    snmpwalk -v2c -c public -On <dut> 1.3.6.1.4.1.8691 | wc -l
+
+  Those are not the same quantity. snmpwalk counts OID *instances* - a table
+  column over 12 ports is 12 lines - while iesmap_entry_count() counts table
+  *entries*, one per column. The two cannot be expected to match and a
+  mismatch would prove nothing.
+
+  What Step 2 was actually guarding against is the two sides being compiled
+  with different macro sets. That is now structural: both sides compile the
+  same MOX_SNMP_INIT_ENTRY sequence from the same file with the same -D set,
+  taken from one variable. 1936 is recorded above as the number this build
+  produces, so a future change that moves it is visible.
+
+LOOKUP SEMANTICS
+
+  Longest-prefix match. A GET carries a full instance OID (column plus index)
+  while an entry names only its column, so an entry matches when its OID is a
+  prefix of the query and the longest such entry wins. The test checks that the
+  column OID and the same OID with an index appended resolve to one entry.
+
+  Linear scan, as the plan asks. No index, no cache, no hash until something
+  measures that 1936 entries are too slow.
+
+NOT DONE
+
+  Nothing on the DUT. This task produces no runtime behaviour change - the
+  library is not linked into any executable until Task 4 wraps it for Rust and
+  Task 5 uses it. snmpd is byte-identical, so there is nothing to re-measure.

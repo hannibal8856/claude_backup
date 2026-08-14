@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+set timeout 25
+log_user 1
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@192.168.127.253
+expect {
+    -re "assword:" { send "moxa\r" }
+    timeout { puts "\nTIMEOUT waiting for password prompt"; exit 3 }
+}
+sleep 3
+send "\r"
+sleep 2
+expect -re ".*"
+puts "\n===PROMPT ABOVE==="
+send "\r"
+sleep 2
+send "exit\r"
+expect eof

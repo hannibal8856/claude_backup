@@ -1,0 +1,169 @@
+# mxStcl / mxRlps / mxLldp 搬遷評估 — 2026-08-13
+
+量測者:`snmp-plan-E reopen 7`。DUT = MDS-G4012-L3-4XGS-T @ 192.168.127.253。
+mainline 基準線由 `snmp-plan-E trace 3` 提供。
+
+---
+
+## 0. 一頁結論
+
+| 問題 | 答案 |
+|---|---|
+| 這三個能搬嗎? | **不能,而且是結構限制不是設定問題** |
+| 列入 `agentx_owned.list` 會怎樣? | **完全無作用**(程式碼路徑證實,非僅推論) |
+| Plan E 相對 mainline 有差異嗎? | **內容完全相同**(36/3、26/4、25/5) |
+| 那預期的 index 欄呢? | **早就存在,由 in-master 合成** —— walk 走不到而已 |
+| 為什麼 walk 走不到? | `entry_handle_exception()` 的 GETNEXT 邊界缺陷,**與 ISS 無關** |
+
+**這一輪最有價值的產出不是「不能搬」,是第 4 節那個結構限制,與第 5 節的第二、三個
+GETNEXT 缺陷案例 —— 它把 mxQos 的特例升格為通例。**
+
+## 1. 受測對象與基準
+
+image `2026_0813_0905`(p1,Plan E)。mainline `2026_0805_2335`(p2)基準由 `trace 3` 提供,
+3 reps varbind 數與中止 OID 相同。
+
+```
+mxstcldb/  .603.4.4   mainline 36 vb / 3 欄    Plan E 36 vb / 3 欄    0.140s
+mxrlpsdb/  .603.4.8   mainline 26 vb / 4 欄    Plan E 26 vb / 4 欄    0.167s
+mxlldp/    .603.5.1   mainline 25 vb / 5 欄    Plan E 25 vb / 5 欄    0.177s
+```
+
+⚠️ 時間欄**不可引用**:跨 image、單次、未交錯。列出只為留痕。
+⚠️ `mxlldp` 的 `~.1.4.1.3` 只有 10 列(缺埠 3、4),**mainline 就是如此,不是搬遷造成**。
+
+image 身分以兩種方式獨立確認:SNMP 判別(`.603.2.9.1.1` 回 64 vb = Plan E;mainline 回 badValue)
+與 SSH 讀 `/etc/moxa/version/BUILD_TIME`。
+
+## 2. 事前預測與結果 —— 預測失敗
+
+`trace 3` 事前寫下(**事前寫數字才有判別力,事後解釋永遠解釋得通**):
+
+```
+.603.4.4  預期 48 vb / 4 欄(多 ~.1.1.1.1 ×12)    實測 36/3   ❌
+.603.4.8  預期 38 vb / 5 欄(多 ~.1.3.1.1 ×12)    實測 26/4   ❌
+.603.5.1  預期 25 vb / 5 欄(ISS 無此 root)        實測 25/5   ✅
+```
+
+預測的機制是「ISS 註冊整個 root 區段,會蓋到 in-master 沒登記的 index 欄」。**不成立。**
+
+## 3. 但 index 欄其實存在 —— 直接 GET 拿得到
+
+```
+snmpget .603.4.4.1.1.1.1.1  →  INTEGER: 1
+snmpget .603.4.8.1.3.1.1.1  →  INTEGER: 1
+```
+
+**是 walk 走不到,不是不存在。** 與 mxQos `.1.3.1.2` 同形。
+
+### 誰在服務它?pcap 說是 in-master,不是 ISS
+
+同一次擷取四發 GET,自帶正負對照(10 packets / 0 dropped,`kill -INT` 收尾 + 三道自我檢查):
+
+| 探針 | OID | 線路 |
+|---|---|---|
+| T1 | `.603.4.4.1.1.1.1.1` | **無 AgentX 流量** |
+| T2 | `.603.4.8.1.3.1.1.1` | **無 AgentX 流量** |
+| P(正對照) | `.603.2.9.1.5.1.3.1`(mxQos,list 有 `+getfwd`) | **1 個 Get-PDU** ✅ |
+| N(負對照) | `.603.4.4.1.1.1.2.1`(in-master 已註冊) | 無流量 ✅ |
+
+`.8691.603.4.4` 與 `.8691.603.4.8` 的 OID 位元組在整份 pcap 出現 **0 次**;
+`.8691.603.2.9` 出現 2 次。**兩個對照都成立,所以 T1/T2 的判定可信。**
+
+證據:`~/pcap/2026-08-13-regprobe-stcl-rlps-2026_0813_0905.pcap`
+
+⚠️ 界線:證明的是**請求沒有到達 ISS**。ISS 有沒有註冊那個 root 未直接觀測 ——
+但既然 in-master 答了,in-master 就擁有該 OID 的註冊,路由輪不到 ISS。
+**ISS 可能有註冊但被遮蔽。**
+
+## 4. 🔴 結構限制:合成的 index 欄永遠無法委派
+
+註冊迴圈的順序(`ies_auto_mibs.c`):
+
+```
+:4000   if (entry->mode & HANDLER_CAN_SET) return 0;    ← RW 一律不委派,第一道就擋掉
+:4067   if (mox_snmp_entry_is_agentx_owned(entry))
+:4077       continue;                                    ← 跳過本地註冊
+:4080   moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry(entry)
+:4088   moxaSnmpHandle_UtilMibEntryRegisterToNetSNMP(entry)
+```
+
+**合成的 index entry 誕生在 `:4080`,也就是「沒被跳過」那條路上,而且它自己從不經過
+`is_agentx_owned()` 檢查。**
+
+三個前綴全部 100% RW(`HANDLER_CAN_RWRITE`,setup 檔無 mode 覆寫):
+
+```
+net_mxStcldb.h   3 entries   net_mxRlpsdb.h   4 entries   net_mx_lldp.h   6 entries
+```
+
+→ 第一道 `HANDLER_CAN_SET` 檢查就 return 0 → **永遠不會被跳過** → index entry 必然被合成
+並在本地註冊 → **即使列入 list 也改變不了**,因為那個 RO entry 是在委派決策**之後**才出生的。
+
+**這不是設定問題,是設計上的結構限制。**
+
+### 遮蔽的機制
+
+`moxa_snmp_handle_util.c:164` `memcpy(entryIndex, entry, sizeof(*entry))` **整包複製**,
+之後只覆寫 `oid_list[last]`、`val_type`、`mode`、`flags`、`name`、`uri_index` ——
+**`iss_build` 被一併繼承**。所以合成出來的是一個
+**「宣告 `iss_build==1`(屬 ISS)、實際以 `HANDLER_CAN_RONLY` 在本地註冊」** 的 entry。
+ISS 因此永遠收不到這些請求。
+
+⚠️ **這種 entry 不在任何靜態表裡** —— 它是執行期依表結構生成的,`net_*.h` 裡找不到。
+任何靠掃檔案建立的路由表或盤點都看不見它。
+
+## 5. GETNEXT 邊界缺陷:第二、三個案例
+
+| 案例 | 直接 GET | walk |
+|---|---|---|
+| mxQos `.1.3.1.2` | `INTEGER: 3` | 走不到 |
+| mxstcldb `.1.1.1.1` | `INTEGER: 1` | 走不到 |
+| mxrlpsdb `.1.3.1.1` | `INTEGER: 1` | 走不到 |
+
+**mxQos 不是特例。** 根因分析見 mxQos 那份第 5 節(`entry_handle_exception()` 的錨點不一致,
+`trace 3` 給了一行修法:skip 迴圈門檻由 `reginfo->rootoid` 改為 `req_oid`)。
+**現在有三個可驗證案例,改完可以逐一驗,不用猜。**
+
+⚠️ **對完整性比對的直接影響**:被這個缺陷擋住的欄位,**新舊兩臂都看不到**,
+會被讀成「沒有回歸」。這正是「兩臂相同的那些欄位就是量測看不見的東西」——
+**做 mxstcldb / mxrlpsdb 的完整性比對時,那兩個 index 欄必須主動列出檢查,
+不能靠 walk 的差異抓。**
+
+## 6. 附帶確立的事實
+
+- **mainline 的 ISS AgentX 子代理在程式碼層級預設關閉**:啟用碼 commit `44e97bc3b`
+  ("Enable AgentX by default", 2026-06-25)只在 Plan D/E 系列分支,
+  `origin/develop` 對 `AgentX subagent mode` / `nmhSetSnmpAgentxSubAgentControl` 命中 0。
+  → ADR-0011/0012 把「Plan E 相對 mainline 多出的欄位」歸因為 ISS 開始服務,**歸因成立**。
+- **`iss_build == 1` 的假陽性,三個實測案例**:三個前綴全部宣告 `iss_build==1`,
+  執行期 ISS 一個都沒服務。分兩種強度:
+  - `mxlldp/`:ISS 側 396 個 `*db.h` 掃過,**`.603.5.1` 這個 root 完全不存在** —— 靜態可抓
+  - `mxstcldb/` `mxrlpsdb/`:ISS `*db.h` **確實宣告了 root**,兩層靜態檢查都通過,
+    執行期仍未服務 —— **靜態抓不到,只有實測抓得到**
+- **`nsModuleTable` 不可用**:整個 `.1.3.6.1.4.1.8072` 回 No Such Object(正對照 `sysUpTime` 正常),
+  NET-SNMP-AGENT-MIB 沒編進去。**查註冊表只能靠 pcap。**
+- **那四個套件的 remote 對不上 `.config`**:`.config` 宣告
+  `…/general/linuxframework/library/`,實際 remote 在 `…/personal/oscarmh.tu.switch/`
+  (`lib_moxa_ies_auto_mibs`、`lib_moxa_rust_ies_auto_mibs`、`lib_moxa_rust_snmp_agentx`、
+  `lib_moxa_snmp_agentx`)。**這棵樹的那四份是手動 clone 的,`fetch_source.sh` 從未成功抓過。**
+
+## 7. 方法論:這一輪自己踩到的
+
+- **用檔名推測找不到 `mxlldp`** —— 檔名是 `net_mx_lldp.h`(有底線),我拿 uri 前綴去猜檔名。
+  → **盤點一律搜檔案內容裡有沒有那個 uri 字串,不要對檔名做任何推測。**
+  同日 `trace 3` 的 `net_stdospfdb_setup.c` 是同一形狀。
+- **`nsModuleTable` 回一行就差點當成「沒有註冊」** —— 實際是 No Such Object(模組沒編進去)。
+  先看那一行是什麼,再下結論。
+- **「ISS 沒服務」這個結論下得太早** —— 走完 walk 就說了,而 index 欄其實直接 GET 拿得到。
+  **「walk 看不到」≠「不存在」**,這是今天第三次踩同一形狀。
+
+## 8. 待辦
+
+| # | 項目 | 需要 DUT |
+|---|---|---|
+| 1 | 修 GETNEXT 邊界缺陷(`req_oid` 門檻),用三個案例逐一驗證 | 是 |
+| 2 | 合成 index entry 繼承 `iss_build` 是否為預期行為 —— 若否,`memcpy` 後應顯式清掉 | 否 |
+| 3 | `fetch_source.sh` 的 URL 與那四個套件實際 remote 不符 | 否 |
+
+**環境保留中**:DUT 停在 p1(`2026_0813_0905`),無 bind mount,`/tmp` 留有 `reg.pcap` / `reg.err`。

@@ -1,0 +1,177 @@
+//! Main file
+
+use std::env;
+use std::panic;
+
+use lib_moxa_rust_debug_log_ng::{lib_moxa_debug_log_ng_syslog, LibMoxaDebugLogNgLogLevel};
+use lib_moxa_rust_debug_log_ng::{mx_error, mx_notice, mx_warn};
+use rust_moxa_config_layer as config_layer;
+
+#[cfg(feature = "MOXA_PROFILING")]
+use rust_moxa_profiling as profiling;
+
+#[cfg(feature = "MOXA_PROFILING")]
+use tokio::signal::unix::{signal, SignalKind};
+
+/*---------- Modules ----------*/
+mod nonce_middleware;
+mod uri_service;
+
+/*---------- Local Const ----------*/
+const PANIC_LOG: bool = true;
+const MODULE_LIST_ID: &str = "app_moxa_framework.main";
+
+/*---------- Local functions ----------*/
+
+/// Print usage information
+fn print_usage() {
+    let program_name = env::args().next().unwrap_or_else(|| "app_moxa_framework".to_string());
+    let usage_msg = format!(
+        "Usage: {} [OPTION]\n\
+         \n\
+         Options:\n\
+         \t(no arguments)\tStart the framework service\n\
+         \tconfig_loader\tLoad configuration and exit",
+        program_name
+    );
+    mx_warn!("{}", &usage_msg);
+}
+
+fn err_invalid_argument() -> std::io::Result<()> {
+    mx_error!(MODULE_LIST_ID, &format!("Error: Invalid number of arguments provided."));
+    print_usage();
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "Invalid number of arguments",
+    ))
+}
+
+/// Setup panic message handler for error logging
+/// Only sets up the panic hook in release builds when PANIC_LOG is true
+fn setup_panic_handler() {
+    let panic_log = PANIC_LOG;
+    if panic_log {
+        #[cfg(not(debug_assertions))]
+        panic::set_hook(Box::new(|panic_info| {
+            let mut msg = "Panic:".to_owned();
+
+            if let Some(location) = panic_info.location() {
+                msg = format!("{msg} {}:{}", location.file(), location.line());
+            }
+
+            if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                msg = format!("{msg}, Err: {s}");
+            }
+
+            mx_error!(MODULE_LIST_ID, &msg.to_string());
+            std::process::exit(1);
+        }));
+    }
+}
+
+/// Handle config_loader command-line argument
+fn start_config_loader(
+    plugins_config: &mut plugins_moxa_framework::config::Plugins,
+) -> std::io::Result<()> {
+    mx_notice!(
+        MODULE_LIST_ID,
+        "config_loader ------------------------------------------------------------"
+    );
+    config_layer::config_loader::config_loader(plugins_config);
+    Ok(())
+}
+
+/// Spawn signal handlers for profiling control
+/// - SIGUSR1: Enable profiling
+/// - SIGUSR2: Disable profiling
+///
+/// Signal handlers are registered eagerly (outside tokio::spawn) so the OS-level
+/// signal disposition is replaced immediately. Only the event loops are spawned.
+#[cfg(feature = "MOXA_PROFILING")]
+fn spawn_profiling_signal_handlers() {
+    // Register signal handlers immediately to replace the default "terminate" disposition.
+    // If registration is deferred inside tokio::spawn, the spawned tasks may not be polled
+    // before a signal arrives, causing the process to be killed by the default handler.
+    let mut sig_usr1 = match signal(SignalKind::user_defined1()) {
+        Ok(s) => s,
+        Err(e) => {
+            mx_error!(MODULE_LIST_ID, &format!("Failed to register SIGUSR1 handler: {}", e));
+            return;
+        }
+    };
+
+    let mut sig_usr2 = match signal(SignalKind::user_defined2()) {
+        Ok(s) => s,
+        Err(e) => {
+            mx_error!(MODULE_LIST_ID, &format!("Failed to register SIGUSR2 handler: {}", e));
+            return;
+        }
+    };
+
+    // SIGUSR1 - Enable profiling
+    tokio::spawn(async move {
+        loop {
+            sig_usr1.recv().await;
+            profiling::set_enabled(true);
+            mx_notice!(MODULE_LIST_ID, "Profiling ENABLED via SIGUSR1");
+        }
+    });
+
+    // SIGUSR2 - Disable profiling
+    tokio::spawn(async move {
+        loop {
+            sig_usr2.recv().await;
+            profiling::set_enabled(false);
+            mx_notice!(MODULE_LIST_ID, "Profiling DISABLED via SIGUSR2");
+
+            // Flush buffered profiling output to disk
+            if let Err(e) = profiling::flush_output() {
+                mx_error!(MODULE_LIST_ID, &format!("Failed to flush profiling output: {}", e));
+            }
+        }
+    });
+
+    mx_notice!(MODULE_LIST_ID, "Profiling signal handlers registered (SIGUSR1=enable, SIGUSR2=disable)");
+}
+
+/*---------- Entry point ----------*/
+
+/// Entry point
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    //  debug log ng
+    let _ = lib_moxa_rust_debug_log_ng::init();
+
+    setup_panic_handler();
+
+    //  profiling initialization
+    #[cfg(feature = "MOXA_PROFILING")]
+    {
+        // Register signal handlers FIRST to prevent SIGUSR1/SIGUSR2 from killing
+        // the process with the default disposition, regardless of init outcome.
+        spawn_profiling_signal_handlers();
+
+        if let Err(e) = profiling::init(None) {
+            mx_error!(MODULE_LIST_ID, &format!("Failed to initialize profiling: {}", e));
+        } else {
+            profiling::set_enabled(false);
+            mx_notice!(MODULE_LIST_ID, "Profiling initialized (disabled by default, use SIGUSR1 to enable)");
+        }
+    }
+
+    // plugins
+    let mut plugins_config = plugins_moxa_framework::config::Plugins::new();
+
+    // Argument parsing
+    let args: Vec<String> = env::args().collect();
+    match args.len() {
+        1 => {
+            uri_service::start_framework_uri_service(plugins_config).await
+        }
+        2 => match args[1].as_str() {
+            "config_loader" => start_config_loader(&mut plugins_config),
+            _ => err_invalid_argument(),
+        },
+        _ => err_invalid_argument(),
+    }
+}

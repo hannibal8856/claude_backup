@@ -1,0 +1,66 @@
+#!/usr/bin/expect -f
+# Fence-only DUT driver over SSH (serial /dev/ttyS0 is held by minicom).
+#   usage: dutssh.exp <cmd> [<cmd> ...]
+set host "192.168.127.253"
+set user "admin"
+set pw   "moxa"
+set default_timeout [expr {[info exists env(DUT_TIMEOUT)] ? $env(DUT_TIMEOUT) : 120}]
+
+set log_path [exec sh -c {echo $HOME/dutssh_$(date +%Y%m%d_%H%M%S).log}]
+log_file -a $log_path
+log_user 1
+send_user "=== log $log_path ===\n"
+
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+          -o HostKeyAlgorithms=+ssh-rsa -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+          -o LogLevel=ERROR $user@$host
+
+expect {
+    -re "(P|p)assword: " { send "$pw\r" }
+    -re "(D|d)enied"     { send_user "\n*** ssh denied ***\n"; exit 2 }
+    timeout              { send_user "\n*** ssh no password prompt ***\n"; exit 3 }
+}
+sleep 3
+
+set timeout 20
+send "id -u ; echo __UID_FENCE__\r"
+set is_root 0
+expect {
+    -re "0\[\r\n\]+__UID_FENCE__" { set is_root 1 }
+    -re "__UID_FENCE__"           { set is_root 0 }
+    timeout { send_user "\n*** no shell response (ISS CLI?) ***\n"; exit 3 }
+}
+
+if {!$is_root} {
+    send "su\r"
+    expect { -re "(P|p)assword: " {} timeout {} }
+    send "moxa\r"
+    sleep 2
+    send "id -u ; echo __UID2_FENCE__\r"
+    expect {
+        -re "0\[\r\n\]+__UID2_FENCE__" { }
+        -re "__UID2_FENCE__" { send_user "\n*** su did not give root ***\n"; exit 4 }
+        timeout { send_user "\n*** su timeout ***\n"; exit 5 }
+    }
+}
+send_user "\n=== root shell ready ===\n"
+
+set timeout $default_timeout
+set i 0
+foreach cmd $argv {
+    incr i
+    send_user "\n--- CMD\[$i\]: $cmd ---\n"
+    send -- "$cmd ; echo __F${i}_DONE__\r"
+    expect {
+        -re "__F${i}_DONE__\[\r\n\]" { }
+        timeout { send_user "\n*** TIMEOUT: $cmd ***\n"; exit 5 }
+    }
+}
+
+send "exit\r"
+expect eof
+catch {wait}
+send_user "\n=== saved: $log_path ===\n"
+exit 0

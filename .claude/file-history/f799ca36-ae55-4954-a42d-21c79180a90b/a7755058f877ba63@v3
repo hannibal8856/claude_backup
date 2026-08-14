@@ -1,0 +1,538 @@
+# Multi-Subagent + Shared Mapping Library 架構規劃
+
+> Goal: 把 SNMP 後端從「集中在 snmpd / ies-auto-mibs」打散成「每個 daemon 自己接 AgentX subagent,共用一份 mapping 知識」
+>
+> 目標 P50 GET 延遲: < 1 ms(cold cache)
+> 目標 SET 延遲: < 1 ms(framework 內 in-memory commit)
+> 目標完成時程: PoC 6 週,完整遷移 4–6 個月
+>
+> 前置成果:Plan C (AgentX + agentx_owned.list) 已 deploy,RO ifTable 已走 AgentX → ISS
+> 參考文件:`~/agentx_vs_proxy_truth.md`、`~/beijing_proxy_case_study.md`
+
+---
+
+## 1. 架構總覽
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        libies_mapping.so                                │
+│   (shared library, all consumers link against)                          │
+│                                                                         │
+│   Data:                                                                 │
+│     ies_mapping_entry { oid, oid_len, uri, uri_index, val_type,         │
+│                         mode, flags, iss_build, owner_daemon, ...}      │
+│                                                                         │
+│   API:                                                                  │
+│     ies_mapping_lookup_by_oid(oid)                                      │
+│     ies_mapping_lookup_by_uri(uri, idx)                                 │
+│     ies_mapping_iterate(prefix, cb)                                     │
+│     ies_mapping_owner(oid) → "iss" | "framework" | "fiber_check" | ... │
+└────────────────────────┬────────────────────────────────────────────────┘
+                         │
+        ┌────────────────┴───────────────────────────────────┐
+        │                                                    │
+   ┌────▼────────┐                                  ┌────────▼─────────┐
+   │ snmpd master│                                  │  All Subagents   │
+   │             │                                  │  (link mapping)  │
+   │ thin layer  │                                  └────────────────┬─┘
+   │             │                                                   │
+   │ master       │                                                   │
+   │ agentx       │   AgentX TCP/AF_UNIX                              │
+   │ on 705       │ ◄─────────────────────────────────────────────────┤
+   │              │                                                   │
+   │ legacy       │              ┌──────────────────────────┐         │
+   │ ies-auto-mibs│              │ ISS subagent             │         │
+   │ (thin)       │              │   - ifTable / ifXTable   │         │
+   │              │              │   - OSPF / BGP / VRRP    │         │
+   └──────────────┘              │   - link state           │         │
+                                 │   - protocol stacks      │         │
+                                 │                          │         │
+                                 │ Owns: most std MIBs     │         │
+                                 └──────────────────────────┘         │
+                                                                      │
+                                 ┌──────────────────────────┐         │
+                                 │ framework Rust subagent  │         │
+                                 │   - Moxa private config  │         │
+                                 │   - sysContact/Name/...  │         │
+                                 │   - SET 4-phase commit   │         │
+                                 │   - JSON in-memory       │         │
+                                 │                          │         │
+                                 │ Owns: 8691.* config tree │         │
+                                 └──────────────────────────┘         │
+                                                                      │
+                                 ┌──────────────────────────┐         │
+                                 │ fiber_check subagent     │         │
+                                 │   - mxFiberCheck OIDs    │         │
+                                 │   - SFP DDM SHM direct   │         │
+                                 │                          │         │
+                                 │ Owns: 8691.603.5.3.*     │         │
+                                 └──────────────────────────┘         │
+                                                                      │
+                                 ┌──────────────────────────┐         │
+                                 │ lldp subagent            │         │
+                                 │   - LLDP-MIB             │         │
+                                 │   - mxLldp private       │         │
+                                 │ Owns: lldpMIB.*          │         │
+                                 └──────────────────────────┘         │
+                                                                      │
+                                 ┌──────────────────────────┐         │
+                                 │ ...其他 daemon...        │         │
+                                 └──────────────────────────┘         │
+```
+
+### 三個核心原則
+
+1. **mapping is data, not code** — OID ↔ URI ↔ 語意關係只記載一處(`libies_mapping.so` 的資料層),所有 consumer 透過 API 查詢
+2. **ownership is explicit** — 每個 OID prefix 明確指定誰是 owner subagent;主 dispatch 由 net-snmp registration tree 完成
+3. **framework remains source-of-truth for SET** — 仍透過 framework 持久化,但 framework 自己作為 subagent 處理 SET 4-phase
+
+---
+
+## 2. `libies_mapping.so` 設計
+
+### 2.1 資料來源
+
+從現有 `3rdparty_net_snmp/ies-auto-mibs/net_*.h` 跟 `ies_auto_mibs_setup_*.c` 抽出,
+新增 `owner_daemon` 欄位:
+
+```c
+struct ies_mapping_entry {
+    const oid     *oid;
+    size_t         oid_len;
+    const char    *uri;              /* "ifmibdb/ifTable/" */
+    const char    *uri_index;        /* "ifAdminStatus" */
+    int            val_type;         /* SNMP_DATA_TYPE_INTEGER, ... */
+    int            mode;             /* HANDLER_CAN_RONLY/RWRITE */
+    uint32_t       flags;            /* IES_FLAG_SNMP_* bitfield */
+    int            iss_build;        /* 1 = ISS 自家 / 0 = framework */
+    const char    *owner;            /* "iss" / "framework" / "fiber_check" / ... */
+    /* index handling, value-replace rules ... */
+};
+```
+
+### 2.2 Data format 選擇
+
+| 選項 | 優 | 缺 | 我的建議 |
+|---|---|---|---|
+| **a) 直接編進 .so 的 const array** | 啟動快、零 parse | 改 mapping 要重 build .so + 重啟所有 consumer | PoC 用,簡單 |
+| **b) Runtime 載 JSON / CBOR** | 改 mapping 不用重 build | parse 成本(~5 ms for 1500 entries)| 中期切換 |
+| **c) 混合** — .so 啟動 parse JSON 然後 cache hash table | 啟動可接受、後續 O(1) | 實作稍多 | 最終形態 |
+
+PoC 先走 (a),驗證可行性後再走 (c)。
+
+### 2.3 公開 API(header `libies_mapping.h`)
+
+```c
+/* C API, header-only signatures */
+
+/* Lookup */
+const ies_mapping_entry_t *
+ies_mapping_lookup_by_oid(const oid *o, size_t olen);
+
+const ies_mapping_entry_t *
+ies_mapping_lookup_by_uri(const char *uri, const char *uri_index);
+
+/* Iterate (e.g., subagent 啟動時批次 register) */
+typedef int (*ies_mapping_iter_cb)(const ies_mapping_entry_t *e, void *ctx);
+int ies_mapping_iterate_by_owner(const char *owner,
+                                  ies_mapping_iter_cb cb, void *ctx);
+int ies_mapping_iterate_by_prefix(const oid *prefix, size_t plen,
+                                  ies_mapping_iter_cb cb, void *ctx);
+
+/* Reverse */
+const char *ies_mapping_owner_of_oid(const oid *o, size_t olen);
+
+/* Versioning (cross-consumer schema check) */
+const char *ies_mapping_version(void);
+```
+
+### 2.4 Rust binding
+
+`lib_moxa_rust_ies_mapping` crate(自動 generate from C header):
+
+```rust
+pub struct MappingEntry { /* mirrors C struct */ }
+
+pub fn lookup_by_oid(oid: &[u32]) -> Option<MappingEntry>;
+pub fn lookup_by_uri(uri: &str, idx: &str) -> Option<MappingEntry>;
+pub fn iterate_by_owner(owner: &str) -> impl Iterator<Item=MappingEntry>;
+```
+
+framework 是 Rust(actix-web),要這個 binding 才能 register OID 給 master。
+
+---
+
+## 3. 每個 Subagent 的工程量
+
+### 3.1 ISS subagent
+
+| 任務 | 估工 |
+|---|---|
+| ISS link libnetsnmpagent / libnetsnmp(rebuild net-snmp 加 `agentx/subagent`) | 0.5 週 |
+| 寫 ISS subagent init(role=1, init_agent, init_snmp, event loop)| 1 週 |
+| Register protocol-stack OIDs(透過 mapping iterate)| 0.5 週 |
+| 對接 ISS 內部 SNMP handler(gpMibReg 的 Get / Set 函式)| 2 週 |
+| 處理 ISS 自家 SNMP stack 跟 net-snmp AgentX 的 session 隔離 | 1 週 |
+| 測試 + SET 4-phase 對 framework 的同步 | 1 週 |
+| **小計** | **6 週** |
+
+Owns(預估):
+- IF-MIB(ifTable / ifXTable / ifStackTable / ifRcvAddressTable)RO
+- BRIDGE-MIB
+- OSPF-MIB / BGP4-MIB / RIP2-MIB / ISIS-MIB
+- VRRP-MIB
+- IP-MIB / TCP-MIB / UDP-MIB
+- 802.1 / 802.3 部分
+- 大約 ~60% 的 std MIB
+
+### 3.2 framework subagent(Rust)
+
+| 任務 | 估工 |
+|---|---|
+| 評選 AgentX Rust crate(`agentx-tokio` 或自寫)| 1 週 |
+| Subagent 啟動 framework process 內部 thread(不影響主 actix-web)| 1 週 |
+| 接 mapping lib(透過 Rust binding)| 0.5 週 |
+| Register Moxa private config OIDs | 0.5 週 |
+| 對接 framework 內部 JSON state(in-memory commit)| 2 週 |
+| SET 4-phase:TestSet → 內部 validate;CommitSet → in-memory + 非同步寫盤 | 2 週 |
+| 測試 | 1 週 |
+| **小計** | **8 週** |
+
+Owns(預估):
+- Moxa private config(sysContact, sysName, sysLocation)
+- v3 USM users / VACM(若決定統一管)
+- 各 plugin 註冊的 config 鏡像 OID(對應 `/etc/moxa/netsnmp/config/*.conf` 那些 dlmod 的 RW 部分)
+- 大約 ~30% 的 OID
+
+### 3.3 daemon subagent(以 fiber_check 為範本)
+
+每個 daemon 估工:
+
+| 任務 | 估工 |
+|---|---|
+| 加 AgentX subagent thread / process(可選 in-process thread 或 sidecar) | 1 週 |
+| 接 mapping lib | 0.5 週 |
+| Register daemon-owned OIDs | 0.5 週 |
+| 對接 daemon 內部 state(從 SHM / memory 直接答)| 1 週 |
+| 對應 plugin 端的 dlmod conf 移除 / 共存策略 | 0.5 週 |
+| 測試 | 0.5 週 |
+| **小計每 daemon** | **3–4 週** |
+
+daemon 名單(從之前 trap 分析 + plugin 列表 ):
+1. fiber_check
+2. lldp(同時涉及 ISS-side LLDP MIB)
+3. dhcp_snp
+4. ptp / time_setting
+5. mstp(若有自家私有 OID)
+6. macsec
+7. iec62439_2
+8. multicoupling
+9. goose_check
+10. system_information(目前是 dlmod plugin)
+
+實際數量 5–10 個,以 fiber_check 起頭。
+
+### 3.4 snmpd 端 ies-auto-mibs cleanup
+
+| 任務 | 估工 |
+|---|---|
+| 設計 fallback 邏輯(沒移走的 OID 仍走原本 ies-auto-mibs handler)| 0.5 週 |
+| 隨遷移進度逐步刪除 entry array 內被搬走的 entry | 持續(每次 daemon 上線時連帶清)|
+| 最終 ies-auto-mibs 變 thin layer 或完全移除 | 1–2 週(末期)|
+| **小計** | **2–3 週累計** |
+
+### 3.5 總計
+
+| 階段 | 任務 | 估工 |
+|---|---|---|
+| 階段 0(已完成) | Plan C(AgentX + agentx_owned.list)| -- |
+| 階段 1 | mapping lib 設計 + 實作 + buildroot | **3 週** |
+| 階段 2 | PoC daemon(fiber_check)| **3 週** |
+| 階段 3 | framework subagent | **8 週** |
+| 階段 4 | ISS subagent | **6 週** |
+| 階段 5 | 其餘 4–8 個 daemon(各 3–4 週,可並行)| **6–10 週** |
+| 階段 6 | snmpd cleanup + 收尾 | **2–3 週** |
+| **總計** | | **~6 個月** |
+
+階段 2 / 3 / 4 可以部分並行,實際 wall-clock ~4–5 個月。
+
+---
+
+## 4. Latency 預期
+
+對照表(從現況到完成):
+
+| 場景 | 現況 cold cache | Plan C 後 | 方案 (2) 完成 |
+|---|---|---|---|
+| GET ifOperStatus(單 OID,fiberCheck pattern)| 600–1200 ms | ~3 ms(走 AgentX RO)| **~50 µs** |
+| GET fiberCheckStatTxPower(daemon-owned)| 15 ms | 15 ms(dlmod 不變)| **~50 µs** |
+| GET Moxa private config | 5–15 ms | 5–15 ms | **~100 µs** |
+| GET sysName | ~1 ms | ~1 ms | ~50 µs |
+| SET ifAdminStatus(走 framework)| 50–500 ms(含 hardcoded sleep)| 50–500 ms | **~200–500 µs**(framework in-memory)|
+| Walk ifTable(全 1583 row × 22 col,GETNEXT)| 數十秒 | ~10 s(transport 改善)| **~2 s** |
+| SET trap(VRRP master changed)| ~50 ms(走 MQTT)| ~50 ms | 不變(trap path 獨立)|
+
+最大改善:
+- **SET 從幾百 ms 降到 sub-ms**:framework subagent in-memory commit,寫盤非同步
+- **daemon-owned OID 從 ms 降到 µs**:fiber_check 不再透過 ies-auto-mibs → URI hook → ISS,直接讀自家 SHM
+
+---
+
+## 5. 風險清單與緩解
+
+### 5.1 已知風險
+
+| 風險 | 影響 | 緩解 |
+|---|---|---|
+| Rust AgentX crate 不成熟 | framework subagent 卡關 | (a) 起 PoC 早期驗證;(b) 若 crate 不行,自寫 thin wrapper 包 C lib;(c) 退路:framework 維持 dlmod 模式 |
+| ISS 兩套 SNMP stack 共存 | session/PDU 衝突 | ISS 內部把 net-snmp AgentX thread 跟自家 SNMP stack 隔離(不同 thread + 不共用 global state) |
+| 多 subagent 啟動順序 | snmpd 啟動時某些 subagent 還沒上線,OID 暫時 noSuchObject | systemd ordering: `After=app_moxa_snmp_server.service`;ies-auto-mibs 仍 fallback 直到 daemon ready |
+| mapping lib version mismatch | 不同 consumer 用不同 schema | `ies_mapping_version()` 在啟動時 cross-check;不對就退到 fallback |
+| AgentX session 斷線 | master 暫時看不到 OID | net-snmp 內建 reconnect;master 端 cache 上次答案 ~5s(類 Vincent 2026 Tier 3) |
+| Walk gap(snmpwalk 跨 owner)| 客戶 walk 看到 OID 缺漏 | mapping lib iterate by prefix 確保 owner 註冊範圍連續;測試覆蓋 walk 場景 |
+| SET 跨 owner 4-phase 協調 | TestSet 部分成功部分失敗 | master AgentX 對所有 subagent 都先 TestSet → 全 OK 才 CommitSet;失敗則 UndoSet。net-snmp 內建 |
+
+### 5.2 漸進遷移的 fallback 機制
+
+每階段都要保留:
+- snmpd ies-auto-mibs 仍 register,但 `agentx_owned.list` 控制哪些 prefix skip
+- daemon subagent 起來前,OID 走原本 ies-auto-mibs(可能慢但不掛)
+- daemon subagent 起來後,master 透過 longest-prefix-match 自動切過去
+
+→ **隨時可 rollback**,改 list 內容就好。
+
+---
+
+## 6. net-snmp Dispatch 規則(設計約束)
+
+PoC 設計關鍵:**dlmod plugin 跟 AgentX subagent 註冊同一個 OID 時不是並存,而是其中一邊勝出、另一邊拿不到 request**。動工前必須先理解這套規則,才能正確決定要不要拔掉舊 dlmod 載入。
+
+### 6.1 dispatch tree 的決勝邏輯
+
+net-snmp `agent/agent_registry.c::netsnmp_subtree_load` 三階段:
+
+1. **Longest-prefix match**:OID 註冊深度愈深愈贏
+2. **Same depth → priority**:priority 數字小者勝(default = 127)
+3. **Same depth + same priority → first-come-first-serve**:後到者 register 失敗,master 回 `MIB_DUPLICATE_REGISTRATION` /(subagent 收到)`AGENTX_ERR_DUPLICATE_REGISTRATION`
+
+### 6.2 啟動時序
+
+```
+t0  snmpd start
+t1  init_master_agent() — 開 AgentX listening socket on 705
+t2  init_mib_modules() 跑各 mibgroup init:
+      init_dlmod() → 掃 /etc/moxa/netsnmp/config/*.conf
+                  → dlopen plugin .so → 呼 init_<plugin>()
+                  → 內部 REGISTER_MIB 註冊到 dispatch tree
+                  → 通常 register 在 column-level OID(深度 ~13)
+                  → priority = 127 (default)
+t3  snmpd 進 event loop
+t4  app_moxa_<daemon> 啟動(systemd After=app_moxa_snmp_server)
+t5  daemon 內 subagent connect master:
+      agentx_open_session() → master 接受
+      netsnmp_register_*() → 送 agentx-Register-PDU
+                          → 通常 register 在 subtree prefix(深度 ~9)
+                          → priority = 127 (default)
+```
+
+→ **dlmod 永遠比 AgentX subagent 先到 dispatch tree**。
+
+### 6.3 同時存在時的對戰結果
+
+以 fiber_check 為例,fiberCheckStatTxPower OID = `.1.3.6.1.4.1.8691.603.5.3.2.1.1.1.8`(深度 13):
+
+| Scenario | dlmod register | AgentX register | request 流到哪 |
+|---|---|---|---|
+| 預設:都不調 priority,AgentX register subtree | 深度 13, prio=127 | 深度 9 (`.1.3.6.1.4.1.8691.603.5.3`), prio=127 | **dlmod**(longest-prefix 贏)|
+| AgentX 主動降 priority,仍 register subtree | 深度 13, prio=127 | 深度 9, prio=50 | **dlmod**(longest-prefix 仍贏 priority)|
+| AgentX register exact same column OIDs,降 priority | 深度 13, prio=127 | 深度 13, prio=50 | **AgentX**(priority 贏) |
+| AgentX register exact same OIDs,same priority | 深度 13, prio=127 | 深度 13, prio=127 | **dlmod**(先到先贏);**AgentX register 被拒** |
+| **dlmod 不載入(.conf 移除)** | 沒 register | 深度 9 | **AgentX**(獨一無二)|
+
+### 6.4 PoC 的正確設計
+
+**乾淨路徑(推薦)**:**移除 dlmod 載入**
+
+```bash
+# Buildroot 端:plugin_moxa_fiber_check 套件不安裝 .conf
+# (或運行時)
+rm /etc/moxa/netsnmp/config/fiber_check.conf
+systemctl restart app_moxa_snmp_server
+```
+
+→ 沒 dlmod registration → AgentX subagent 上線後 register 成功 → 拿到所有 fiberCheck request。
+
+**為什麼不用「並存,讓 AgentX 用低 priority 搶」**:
+- AgentX subagent 註冊 prefix 通常比 dlmod 註冊的 column-level 短,longest-prefix 永遠輸
+- 即使 AgentX 也 register 到 column-level,要逐個 OID 列舉,維護負擔大
+- 用「dlmod 完全不載」最清晰,而且**改 .conf 即可 rollback**
+
+**Fallback 機制**:
+- 想 rollback,把 .conf 放回去重啟 snmpd
+- daemon subagent 若連不上 master(daemon 還沒啟動或掛了),master 那條 prefix 內無 handler,GET 回 `noSuchObject` — 服務不會崩潰,只是該 OID 暫時讀不到
+
+### 6.5 驗證 AgentX 真的命中
+
+```bash
+# 在 snmpd.conf 開 debug
+echo "doDebugging 1"           >> /moxa/run/snmp/snmpd.conf
+echo "debugTokenInit agentx"   >> /moxa/run/snmp/snmpd.conf
+
+# 重啟、跑 GET、看 log
+systemctl restart app_moxa_snmp_server
+snmpget -v2c -c public localhost fiberCheckStatTxPower.1
+journalctl -u app_moxa_snmp_server | grep -E "agentx|dlmod" | tail
+# 預期: agentx/master: agentx master handler starting, mode=0x01
+# 而不是: dlmod: dlmod_handler called
+```
+
+或從 daemon 端抓 wire packet:
+```bash
+# AgentX over TCP 705
+sudo tcpdump -i lo -w /tmp/ax.pcap tcp port 705
+# AgentX over AF_UNIX
+sudo strace -e trace=sendmsg,recvmsg -p $(pidof app_moxa_fiber_check) 2>&1 | head
+```
+
+### 6.6 階段性遷移時三條路徑的共存規則
+
+| Plan 階段 | dlmod 載入 | ies-auto-mibs(snmpd 內) | AgentX subagent |
+|---|---|---|---|
+| 階段 0(現況) | 全部載入 | register 全 entry(含 RW)| ISS 一家(Plan C,僅 RO) |
+| 階段 2 PoC(fiber_check)| **fiber_check.conf 移除**,其他不動 | 同上 | + fiber_check daemon |
+| 階段 3 framework | 多數 dlmod 仍在,framework 相關 .conf 移除 | ies-auto-mibs 縮減(framework-owned 部分跳過,via list)| + framework |
+| 階段 5 完成 | 全部 dlmod 移除 | thin layer 或完全移除 | 全 daemon 上線 |
+
+**每 daemon 上線時必須同步做的三件事**:
+
+1. daemon 內 subagent 起來,register 該 OID prefix
+2. snmpd.conf / `/etc/moxa/netsnmp/config/*.conf` 不再 dlmod 載入該 plugin
+3. ies-auto-mibs 的 `agentx_owned.list`(Plan C 機制)加入該 prefix(若該 OID 也在 ies-auto-mibs entry array 內)
+
+三件事**缺一就會 dispatch 不對或註冊衝突**:
+- 缺 (1) → master 收 request 但沒有 handler 接,回 `noSuchObject`
+- 缺 (2) → dlmod 仍 register,longest-prefix-match 命中 dlmod,AgentX 拿不到
+- 缺 (3) → ies-auto-mibs 仍 register,搶過 AgentX
+
+### 6.7 Reference
+
+- net-snmp source:`agent/agent_registry.c::netsnmp_subtree_load`、`agent/mibgroup/agentx/master_admin.c:223`(AgentX register handler creation)
+- 對應於 Vincent 2022 PoC slide 25 的「Duplication is implicit ERROR」即指 6.1.3 規則
+- 對應於 Plan C 的 `agentx_owned.list` 機制(`mox_snmp_init_entry` 跳過 register)即 6.6 表中「ies-auto-mibs 縮減」的實作
+
+---
+
+## 7. PoC 路線圖(前 6 週)
+
+目標:用 fiber_check 驗證整套方案的 latency 改善幅度。
+
+### Week 1:Mapping lib API + data
+
+- 設計 `libies_mapping.h` 公開 API
+- 從 ies-auto-mibs 抽 fiber_check 相關 entry(~10 個 OID)生成 `mapping_data.c`
+- buildroot 套件骨架 `pkg_moxa_ies_mapping`
+- Unit test:`lookup_by_oid()` / `lookup_by_uri()` / `iterate_by_owner("fiber_check")`
+
+**Deliverable**:`libies_mapping.so.0.1`,只含 fiber_check OID。
+
+### Week 2:net-snmp 加 subagent 編譯選項
+
+- 改 buildroot `package/netsnmp/Config.in`,加 `agentx/subagent`
+- 重 build,確認 `nm libnetsnmpmibs.so | grep init_subagent` 有東西
+- 簡單 hello-world subagent 跑通(`~70 lines` 範本)
+
+**Deliverable**:任意 C process 能當 AgentX subagent。
+
+### Week 3–4:fiber_check 改 subagent
+
+- 在 `app_moxa_fiber_check` 加 subagent thread
+- Link libies_mapping → iterate_by_owner("fiber_check") → register OIDs
+- Handler 接到 GET → 讀現有 SHM `/etc/moxa/app-moxa-fiber-check/fiberCheck.stat`
+- 對接 fiber_check 主迴圈(SFP polling 不能停)
+
+**Deliverable**:fiber_check daemon 同時跑 SFP polling + AgentX subagent。
+
+### Week 5:snmpd 端整合
+
+> ⚠️ 請先確認讀過 §6(dispatch 規則),特別是 §6.6 的「上線時必須同步做的三件事」。
+
+- 加 `master agentx`(已 deploy 過,確認生效)
+- **刪掉 `/etc/moxa/netsnmp/config/fiber_check.conf`**(原本 dlmod 載入點)— §6.4 已說明為何不能跟 AgentX 並存
+- 在 `agentx_owned.list` 加 fiber_check 的 OID prefix(若該 OID 也在 ies-auto-mibs entry array 內)
+- 重啟 snmpd,**驗證 dispatch 真的走 AgentX**(§6.5)
+
+**Deliverable**:
+- `snmpget -v2c -c public localhost fiberCheckStatTxPower.1` 走新路徑
+- `journalctl ... | grep agentx` 看到 `agentx/master handler starting`,不再看到 `dlmod_handler called`
+
+### Week 6:Benchmark + 對照
+
+照 `~/agentx_vs_proxy_truth.md` 的 benchmark plan:
+- 跑 100 次 snmpget,P50/P99
+- 跑 28 port × 100 GET,平均/最大
+- 比對 Plan C 現況 vs PoC
+
+**Deliverable**:
+- `~/poc_fiber_check_results.md`,實測數據
+- 決定要不要繼續往階段 3(framework)走
+
+預期:fiber_check 的 GET 從 ~15 ms(目前 dlmod)降到 < 1 ms。
+
+---
+
+## 8. 完整時程
+
+```
+階段 1: mapping lib                       Week 1–3
+階段 2: PoC fiber_check                   Week 3–6   ← go/no-go 決策點
+階段 3: framework subagent                Week 5–13  (跟階段 4 並行)
+階段 4: ISS subagent                      Week 5–11  (跟階段 3 並行)
+階段 5: 其他 daemon                        Week 11–21 (兩兩並行)
+階段 6: snmpd cleanup                     Week 19–24
+
+總 wall-clock: 24 週 ≈ 6 個月
+```
+
+---
+
+## 9. 跟其他方案的整合
+
+### 8.1 跟 Plan C 的關係
+
+Plan C 是這方案的**階段 0**。`agentx_owned.list` 機制就是控制「哪些 OID 不在 snmpd 本地註冊,改由 subagent 處理」。階段 5 完成後,`agentx_owned.list` 會涵蓋幾乎所有 daemon OID。
+
+### 8.2 跟北京 proxy 的關係
+
+可以共存:
+- NOS v5.x 線上版本維持 Beijing proxy 模式不動
+- NOS v7.0 走方案 (2)
+- 兩者並行,客戶不受影響
+
+### 8.3 跟 Vincent 2026 PDF(in-process cache)的關係
+
+Vincent 2026 Tier 3 提的 in-process background cache,**精神跟方案 (2) 一致**:
+都是「資料就在 process 內,GET 直接讀記憶體」。差別:
+- Vincent 2026:在 snmpd 內 cache,timer 更新
+- 方案 (2):資料在各 daemon 內,subagent 直接答
+
+方案 (2) 比 Vincent 2026 更徹底,因為:
+- 沒「cache 失效」議題(daemon 自己是 source-of-truth)
+- 沒 cache 大小限制(daemon 各自管自家記憶體)
+
+---
+
+## 10. Reference
+
+- 已 deploy 的 Plan C:
+  - `3rdparty_net_snmp` branch `snmp-trace-time_diff` commit `4f9ead5`
+  - `plugin_moxa_snmp` branch `snmp-trace-time_diff` commit `4951001`
+- AgentX 機制深度分析:`~/agentx_vs_proxy_truth.md`
+- Beijing proxy 案例對照:`~/beijing_proxy_case_study.md`
+- Vincent 2022 PoC:`~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx`
+- Vincent 2026 重構:`~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung (董建隆) - Moxa Confluence.pdf`
+- net-snmp 5.9.3 subagent API:`agent/mibgroup/agentx/subagent.c`,以及前面討論過的 70 行範本
+- AgentX wire 協定:RFC 2741
+
+## Changelog
+
+- 2026-06-01:初稿。方案 (2) Multi-Subagent + Shared Mapping Library 規劃。

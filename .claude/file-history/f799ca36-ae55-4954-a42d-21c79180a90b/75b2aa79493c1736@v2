@@ -1,0 +1,42 @@
+# Plan D — Framework as AgentX Subagent (notes)
+
+> 狀態:未來任務(Plan D)。Plan D 之前會先把 ies-auto-mibs 獨立成 shared library(讓大家都看得到)。本檔記錄「只要兩個 subagent 就夠」的驗證結論與設計約束。日期:2026-07-01。
+
+## 目標
+把 framework(ies-auto-mibs)從「snmpd 內的 in-process dlmod」改成「獨立的 AgentX subagent 行程」,連到 snmpd master(127.0.0.1:705),與 ISS 平行當 peer。
+
+## 前置驗證問題
+要「只裝兩個 AgentX subagent(ISS + app_moxa_framework)」,必須確認:**有沒有 OID 資料只存在個別 daemon 裡、framework 的 URI 或 ISS 都拿不到?** 若有,那個 daemon 就得自己也變 subagent。
+
+## 驗證結論:兩個 subagent 就夠 ✅
+
+追 SNMP GET handler `mox_snmp_handle_entry` 的 method 1–4 + daemon 端,結果:
+
+| method | getter | 最終來源 | 歸屬 |
+|---|---|---|---|
+| 1a | `getEntryValue_uriScalar{Config,Status}_*` | `MOXA_SNMP_{CONFIG,STATUS}_URI` → LibFrameworkUri | **framework**(config/status layer) |
+| 1b | `getEntryValue_issScalarEntry` | `LibUtil_ExecShCmd(MOXA_SNMP_URI_CTRL_CLIENT --type read --uri…)` | **ISS**(uri-control-client) |
+| 1c | `getEntryValue_generalInfo_*`(MAC/serial/model/portNum) | `LibSystem_*`(shared lib,讀 EEPROM/檔) | **in-process lib**(非 daemon) |
+| 2 | `entry_handle_generate_uri_value_file` | LibFrameworkUri | **framework** |
+| 3 | `entry_handle_generate_iss_value_file` | uri-control-client | **ISS** |
+| 4 | dlmod | — | **未使用** |
+
+三項關鍵檢查:
+1. 全樹掃 `getEntryValue_*`:只出現 `LibFrameworkUri_* / LibSystem_* / URI_CTRL_CLIENT`,**零** `socket()/shm_open/shmget/connect()//var/run/…` → 沒有 getter 直連 daemon。
+2. dlmod 沒載入任何 Moxa .so(config_moxa_snmp_control.c 生成的 snmpd.conf + init_snmpd.sh 無 dlmod 指令)→ method 4 空。
+3. `grep agentx|netsnmp_register|SNMPRegisterMib|init_agent` 於 `app_moxa_*` = 空 → **沒有非 ISS daemon 自己 register OID / 當 subagent**(唯一註冊者是 ISS)。
+
+**語意**:各 daemon 確實持有自己領域的狀態,但**不直接對 SNMP 服務** —— 一律透過 framework 的 config/status layer(URI)被聚合(Morris 分層:daemon → status/config layer → 上層)。所以 framework 是所有非 ISS OID 的單一窗口,ISS 是唯一另一來源。
+
+## Plan D caveat / 設計約束
+
+1. **framework subagent 必備**:LibFrameworkUri(→config/status layer)、LibSystem(裝置資訊)、uri-control-client。這些本來就是 framework 的一部分,搬過去天生具備。
+2. **設計約束(要在 Plan D 明訂)**:任何**新增** SNMP OID 一律走 config/status layer,**不得直連某 daemon 的 socket/shm**。否則「兩個 subagent 就夠」的不變式會破。
+3. **效能提醒**:framework 這條(URI)就是 ~600ms 慢路。Plan D 把 framework 變 subagent 是**架構/分層**改善,不是效能改善 —— 效能仍受 config/status layer 本身限制。
+4. **會被 Plan D 打破的既有巧招** ⚠️:目前 Plan C 對 ifAdminStatus / ifXTable RW column 的「GET-forward 到 ISS」是靠 framework 還是 **in-process dlmod**(在 snmpd 行程內 `netsnmp_subtree_find` + `netsnmp_call_handlers` 呼叫 master 註冊樹裡 ISS 的 reg)。framework 一旦搬出去變獨立 subagent,**看不到 master 內部註冊樹,這招失效**,RW column 的「GET 快 + SET 分層」得重新設計(例如 ISS 全拿 ifTable GET+SET + ISS 端 mxcfg 上呼叫寫 config = 之前討論的 Q2)。
+
+## AgentX 拓樸(不變)
+- master = snmpd,聽 127.0.0.1:705。
+- ISS = subagent → 連 705(**Plan D 不需改 ISS 設定**)。
+- framework = 未來也當 subagent → 連 705,與 ISS 平行。
+- master 用 longest-prefix 仲裁多個 subagent 的註冊。

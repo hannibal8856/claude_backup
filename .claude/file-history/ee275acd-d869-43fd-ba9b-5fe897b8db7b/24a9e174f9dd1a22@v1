@@ -1,0 +1,1 @@
+dlmod fiber_check_event /etc/moxa/netsnmp/plugin/plugin_snmp_fiber_check_event.so

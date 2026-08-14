@@ -1,0 +1,210 @@
+/*****************************************************************************
+ * $Id: snxproto.h,v 1.4 2015/04/28 12:35:03 siva Exp $
+ *
+ * Description: This file contains the prototypes for the funcions defined in
+ *              Snmp Agentx. 
+ ****************************************************************************/
+
+/*snxmain.c*/
+INT4 SnxMainAgentxEnable (VOID);
+VOID SnxMainScheduleReconnect (VOID);
+INT4 SnxMainAgentxDisable (VOID);
+INT4 SnxMainProcessRcvdPkt (UINT1 *, UINT4);
+INT4 SnxMainPduProcess(tSnmpAgentxPdu *);
+INT4 SnxMainProcessClosePdu (tSnmpAgentxPdu *);
+INT4 SnxMainProcessResponsePdu (tSnmpAgentxPdu *);
+INT4 SnxMainValidateRcvResponse (tSnmpAgentxPdu * pResponsePdu);
+INT4 SnxMainProcessMgmtPdu (tSnmpAgentxPdu *);
+INT4 SnxMainRegisterMibs (VOID);
+INT4 SnxMainUnRegisterMibs (VOID);
+INT4 SnxMainCloseSession (VOID);
+INT4 
+SnxMainRegOrUnRegOid(tSNMP_OID_TYPE *, UINT1, UINT4, UINT1 , UINT1);
+INT4 SnxMainAddOrRemoveCaps ( tSNMP_OID_TYPE *pCapOid, 
+                         UINT1 *pu1CapDes, UINT1 u1Flag);
+INT4 SnxMainIndexAllocOrDeAlloc( tSNMP_VAR_BIND * pVbList, UINT1 u1AllocFlag,
+                           UINT1 u1Flag);
+INT4 SnxMainInitiatePing(VOID);
+
+INT4  SnxMainEncodeandTxPacket(tSnmpAgentxPdu  *pAgtxPdu);
+INT4  SnxMainAddAgtCaps       (VOID);
+INT4  SnxMainRmvAgtCaps       (VOID);
+INT4  SnxMainProcessUndoPdu(tSnmpAgentxPdu  *pUndoPdu);
+INT4  SnxMainProcessCommitPdu (tSnmpAgentxPdu * pCommitPdu);
+VOID  SnxMainFreePdu(tSnmpAgentxPdu  *pAgxPdu);
+VOID  SnxMainGenerateErrResPdu (tSnmpAgentxPdu * pMgmtPdu,
+                                UINT2 u2ErrCode);
+
+/*snxtrans.c*/
+INT4   SnxTransInit   (VOID);
+INT4   SnxTransDeInit (VOID);
+INT4   SnxTransOpenTcpConnection   (VOID);
+INT4   SnxTransOpenTcpV4Connection (VOID);
+INT4   SnxTransOpenTcpV6Connection (VOID);
+INT4   SnxTransRcvPacket    (UINT1   *pu1Packet, UINT4 *pu4PktLen);
+INT4   SnxTransTcpRcvPacket (UINT1 *pu1Packet, UINT4 *pu4PktLen);
+INT4   SnxTransTxPkt        (UINT1   *pu1Packet, UINT4 u4Len);
+INT4   SnxTransTcpTxPacket  (UINT1 *pu1Packet, UINT4 u4Len);
+UINT1  SnxTransByteOrderFlag(VOID);
+VOID   SnxTransTcpOutSocket (INT4 i4SockFd);
+VOID   SnxTransPktCallBack (INT4 i4SockFd);
+INT4   SnxTransInitTcpConnection(INT4    i4SockId);
+INT4   SnxTransInitIpv4TcpConnection (INT4 i4SockId);
+INT4   SnxTransInitIpv6TcpConnection (INT4 i4SockId);
+
+
+/*  snxutl.c */
+tSNMP_OCTET_STRING_TYPE *
+SnxUtlAllocOctetString (tSNMP_OCTET_STRING_TYPE  *pOctetStr);
+VOID
+SnxUtlFreeOctetString(tSNMP_OCTET_STRING_TYPE  *pOctetStr,
+                      UINT1 u1RelFlag);
+tSNMP_OID_TYPE * 
+SnxUtlAllocOid (tSNMP_OID_TYPE *pOid);
+VOID
+SnxUtlFreeOid(tSNMP_OID_TYPE *pOid, UINT1 u1RelFlag);
+tSnmpAgentxOidType *
+SnxUtlAllocAgtxOid (tSnmpAgentxOidType *pAgxOid);
+VOID
+SnxUtlFreeAgtxOid (tSnmpAgentxOidType *pAgxOid, UINT1 u1RelFlag);
+tSNMP_VAR_BIND *
+SnxUtlAllocVarBind(tSNMP_VAR_BIND * pVarBind);
+VOID
+SnxUtlFreeVarBind(tSNMP_VAR_BIND * pVarBind, UINT1 u1RelFlag);
+tSnmpSearchRng *
+SnxUtlAllocSrchRng(tSnmpSearchRng *pSearchRangeLst);
+tSnmpAgentxVarBind *
+SnxUtlAllocVarbind (tSnmpAgentxVarBind *pVarBindLst);
+VOID
+SnxUtlFreeVarbind (tSnmpAgentxVarBind *pVarBindLst, UINT1 u1RelFlag);
+VOID 
+SnxUtlFreeVbList(tSnmpAgentxVarBind *pVarBindLst);
+VOID
+SnxUtlFreeSrchRngLst (tSnmpSearchRng *pSearchRangeLst);
+VOID
+SnxUtlFreeSrchRng (tSnmpSearchRng *pSearchRange, UINT1 u1RelFlag);
+
+/*snxcode.c*/
+INT4 
+SnxCodeDecodeOid(UINT1 *pu1Buf,UINT4 *pu4OffSet,UINT1 u1Flag,
+                 tSnmpAgentxOidType *pSnxOidType);
+INT4 
+SnxCodeDecodePacket(UINT1 *pu1Buffer, INT4 i4PktLen,
+                    tSnmpAgentxPdu *pAgentxPdu);
+VOID 
+SnxCodeGet4ByteData(UINT1 *pu1Buffer, UINT4 *pu4OffSet, UINT1 u1Flags, 
+                    UINT4 *pu4Data); 
+VOID 
+SnxCodeGet8ByteData(UINT1 *pu1Buffer, UINT4 *pu4OffSet, UINT1 u1Flags, 
+                    tSNMP_COUNTER64_TYPE *pu8Data);
+VOID 
+SnxCodeGet2ByteData(UINT1 *pu1Buffer, UINT4 *pu4OffSet, UINT1 u1Flags, 
+                    UINT2 *pu2Data);
+INT4 
+SnxCodeDecodeVbList(UINT1 *pu1Buffer,UINT4 u4OffSet, tSnmpAgentxPdu *pAgentxPdu);
+INT4 
+SnxCodeDecodeObjValue(UINT1 *pu1Buffer,UINT4 *pu4OffSet, UINT1 u1Flags, 
+                      tSnmpAgentxVarBind *pVbList);
+INT4 
+SnxCodeGetOctetString(UINT1 *pu1Buf,UINT4 *pu4OffSet, UINT1 u1flag,
+                      tSNMP_OCTET_STRING_TYPE *pSnmpOctetString);
+INT4 
+SNMPAgentxEncodePacket(tSnmpAgentxPdu *pAgentxPdu,INT4 *pi4PktLen,  
+                       UINT1 *pu1Buffer);
+INT4 
+SnxCodeDecodeContextInfo(UINT1 *pu1Buffer, UINT4 *pu4OffSet,
+                         tSnmpAgentxPdu *pAgentxPdu);
+INT4 
+SnxCodeDecodeSearchRngList(UINT1 *pu1Buffer,UINT4 u4OffSet,
+                           tSnmpAgentxPdu *pAgentxPdu);
+INT4 
+SnxCodeDecodePduSpecificData(UINT1 *pu1Buf, UINT4 u4OffSet,
+                             tSnmpAgentxPdu *pAgentxPdu);
+INT4 
+SnxCodeConvertAgentPduToAgtxPdu(tSNMP_NORMAL_PDU *pSnmpPdu,
+                                tSnmpAgentxPdu *pAgentxPdu);
+
+INT4 
+SnxCodeConvertAgentOidToAgtxOid(tSNMP_OID_TYPE *pSnmpOid,
+                                tSnmpAgentxOidType *pSnxOidType,
+                                UINT4 u4PrefixFlag);
+INT4 
+SnxCodeConvertAgtxPduToAgentPdu(tSnmpAgentxPdu *pAgentxPdu,
+                                tSNMP_NORMAL_PDU *pSnmpPdu);
+
+INT4
+SnxCodeEncodePacket (tSnmpAgentxPdu *pAgentxPdu, UINT1 *pau1Buf ,
+                     UINT4 *pu4OutLen);
+
+PUBLIC VOID 
+SNMPFreeVarbindList (tSNMP_VAR_BIND * vb_ptr);
+
+VOID 
+SnxCodePut4ByteData (UINT4 u4Data, UINT4 *pu4OffSet, UINT1 u1Flags, 
+                     UINT1 *pu1Buffer);         
+
+VOID 
+SnxCodePut8ByteData (tSNMP_COUNTER64_TYPE u8Data, UINT4 *pu4OffSet, 
+                     UINT1 u1Flags, UINT1 *pu1Buffer);
+
+VOID 
+SnxCodePut2ByteData (UINT2 u2Data, UINT4 *pu4OffSet, UINT1 u1Flags, 
+                     UINT1 *pu1Buffer);         
+
+INT4 
+SnxCodePutOctetString(tSNMP_OCTET_STRING_TYPE *pSnmpOctetString,
+                      UINT4 *pu4OffSet, UINT1 u1Flags,
+                      UINT1 *pu1Buf);
+
+INT4 
+SnxCodeEncodeOid(tSnmpAgentxOidType *pSnxOidType,UINT4 *pu4OffSet,
+                 UINT1 u1Flag, UINT1 *pu1Buf);
+
+INT4 
+SnxCodeEncodePduSpecificData(UINT1 *pu1Buf, UINT4 u4OffSet,
+                             tSnmpAgentxPdu *pAgentxPdu);
+
+INT4 
+SnxCodeEncodeContextInfo(UINT1 *pu1Buffer, UINT4 *pu4OffSet,
+                         tSnmpAgentxPdu *pAgentxPdu);
+
+INT4 
+SnxCodeEncodeVbList(tSnmpAgentxPdu *pAgentxPdu,UINT4 u4OffSet,
+                    UINT1 *pu1Buffer);
+
+INT4 
+SnxCodeEncodeObjValue(tSnmpAgentxVarBind *pVbList, UINT4 *pu4OffSet, 
+                      UINT1 u1Flags, UINT1 *pu1Buffer);
+
+INT4 
+SnxCodeConvertAgtxOidToAgentOid(tSnmpAgentxOidType *pSnxOidType, 
+                                tSNMP_OID_TYPE *pSnmpOid);
+
+
+
+INT4
+SnxCodeConvertAgtxVbLstToVbList(tSnmpAgentxVarBind *pAgtxVbList,
+                                tSNMP_VAR_BIND **ppVbList, 
+                                tSNMP_VAR_BIND **ppRtptr);
+
+INT4
+SnxCodeConvertVbLstToAgtxVbList(tSNMP_VAR_BIND *pVbList,
+                                tSnmpAgentxVarBind **ppAgtxVbList);
+
+INT4
+SnxCodeGetVbLstLen (tSnmpAgentxVarBind *pAgtxVbList);
+
+
+INT4
+SnxCodeConvertAgtxSrchRngLstToVbList(tSnmpSearchRng *pSrchRngLst,
+                                     tSNMP_VAR_BIND **ppVbList,
+                                     tSNMP_VAR_BIND **ppEndVb, UINT1 u1PduType);
+
+INT4
+SnxCodeConvertAgtxSrchRngToVb(tSnmpSearchRng *pSrchRngLst,
+                              tSNMP_VAR_BIND *pVbList); 
+
+VOID
+SnxCodeUpdateRespPduWithErrId (tSnmpAgentxPdu * pAgentxPdu);
+
+/********************  End of emproto.h *************************************/

@@ -1,0 +1,91 @@
+moxa(config)# trusted-access disable 
+[237003.109016] audit_printk_skb: 3 callbacks suppressed
+[237003.114224] audit: type=1325 audit(1682407062.190:24): table=filter family=2 entries=15
+[237003.128988] audit: type=1325 audit(1682407062.210:25): table=filter family=2 entries=14
+[237003.143865] audit: type=1325 audit(1682407062.230:26): table=filter family=2 entries=8
+moxa(config)# end
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-04-25 07:17:48
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0724_1233
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.126.21 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+!
+interface ethernet 1/2
+moxa# exit
+$ cat /moxa/run/flask-moxa-config-layer/RunningConfig/trustedAccess.json -n
+     1  {"trustedIp":[{"ipAddress":"192.168.126.21","netmask":"255.255.255.0","valid":true}],"enableTrustedAccess":false}
+$ moxash
+Welcome to MOXA command shell
+Current time is Tuesday, April 25, 2023, 07:18 AM
+
+
+Please change the password in order to enhance security.
+
+moxa# con t
+moxa(config)# no tru
+CONFIGURE commands :
+  no trusted-access ip-source <ip-address> [{<subnet-mask> | / <prefix-length(0-
+32)>}]
+
+moxa(config)# no trusted-access ip
+CONFIGURE commands :
+
+  no trusted-access ip-source <ip-address> [{<subnet-mask> | / <prefix-length(0-
+32)>}]
+
+moxa(config)# no trusted-access ip-source ?
+
+A.B.C.D(<ip_addr>)          Configure network or host IP address 
+
+moxa(config)# no trusted-access ip-source 192.168.126.21 ?
+
+/                           Configure CIDR notation 
+<CR>                        End of command
+A.B.C.D(<ip_mask>)          Configure subnet mask for the IP address 
+
+moxa(config)# no trusted-access ip-source 192.168.126.21 255.255.255.0
+moxa(config)# end
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-04-25 07:18:57
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0724_1233
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+snmp-server access enable
+interface ethernet 1/1
+!
+interface ethernet 1/2
+!
+moxa# exit
+$ !cat
+cat /moxa/run/flask-moxa-config-layer/RunningConfig/trustedAccess.json -n
+     1  {"trustedIp":[],"enableTrustedAccess":false}
+$ 

@@ -1,0 +1,83 @@
+SILENCE?=@
+PROJECT_NAME=app_moxa_iss_10_1_0
+VERSION=$(shell dpkg-parsechangelog --show-field Version)
+
+PWD=$(shell pwd)
+
+CONFIG_DIR=$(PWD)/config
+ISS_BASE_DIR=$(PWD)/code/future
+MAKEFILE_PATH=$(ISS_BASE_DIR)/LR
+PROJECT_PATH?=/etc/moxa/app_moxa_issloader
+USR_LIB_SYSTEMD_PATH := /usr/lib/systemd/system
+MULTIUSER_TARGET_WANTS_PATH := /etc/systemd/system/multi-user.target.wants
+export ISS_BASE_DIR
+
+URI_CTRL_HOOK_PATH=$(PWD)/code/uri_ctrl_hook
+URI_TOOL_PATH=$(PWD)/code/uri_tools
+
+XPHY_FWR_INSTALL_PATH:=$(DESTDIR)/sbin
+XPHY_FWR_IMAGE_FILE_3340P_REVA:=x3310fw_0_3_7_0_10079.hdr
+
+# Original CFLAGS get by dpkg-buildflags --get CFLAGS
+# -g -O2 -fstack-protector-strong -Wformat -Werror=format-security
+# ISS code violates -Wformat -Werror=format-security
+# Currently, a temporary solution is to disable -Werror
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DPKG_EXPORT_BUILDFLAGS = 1
+
+
+.PHONY: all
+all: build
+
+.PHONY: clean
+clean:
+	$(SILENCE)$(MAKE) -C $(MAKEFILE_PATH) clean
+	$(SILENCE)$(MAKE) -C $(URI_CTRL_HOOK_PATH) clean
+	$(SILENCE)$(MAKE) -C $(URI_TOOL_PATH) clean
+
+.PHONY: uri_tools
+uri_tools:
+	@echo "making" $@ " START ... "
+	cd $(URI_TOOL_PATH);sh build.sh >/dev/null;cd ../
+	@echo "making" $@ " DONE  !!! "
+
+.PHONY: uri_ctrl_hook
+uri_ctrl_hook:
+	@echo "making" $@ " START ... "
+	$(SILENCE)$(MAKE) -C $(URI_CTRL_HOOK_PATH)
+	@echo "making" $@ " DONE  !!! "
+
+.PHONY: build
+build: APT_INSTALL_REQ  uri_tools uri_ctrl_hook
+	CFLAGS=$(echo $(CFLAGS) | sed -e 's/-Wformat//g' -e 's/-Werror=format-security//g')
+	$(SILENCE)$(MAKE) -C $(MAKEFILE_PATH) exe -j3
+
+.PHONY: APT_INSTALL_REQ
+APT_INSTALL_REQ:
+	#apt-get install -y bison flex libfl-dev
+
+.PHONY: install
+install:
+	$(SILENCE)mkdir -p $(DESTDIR)/sbin
+ifeq ($(MOXA_HW_MAC), BCMX)
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/sbin/bcm_config
+	install $(CONFIG_DIR)/*.bcm $(DESTDIR)/usr/sbin/bcm_config/
+endif
+	install $(MAKEFILE_PATH)/ISS.exe $(DESTDIR)/sbin/ISS.exe
+	install $(URI_CTRL_HOOK_PATH)/app/ies_uri_handle_client $(DESTDIR)/sbin/ies_uri_handle_client
+	install $(PWD)/phy_firmware/$(XPHY_FWR_IMAGE_FILE_3340P_REVA) $(XPHY_FWR_INSTALL_PATH)
+	$(MAKE) -C $(MAKEFILE_PATH) install DESTDIR=$(DESTDIR)
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/bin
+
+	#install setup script
+	$(SILENCE)mkdir -p $(DESTDIR)/$(PROJECT_PATH)
+	$(SILENCE)mkdir -p $(DESTDIR)/sbin
+	$(SILENCE)cp src/app_moxa_iss_init.sh $(DESTDIR)/$(PROJECT_PATH)
+	$(SILENCE)cp src/app_moxa_init_complete.sh $(DESTDIR)/$(PROJECT_PATH)
+	$(SILENCE)cp code/future/LR/issnvram.txt $(DESTDIR)/$(PROJECT_PATH)
+
+	#install systemd service
+	$(SILENCE)mkdir -p $(DESTDIR)/$(USR_LIB_SYSTEMD_PATH)
+	$(SILENCE)mkdir -p $(DESTDIR)/$(MULTIUSER_TARGET_WANTS_PATH)
+	$(SILENCE)install -m 644 document/app_moxa_iss_init.service $(DESTDIR)/$(USR_LIB_SYSTEMD_PATH)/app_moxa_iss_init.service
+	$(SILENCE)ln -sf $(USR_LIB_SYSTEMD_PATH)/app_moxa_iss_init.service $(DESTDIR)/$(MULTIUSER_TARGET_WANTS_PATH)/app_moxa_iss_init.service

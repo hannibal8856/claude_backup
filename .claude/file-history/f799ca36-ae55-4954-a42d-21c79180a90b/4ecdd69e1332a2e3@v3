@@ -1,0 +1,47 @@
+#ifndef _MOXA_SNMP_CONSTANT_H_
+#define _MOXA_SNMP_CONSTANT_H_
+
+#define MOXA_SNMP_URI_CONFIG_PATH(_URI_TARGET_PATH_)     "/api/v1/setting/data/"    _URI_TARGET_PATH_
+#define MOXA_SNMP_URI_STATUS_PATH(_URI_TARGET_PATH_)     "/api/v1/status/"          _URI_TARGET_PATH_
+#define MOXA_SNMP_URI_COMMAND_PATH(_URI_TARGET_PATH_)    "/api/v1/command/"         _URI_TARGET_PATH_
+#define MOXA_SNMP_URI_ACTION_PATH(_URI_TARGET_PATH_)     "/api/v1/setting/action/"  _URI_TARGET_PATH_
+#define MOXA_SNMP_AGENT_PATH(_AGENT_TARGET_PATH_)        "/api/v1/setting/agent/"   _AGENT_TARGET_PATH_
+
+#define MOXA_SNMP_MAX_SET_DELAY                                          (1)
+#define MOXA_SNMP_MAX_CFG_DELAY                               ( 400 * 1000 )
+#define MOXA_SNMP_MAX_STR_VALUE_LEN                                  (40960)    /* origin is 8192 */
+#define MOXA_SNMP_MAX_BIT_VALUE_LEN                                    (512)
+
+#define MOXA_SNMP_MAX_URI_LENGTH                                       (400)
+#define MOXA_SNMP_MAX_FILE_NAME                                        (256)
+#define MOXA_SNMP_MAX_FILE_BUFF                                       (2048)
+#define MOXA_SNMP_MAX_OID                                              (400)
+#define MOXA_SNMP_MAX_OID_NUM_STR                                        (8)
+#define MOXA_SNMP_MAX_TABLE_ENTRY                                       (32)
+#define MOXA_SNMP_MAX_TABLE_ENTRY_OID                          ( 18 * 1024 )
+#define MOXA_SNMP_MAX_TABLE_ENTRY_BUFFER                 ( 4 * 1024 * 1024 )
+#define MOXA_SNMP_MAX_TABLE_ENTRY_TIMEOUT              ( 800 * 1000 * 1000 ) /* in nanoseconds  */
+#define MOXA_SNMP_MAX_TABLE_ENTRY_LAST_ACCESS_TIME     ( 200 * 1000 * 1000 ) /* in nanoseconds  */
+
+#define MXCFG_INTERNAL_PORT_INDEX(userPortIdx)    (userPortIdx - 1)
+
+#define MXCFG_FILTER               "FILTER?"
+
+#define MOXA_SNMP_URI_CTRL_CLIENT  "/sbin/ies_uri_handle_client "
+#define MOXA_SNMP_ISS_MAKEUP_IDX   "/bin/iss_snmp_makeup_index  "
+#define MOXA_SNMP_PATH             "/moxa/run/auto_mibs/"
+
+#define MOXA_SNMP_JSON_BOOLEAN       1
+#define MOXA_SNMP_JSON_NUMBER        2
+#define MOXA_SNMP_JSON_STRING        3
+#define MOXA_SNMP_JSON_IPV4Addr      4
+#define MOXA_SNMP_JSON_MACAddr       5
+
+#define MOXA_SNMP_CONFIG_URI         1
+#define MOXA_SNMP_STATUS_URI         2
+
+#define MOXA_SNMP_JSON_INVALID      (-1)
+#define MOXA_SNMP_JSON_TRUE          (1)
+#define MOXA_SNMP_JSON_FALSE         (0)
+
+#endif //_MOXA_SNMP_CONSTANT_H_

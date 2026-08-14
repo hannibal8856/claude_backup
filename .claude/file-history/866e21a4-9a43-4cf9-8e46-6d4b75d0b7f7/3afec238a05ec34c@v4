@@ -1,0 +1,209 @@
+# ADR-0030: 推翻 ADR-0025 —— `+getfwd` 在四個 prefix 上都會轉發(封包證實)
+
+Status:
+  **Accepted(2026-08-12)** —— **推翻 ADR-0025 的核心主張**,不是補充。
+  ADR-0025 的「`+getfwd` 對 `stdethdb/` 與 `mxportdb/` 靜默無效」在 image
+  `2026_0812_1532` 上以封包證據否證。ADR-0025 的其餘內容(判準缺陷的分析、
+  「只量時間會得到錯誤結論」的方法論)不受影響,仍然成立。
+
+Date: 2026-08-12
+
+Context:
+  ADR-0025 記載 `+getfwd` 對 `stdethdb/` 與 `mxportdb/` **靜默無效**,並把根因
+  縮小到 `mox_snmp_handle_entry()` GET 分支的兩條靜默 fall-through 路徑
+  (`mox_snmp_probe_for_entry()` 回 NULL,或 `mox_snmp_forward_get_to_iss()` 回 -1),
+  結論是「黑箱測不出來,需要 debug build 加 instrument」(ADR-0025 `:66-74`)。
+
+  使用者 2026-08-12 裁示編 debug image 追這個根因。
+
+Decision:
+  **實測結果:四個 prefix 全部都會轉發。根因不存在,因為缺陷不存在。**
+
+  **① 做法**
+
+  在 `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` 加六個 trace 標記,
+  用檔內既有的 `LibUtil_DbgTrace(kDbgFlgIssUriSNMP, ...)`(runtime flag,
+  `moxa_snmp_tools --enable` 開啟,輸出 `/run/util_debug/debug_log_5`):
+
+  | 標記 | 位置 | 回答的問題 |
+  |---|---|---|
+  | `T1 NOTE/OVERFLOW/BADOID` | `probe_note_delegated()` | probe 有沒有被記錄;**原本兩個原因共用一個靜默 return,已拆開** |
+  | `T1b SHADOW` | `probe_note_shadowed()` | 哪個 OID 被合成 index 搶走、命中幾個候選 |
+  | `T2 SAMETABLE/FALLBACK/NULL` | `probe_for_entry()` | 選到哪個 probe、掃過幾個、被什麼濾掉 |
+  | `T3 FIND` | `forward_get_to_iss()` | `subtree_find` 找到的**是誰**(`rootoid`/`priority`/`access_method` 指標) |
+  | `T3b INSTANCE` | 同上 | 裸 column OID vs 帶 instance sub-id,並排對照 |
+  | `T4 GATE/RESULT` | 呼叫點 `:3277` | RW GET 有沒有進到這個閘、`fwd_rc` 是多少 |
+
+  並在 `agentx_owned.list` 的 `stdethdb/` 與 `mxportdb/` 兩行加上 `+getfwd`
+  ——**這是必要前置**:`:3557-3560` 只在該 prefix 有 `+getfwd` 時才記錄 probe,
+  沒加就編會得到 `T2 NULL` 這個**假的根因**,而且看起來完全合理。
+
+  image `2026_0812_1532`,燒在 p1(從 p2 mainline 側燒,p2 未動)。
+
+  **② 證據 —— 兩層獨立,結論一致**
+
+  **線上(pcap,`tcpdump -i lo -n -U -w ... tcp port 705`,366 captured / 0 dropped):
+  五個 AgentX Get PDU(type 5, session 6),對端 `127.0.0.1:49882` = `ISS.exe` (pid 297)。**
+
+  | frame | prefix | 表 | 解碼後的 OID |
+  |---|---|---|---|
+  | 261 | `ifmibdb/` | ifTable | `.1.3.6.1.2.1.2.2.1.7.1`(ifAdminStatus) |
+  | 272 | `ifmibdb/` | ifXTable | `.1.3.6.1.2.1.31.1.1.1.18.1`(ifAlias) |
+  | 280 | `stdethdb/` | dot3PauseTable | `.1.3.6.1.2.1.10.7.10.1.1.1`(Dot3PauseAdminMode) |
+  | 288 | `mxportdb/` | portConfigTable | `.1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1` |
+  | 299 | `mxrstpdb/` | (scalar) | `.1.3.6.1.4.1.8691.603.3.2.1.1.0`(RstpConfigEnable) |
+
+  **process 內部(trace):** 五個請求的 `T4 RESULT` 全部 `fwd_rc=0 -> FORWARDED`,
+  `T3 FIND` 的 `access_method` 全部是 `0xb6f51688` —— 與 mxRstp 正對照**同一個指標值**,
+  即同一個 AgentX handler,不是 in-master 的別人。
+
+  **③ 兩個假說同時被否證**
+
+  - **instance sub-id 假說**(當年有效的 probe 帶 `.1`,現行推導的是裸 column OID):
+    `T3b` 顯示**裸與 `.1` 都 found、`access_method` 相同**。
+  - **ADR-0025 `:72-74` 的「RW 欄掛在合成表的別的 handler、根本沒進 `MODE_IS_GET` 閘」**:
+    五個請求**全部印出 `T4 GATE`**,代表都有進到這個閘。
+
+  **④ 一個機制細節 —— 先前已由原始碼推導,本次線上證實**
+
+  (`snmp-plan-E trace 2` 2026-08-12 的說明文件已從原始碼推出這一點並標為
+  「最容易誤解的一點」。本 ADR 的貢獻是**線上證據**,不是首次提出 ——
+  這個差別對後續讀者的信心不同:它是可預測的機制,不是意外。)
+
+  **轉發送出的是「原始請求的 OID」,不是 probe OID。** probe 只用來**定位註冊**
+  (`netsnmp_subtree_find`),不是拿來取值的 —— frame 288 送出的是被請求的
+  `.603.1.1.1.1.1.2.1`,而 `T2` 選中的 probe 是 `.603.1.1.2.1.1.1`(portStatTable)。
+  這解釋了為什麼 `T3b` 裸 vs `.1` 沒有差別:probe 只需要解析到正確的 subagent。
+
+  **⑤ 範圍界定(不可被讀成比實際更強)**
+
+  驗的是**每個 prefix 各 1–2 個 RW 欄 / 各 1–2 張表**,不是全部 RW 欄。
+  probe 選擇以 **URI(表)** 為單位,某張表若候選全被 shadowed 且 fallback 落空
+  仍可能失敗。**正確敘述是「這四個 prefix 的 opt-in 閘門與轉發路徑經封包證實成立」,
+  不是「所有 RW 欄都會轉發」。** `stdethdb/` 例外 —— 它只有一個 RW 欄,那格完整。
+
+Consequences:
+  - **ADR-0025 的「未根因缺陷」條目應標記為已否證。** 那條缺陷不存在;
+    ADR-0025 其餘內容(舊 `fwdcheck.sh` 判準的缺陷分析、「只量時間會得到錯誤結論」)
+    仍然成立且有價值。
+  - **`ifmibdb/` 首次取得封包證據。** 它自 ADR-0028 收回宣稱後一直是未驗證狀態。
+    現在四條 `+getfwd` 中,四條都有線上證據。
+  - **`agentx_owned.list` L8-10 的註解已知過時**(把 ADR-0014 的 +13.5% 寫成
+    「現在不開 `+getfwd` 的理由」)。本輪刻意不改 —— 那是診斷用的暫時改動,
+    混入註解修正會讓 diff 失去單一目的。**待決定旗標去留時一併處理。**
+  - **未決:`stdethdb/` 與 `mxportdb/` 的 `+getfwd` 要不要留。** 這是效能取捨,
+    不是正確性問題,而且 ADR-0025 那組 A/B 時間數字是在「以為沒轉發」的前提下解讀的,
+    需要重新量。**本 ADR 不做這個決定。**
+  - **trace instrumentation 是 debug-only,不進出貨。**
+    ⚠️ **`2026_0812_1532` 這顆 image 的任何時間數字都不可用,而且「把旗標關掉」救不了。**
+
+    兩層成本,第二層容易被忽略:
+
+    1. **旗標開啟時**:每行 trace 是一次 `fopen`+`fflush`+`fclose`
+       (`util_debug.c:87-93`)寫到 `/run`(tmpfs 202MB)。
+    2. **旗標關閉時仍然有成本** —— `LibUtil_CheckDbgFlgBits()`
+       (`util_debug.c:231-275`)**每次呼叫**都跑一輪完整的 SHM attach:
+       `_LibUtil_InitDbgFlagShm()` → `ftok()` → `shmget()` → `shmat()`,**沒有快取**。
+       `T4 GATE` 每個 RW GET 都會打到,`T2`/`T3`/`T3b` 每次轉發都會打到。
+
+    → 要量 `+getfwd` 的真實成本,必須另編一顆**含相同 `agentx_owned.list`、
+    但不含 instrumentation** 的 image,並交錯 A/B/A。**不是「順手量一下」的量級。**
+
+    連帶:ADR-0014 推導的「opt-in 後 0.691s → 全轉發 0.779s = +12.7%」
+    **既不是實測、前提(mxPort 不轉發)也已被本 ADR 推翻**,不可再引用。
+    當前 code base 上的轉發成本是**未量測**狀態。
+
+  **未解決:為什麼與 ADR-0025 結論不同。** 2026-08-12 由 `snmp-plan-E trace 2`
+  以 git 考古刪掉兩個候選,剩下的收斂成一個可測的假說:
+
+  - ❌ **「兩次之間 code 變了」——已排除。** `ies_auto_mibs.c` 最後改動是 `69c535a`
+    (08-09),`moxa_snmp_handle_util.c` 是 `7b72142`(08-08);之後全 repo 只有三個
+    commit(`638f819` / `fda1a50` / `d4e35b8`),逐一看過 diff **沒有一行落在四個
+    prefix 底下**。轉發機制與四個 prefix 的資料兩次之間完全相同。
+  - ❌ **「當時單獨開啟」——已排除。** ADR-0025 `:23-25` 明載量測方式與 ADR-0024 相同,
+    `:38` 記載「同一顆 snmpd instance、同一次量測期間 mxRstp 轉發正常」,
+    代表當時四條同時生效,且 N=150(不在小 N 假 delta=0 的區間)。
+  - ⬜ **剩下的唯一結構差異:旗標怎麼套用到 DUT。**
+
+    | | 套用方式 |
+    |---|---|
+    | ADR-0025 | **bind mount 換掉** `/etc/moxa/netsnmp/agentx_owned.list` + 重啟 service(既有 image)|
+    | ADR-0030 | 完整 build + 燒錄(新 image) |
+
+    **假說**:probe 只在**註冊期**記錄(`:3557-3560`),且只記錄當下 `+getfwd` 為真的
+    prefix;`gAgentXOwnedLoaded` 是行程內的 static。若那次重啟沒有真正重跑
+    `mox_snmp_init_entry()`(service 重啟但 snmpd 進程沒換,或旗標讀取已被 latch),
+    則 `stdethdb/` 與 `mxportdb/` **不會有 probe** → G5 回 NULL → 乾淨 fall-through,
+    **正是 ADR-0025 觀察到的症狀**;而 `mxrstpdb/` 因為 probe 早已存在故照常轉發。
+
+    **⛔ 2026-08-12 已執行,假說否證。** 在 trace image 上直接量 `T1 NOTE`
+    (probe 只在註冊期記錄,所以它就是「註冊迴圈有沒有看到新旗標」的直接讀數):
+
+    | 階段 | live list | 重啟方式 | `T1 NOTE` probe 數 |
+    |---|---|---|---|
+    | A | 2 旗標(bind mount `/tmp/list2`) | `systemctl restart app_moxa_snmp_server.service` | **59** —— `ifmibdb/` 41、`mxrstpdb/` 18、另兩者 **0** |
+    | B | 4 旗標(bind mount `/tmp/list4`) | moxash `snmp-ser acc dis` → `acc en` | **101** —— 41 / 33 / 9 / 18,四者全有 |
+
+    **兩個方向都生效**:拿掉旗標 probe 就消失,加回去 probe 就回來,而且 B 的
+    逐 prefix 數字與燒錄版 `T2` 觀察到的 `scanned=101` **完全一致**。
+    兩種重啟方式都會重讀 list 並重跑註冊迴圈。
+
+    → **bind mount 熱套用不是差異來源。**
+
+  **因此候選 1(舊 `fwdcheck.sh` 判準)是唯一存活的解釋 —— 但「唯一存活」不等於「已證實」。**
+  要證實它,需要用舊判準重跑一次並顯示它在明知會轉發的情況下仍判為未轉發。**未執行。**
+
+Alternatives considered:
+  - **用 `snmp_log()` 或 raw `printf` 做 trace** —— 已捨棄。檔內到處都在用
+    `LibUtil_DbgTrace`,而且它是 runtime flag 控制的,關掉不必重編;
+    預設關閉時這顆 image 的行為與正常版一致。
+  - **只印 `subtree_find` 是否為 NULL** —— 不夠。`:3189` 只驗非 NULL,
+    **從來沒驗回來的是不是 AgentX registration**,命中 in-master 自己的 subtree 時
+    會「成功地」在本地回答。所以 `T3` 必須印 handler 身分。
+    用 `access_method` 的**指標值**比對而非符號比對,因為 `agentx_master_handler`
+    不保證從 ies-auto-mibs 這側可見。
+  - **只跑待測組、不跑 mxRstp 正對照** —— 已捨棄。只看到「裸=NULL、`.1`=found」
+    無法排除「所有裸 OID 都回 NULL、而轉發根本不靠 `subtree_find`」。
+    四格表(mxRstp × 待測組)× (裸 × `.1`)才可解讀。
+  - **用 `fwdcheck.sh` 的封包計數判定** —— 已捨棄。本次 pcap 顯示 366 個封包裡
+    **只有 12 個非 keepalive**(兩條 session 各 5s / 15s 一次 Ping),
+    直接解 PDU 內容並比對 OID 比統計式計數穩健得多,而且不需要正負對照。
+
+方法論(踩到並已寫入 memory):
+  - **建置順序**:所有被 cargo 透過 `path = "../../<pkg>-custom"` 讀到的 crate
+    都必須在 `rust_moxa_build-rebuild` **之前** rebuild。本輪把
+    `app_moxa_framework` 排在後面,被使用者當場糾正。已固化成
+    `~/mds4xgl3/rebuild_snmp_plan_e.sh`(順序寫死、build 前自動 `cp -n` 備份 `.swu`)。
+    本輪影響為零(未改任何 Rust source,`-custom/src/` 的 `.rs` 兩次 build 間未變動),
+    但那是實證不是推測。
+  - **驗證改動有沒有進 image 要帶負對照**:`ies_auto_mibs.c` 編進的是
+    `libnetsnmpmibs.so`(GETFWD 字串 12 筆),**不是**名字只差幾個字的
+    `libmoxaiesautomibs.so`(0 筆)。負對照證明掃的是對的那個檔。
+  - **DUT sshd 連線數用盡會讓 probe 逾時**,症狀像機器掛了但 SNMP 仍正常。
+    序列 console(`dut-console` skill)是不受影響的第二條路。
+  - **重啟 snmpd 的支援路徑是 moxash**(使用者 2026-08-12 指正):
+    `con t` → `snmp-ser acc dis` → `snmp-ser acc en`。
+    ⚠️ **`acc en` 有 `[y/N]` 互動確認**(「確定要啟用非安全介面?」),
+    所以 `printf ... | moxash` 這種非互動管道會**執行完 `dis`(服務因此停掉)
+    然後卡在確認提示**,把 SNMP 留在停用狀態。
+    `moxash` 本身也需要 tty,管道餵不進去。
+    → **在會改變服務狀態的指令上用非互動管道之前,先確認它不需要互動。**
+  - **「準備」與「生效」不可以放在同一個不可分割的動作裡。**
+    本輪把「產生修改後的 list」與「`mount --bind` 上去」寫成同一條指令,
+    產檔失敗(重導向 `>` 被 console 包裝吃掉,`sed` 本身正確)但 `mount` 照做,
+    結果是**一個空檔被掛到正式的 `agentx_owned.list` 上**。當下 snmpd 未重啟所以
+    沒有實際影響,但只要有任何東西重啟 snmpd,委派就會全部消失。
+    → 改成「產檔 → 驗證內容 → 才 mount → 再驗證掛載後的視圖」,每步分開。
+
+證據(`~/pcap/`,檔名 = 測試日期 + feature + firmware BUILD_TIME):
+```
+2026-08-12-getfwd-optin-4prefix-2026_0812_1532.pcap              366 packets
+2026-08-12-getfwd-optin-4prefix-2026_0812_1532.pcap.tcpdump.log  366 captured / 0 dropped
+2026-08-12-getfwd-optin-4prefix-2026_0812_1532.trace.txt         25 個 GETFWD 標記
+2026-08-12-getfwd-optin-verify-2026_0812_1532.pcap(+ sidecar)    前一輪三個 prefix,88 packets
+2026-08-12-getfwd-trace-debug_log_5-2026_0812_1532.txt
+2026-08-12-agentx-sessions-2026_0812_1532.txt                    ISS.exe / framework 對端身分
+```
+
+相關:ADR-0014、ADR-0016、ADR-0024、**ADR-0025(本 ADR 推翻其核心主張)**、
+ADR-0028、ADR-0029。

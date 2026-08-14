@@ -1,0 +1,158 @@
+# SNMP GET 效能優化 —— 導入 AgentX
+
+> 狀態:草稿骨架 | 最後更新:2026-08-07
+
+---
+
+## 問題
+
+<!-- 3 點,每點一句話講痛點,後面掛數據 -->
+
+- 
+- 
+- 
+
+> **已有素材**:mainline 13-OID GET p50 = 264.4 ms(超標 5～6 倍)/ mxTurboRingV2 walk > 10 s / GETNEXT 3.915 s vs GET 0.017 s / 四條讀取路徑分裂
+
+---
+
+## 先講結果
+
+<!-- Before → After,一律附 %。這頁是主管唯一一定會看的一頁 -->
+
+| 指標 | Before | After | 改善 |
+|---|---|---|---|
+|  |  |  |  |
+|  |  |  |  |
+
+> **已有素材**:p50 264.4 → 13.4 ms(−94.9%)/ p95 −93.3% / p100 301.1 → 48.8 ms(−83.8%)/ GETNEXT −99.4%
+> **待討論**:要不要放無改善的案例(mx_device_io)?放哪裡?
+
+---
+
+## 目標與限制
+
+### 目標
+
+- 
+- 
+- 
+
+### 限制
+
+- 
+- 
+
+> **已有素材**:GET p100 < 50 ms(北交控)/ 統一架構 / 相容 framework / ISS 不可改 / wire 行為不可變
+
+---
+
+## 方案與取捨
+
+<!-- 一段話講「為什麼是這個」,比較表推到 Appendix A -->
+
+> **已有素材**:SNMP Proxy vs 專用 socket vs AgentX;AgentX 下再分 Plan C / D / E
+
+---
+
+## Original Architecture
+
+<!-- 主要用圖。關鍵點才貼程式碼(show muscle)。不強調過去缺點 -->
+
+### 四條路(圖)
+
+```
+[ 圖待放 ]
+```
+
+### 關鍵點(程式碼)
+
+<!-- 1～2 段就好 -->
+
+> **已有素材**:四條路的 ASCII 圖已畫好 / 各路徑進入點 file:line 已查妥 / GETNEXT 裸註冊那段程式碼
+
+---
+
+## Enhanced Architecture
+
+<!-- 同樣以圖為主 -->
+
+### 架構圖
+
+```
+[ 圖待放 ]
+```
+
+### 機制一:agentx_owned.list(零程式碼委派)
+
+### 機制二:framework 自建 subagent
+
+### Functional check
+
+<!-- 證明可用:比對結果表 -->
+
+> **已有素材**:架構圖已畫好 / `mox_snmp_entry_is_agentx_owned()` 程式碼 / missing=0 surplus=0 / ISS 1391 OID 未受干擾
+
+---
+
+## Comparison
+
+### Code Size
+
+### Performance
+
+### Maintenance
+
+> **已有素材**:既有 81,407 行 C vs 新增約 2,820 行 / 三個委派案例的 +228 / +26 / −12
+> **待補**:binary 尺寸(flash 佔用)
+
+---
+
+### FAQ
+
+#### Why not SNMP Proxy?
+
+> **已有素材**:net-snmp 5.9.3 `master.c:475-477` GETBULK 退化成 GETNEXT,round-trip 數與 proxy 相同;AgentX 的優勢在 transport(2–3x)不在 bulk
+
+---
+
+## Test
+
+### Functional Test
+
+### Stress Test
+
+> **已有素材**:Functional 的五步驟方法論、四個通過案例、兩個否決案例
+> **待補**:Stress Test 完全沒有資料 —— 需先決定要不要做、做哪些
+
+---
+
+## Maintenance
+
+> **已有素材**:拆表→第 1 欄消失 / AgentX ping 同步阻塞(interval 30s)/ 快取單一 slot / 候選篩選改以 walk 耗時為首要條件
+
+---
+
+## Next
+
+- 
+- 
+- 
+
+> **已有素材**:未解的 10 秒 stall / 35 支候選重新排序 / Phase 4 試點需重選 / plugin_moxa_io 快取 / AgentX round-trip 107 ms
+
+---
+
+## Appendix
+
+### Appendix A —— 方案比較表
+
+### Appendix B —— OID 與四條路的對應
+
+> **待補**:目前只有總數(iss1 約 2,134 / iss0 約 646),缺逐 MIB 明細
+
+### Appendix C —— 量測方法
+
+### Appendix D —— ADR 索引
+
+### Appendix E —— 圖的 Mermaid 原始碼(可選)

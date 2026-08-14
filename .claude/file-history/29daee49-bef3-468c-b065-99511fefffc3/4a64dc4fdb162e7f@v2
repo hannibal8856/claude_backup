@@ -1,0 +1,74 @@
+#ifndef _NET_MX_MMS_H_
+#define _NET_MX_MMS_H_
+
+/*
+ * mxMms (MOXA-MMS-MIB, mmsConfiguration = { mxMms 1 }, .1.3.6.1.4.1.8691.602.1.8.1)
+ *
+ * First group migrated off the dlmod path. Transcribed from
+ * plugin_moxa_mms/snmp/plugin_snmp_mms_setting.c, which registers the same four
+ * scalars against /api/v1/setting/data/mxmms/<field>. The .uri values here are
+ * relative because the framework config layer prepends /api/v1/setting/data/
+ * (lib_moxa_ies_auto_mibs/src/config_set.c:89), so no mod_uri setup is needed --
+ * the MIB URI and the config path are identical for this group.
+ *
+ * mode is HANDLER_CAN_RWRITE to preserve today's on-the-wire behaviour:
+ * lib_moxa_snmp_plugin/src/handler/scalar.c:126 registers every dlmod scalar
+ * RWRITE unconditionally. Note that mxMms.mib declares all four read-only, so
+ * the MIB and the shipped implementation already disagree; that mismatch is
+ * pre-existing and is deliberately NOT changed here, so this migration stays a
+ * migration. See the decision log.
+ */
+
+struct ies_auto_mibs_entry mx_Mms_MibEntry[] =
+{
+    {
+        .name        = "mxmms_globalEnable",
+        .uri         = "mxmms/globalEnable",
+        .uri_index   = "0",
+        .oid_list    = {1,3,6,1,4,1,8691,602,1,8,1,1},
+        .oid_len     = 12,
+        .oid_index   = 0,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "mxmms_iedName",
+        .uri         = "mxmms/iedName",
+        .uri_index   = "0",
+        .oid_list    = {1,3,6,1,4,1,8691,602,1,8,1,2},
+        .oid_len     = 12,
+        .oid_index   = 0,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "mxmms_tProfileEnable",
+        .uri         = "mxmms/tProfileEnable",
+        .uri_index   = "0",
+        .oid_list    = {1,3,6,1,4,1,8691,602,1,8,1,3},
+        .oid_len     = 12,
+        .oid_index   = 0,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "mxmms_aProfileEnable",
+        .uri         = "mxmms/aProfileEnable",
+        .uri_index   = "0",
+        .oid_list    = {1,3,6,1,4,1,8691,602,1,8,1,4},
+        .oid_len     = 12,
+        .oid_index   = 0,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+};
+
+#endif //_NET_MX_MMS_H_

@@ -1,0 +1,276 @@
+<title>SNMP Routing — Current Architecture (Design C)</title>
+<style>
+  :root {
+    --bg: #eaeeea;
+    --surface: #f6f8f5;
+    --surface-2: #fdfefc;
+    --ink: #16211c;
+    --ink-soft: #52625a;
+    --line: #cbd4cd;
+    --line-strong: #aab5ad;
+    --accent: #1c774a;         /* framework subagent — the fast, migrated path */
+    --accent-ink: #0f4d2f;
+    --accent-soft: #dcede3;
+    --iss: #a85a24;            /* ISS branch */
+    --iss-soft: #f2e4d5;
+    --legacy: #5d6b8a;         /* in-master ies-auto-mibs — the remaining path */
+    --legacy-soft: #e2e6ee;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10150f;
+      --surface: #171d16;
+      --surface-2: #1d241b;
+      --ink: #e7ede6;
+      --ink-soft: #9aa89f;
+      --line: #2c352a;
+      --line-strong: #3c4839;
+      --accent: #4ec98a;
+      --accent-ink: #8fe2b4;
+      --accent-soft: #17301f;
+      --iss: #d99154;
+      --iss-soft: #33210f;
+      --legacy: #93a2c4;
+      --legacy-soft: #1b2130;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10150f; --surface: #171d16; --surface-2: #1d241b;
+    --ink: #e7ede6; --ink-soft: #9aa89f; --line: #2c352a; --line-strong: #3c4839;
+    --accent: #4ec98a; --accent-ink: #8fe2b4; --accent-soft: #17301f;
+    --iss: #d99154; --iss-soft: #33210f; --legacy: #93a2c4; --legacy-soft: #1b2130;
+  }
+  :root[data-theme="light"] {
+    --bg: #eaeeea; --surface: #f6f8f5; --surface-2: #fdfefc;
+    --ink: #16211c; --ink-soft: #52625a; --line: #cbd4cd; --line-strong: #aab5ad;
+    --accent: #1c774a; --accent-ink: #0f4d2f; --accent-soft: #dcede3;
+    --iss: #a85a24; --iss-soft: #f2e4d5; --legacy: #5d6b8a; --legacy-soft: #e2e6ee;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .wrap {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    padding: clamp(20px, 4vw, 56px);
+    min-height: 100vh;
+  }
+  .page { max-width: 1000px; margin: 0 auto; }
+
+  header { margin-bottom: 34px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(24px, 4vw, 34px); line-height: 1.15; margin: 0 0 10px;
+    letter-spacing: -.015em; text-wrap: balance; font-weight: 650;
+  }
+  .lede { margin: 0; max-width: 62ch; color: var(--ink-soft); font-size: 15px; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  /* flow spine */
+  .node {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px 20px;
+  }
+  .req {
+    display: inline-flex; align-items: baseline; gap: 10px;
+    font-family: var(--mono); font-size: 13px; color: var(--ink-soft);
+    background: var(--surface); border: 1px dashed var(--line-strong);
+    border-radius: 999px; padding: 7px 15px;
+  }
+  .req b { color: var(--ink); font-weight: 600; }
+  .drop { width: 2px; background: var(--line-strong); margin: 10px 0; height: 22px; }
+  .center { display: flex; flex-direction: column; align-items: center; }
+
+  .master { text-align: center; width: 100%; max-width: 460px; border-color: var(--line-strong); }
+  .master .name { font-family: var(--mono); font-weight: 650; font-size: 16px; }
+  .master .sub { color: var(--ink-soft); font-size: 13px; margin-top: 3px; }
+
+  .router-label {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .06em;
+    color: var(--ink-soft); text-transform: uppercase;
+    margin: 12px 0 4px; text-align: center;
+  }
+
+  /* branches */
+  .branches {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+    margin-top: 22px; align-items: stretch;
+  }
+  @media (max-width: 760px) { .branches { grid-template-columns: 1fr; } }
+
+  .branch {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
+  }
+  .branch .cap { height: 4px; }
+  .b1 .cap { background: var(--accent); }
+  .b2 .cap { background: var(--iss); }
+  .b3 .cap { background: var(--legacy); }
+
+  .branch .body { padding: 16px 17px; display: flex; flex-direction: column; gap: 11px; }
+  .branch .top { display: flex; align-items: center; gap: 9px; }
+  .num {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    min-width: 22px; height: 22px; padding: 0 5px; border-radius: 6px; flex: none;
+    display: grid; place-items: center; color: #fff;
+  }
+  .b1 .num { background: var(--accent); }
+  .b2 .num { background: var(--iss); }
+  .b3 .num { background: var(--legacy); }
+  .branch h3 { margin: 0; font-size: 14.5px; font-weight: 650; letter-spacing: -.01em; }
+  .branch .where { font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft); }
+
+  .tag {
+    align-self: flex-start; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: .04em; text-transform: uppercase; font-weight: 600;
+    padding: 3px 8px; border-radius: 999px;
+  }
+  .tag.fast { background: var(--accent-soft); color: var(--accent-ink); }
+  .tag.native { background: var(--iss-soft); color: var(--iss); }
+  .tag.rest { background: var(--legacy-soft); color: var(--legacy); }
+
+  .kv { font-size: 13px; color: var(--ink); }
+  .kv .k { font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+           text-transform: uppercase; color: var(--ink-soft); display: block; margin-bottom: 1px; }
+  .kv code, .oids { font-family: var(--mono); font-size: 12.5px; }
+  .oids { color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+
+  /* iss_build routing table inside branch 3 */
+  .rt-wrap { overflow-x: auto; margin-top: 2px; }
+  table.rt { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.rt th, table.rt td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); }
+  table.rt thead th { font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em;
+                      text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+  table.rt td.cond { font-family: var(--mono); color: var(--legacy); white-space: nowrap; }
+  table.rt tr:last-child td { border-bottom: 0; }
+  .to-fw { color: var(--accent); font-weight: 600; }
+  .to-iss { color: var(--iss); font-weight: 600; }
+
+  /* migration callout */
+  .callout {
+    margin-top: 26px; background: var(--accent-soft); border: 1px solid var(--accent);
+    border-radius: 12px; padding: 15px 18px; display: flex; gap: 14px; align-items: flex-start;
+  }
+  .callout .arrow { font-family: var(--mono); color: var(--accent-ink); font-weight: 700; font-size: 15px; }
+  .callout p { margin: 0; font-size: 13.5px; color: var(--ink); }
+  .callout b { color: var(--accent-ink); }
+
+  .foot { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line);
+          font-size: 12.5px; color: var(--ink-soft); display: grid; gap: 6px; }
+  .foot code { font-family: var(--mono); color: var(--ink); }
+  .foot .pin { color: var(--iss); font-weight: 600; }
+
+  /* two-block layout + standalone routing summary */
+  .leg { color: var(--legacy); font-weight: 600; }
+  .branch .kv b { color: var(--ink); font-weight: 650; }
+
+  .summary {
+    margin-top: 26px; background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: 14px; padding: 18px 20px;
+  }
+  .summary-head { margin-bottom: 13px; }
+  .summary-head h2 {
+    margin: 0 0 3px; font-size: 15px; font-weight: 650; letter-spacing: -.01em;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .summary-head h2::before {
+    content: "Σ"; font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: #fff; background: var(--ink-soft); width: 22px; height: 22px;
+    border-radius: 6px; display: grid; place-items: center; flex: none;
+  }
+  .summary-head p { margin: 0; font-size: 13px; color: var(--ink-soft); }
+  .summary .rt td { vertical-align: top; }
+  .summary .rt td.cond { color: var(--ink); font-weight: 600; }
+  .summary .sub { display: block; font-size: 11px; color: var(--ink-soft); font-weight: 400; margin-top: 2px; }
+  td.to-leg { color: var(--legacy); font-weight: 600; }
+  .legend { margin: 13px 0 0; padding-top: 12px; border-top: 1px solid var(--line);
+            font-size: 12px; color: var(--ink-soft); line-height: 1.6; }
+  .legend code { font-family: var(--mono); color: var(--ink); }
+</style>
+
+<div class="wrap"><div class="page">
+  <header>
+    <p class="eyebrow">Plan D · MDS-G4000-L3-4XGS</p>
+    <h1>SNMP request routing — current architecture</h1>
+    <p class="lede">The snmpd master fans each request out by OID into two AgentX subagents. <b>(1) The framework subagent</b> answers migrated <code>iss_build&nbsp;==&nbsp;0</code> config OIDs in-process (~4&nbsp;ms). <b>(2) ISS</b> owns <code>iss_build&nbsp;==&nbsp;1</code> switching / redundancy OIDs — but only for a <b>GET</b>; a <b>SET</b> is diverted to the legacy in-master path. The table below is the full routing summary.</p>
+  </header>
+
+  <div class="center">
+    <span class="req"><b>SNMP GET / SET</b> · udp/161</span>
+    <div class="drop"></div>
+    <div class="node master">
+      <div class="name">snmpd — net-snmp master</div>
+      <div class="sub">AgentX master · listens tcp:127.0.0.1:705</div>
+    </div>
+    <div class="router-label">routes by OID — longest-prefix match</div>
+    <div class="drop"></div>
+  </div>
+
+  <div class="branches">
+    <!-- 1 framework subagent -->
+    <div class="branch b1">
+      <div class="cap"></div>
+      <div class="body">
+        <div class="top"><span class="num">1</span><h3>Framework subagent</h3></div>
+        <div class="where">app_moxa_framework · AgentX</div>
+        <span class="tag fast">iss_build == 0 · fast</span>
+        <div class="kv"><span class="k">GET</span>config_operation in-process → ~4&nbsp;ms</div>
+        <div class="kv"><span class="k">SET</span>loopback REST PATCH <code>/api/v1/setting/data/…?save</code></div>
+        <div class="kv"><span class="k">Serves</span>
+          <span class="oids">system_information · portEvent · event_general · turboringv2 … (reuse from net_*.h)</span></div>
+      </div>
+    </div>
+
+    <!-- 2 ISS -->
+    <div class="branch b2">
+      <div class="cap"></div>
+      <div class="body">
+        <div class="top"><span class="num">2</span><h3>ISS</h3></div>
+        <div class="where">ISS.exe · AgentX</div>
+        <span class="tag native">iss_build == 1 · native</span>
+        <div class="kv"><span class="k">GET</span>AgentX → <b>ISS</b> · reads live switch state</div>
+        <div class="kv"><span class="k">SET</span><span class="leg">legacy</span> → ies-auto-mibs → <code>LibFrameworkUri</code> → config</div>
+        <div class="kv"><span class="k">Serves</span>
+          <span class="oids">dual-homing · 802.1X · RSTP · RADIUS · LLDP … (switching / redundancy MIBs)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="summary">
+    <div class="summary-head">
+      <h2>Routing summary</h2>
+      <p>Which agent answers, by <code>iss_build</code> and operation.</p>
+    </div>
+    <div class="rt-wrap">
+      <table class="rt">
+        <thead><tr><th>condition</th><th>GET</th><th>SET</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="cond">iss_build == 0</td>
+            <td class="to-fw">framework subagent <b>(1)</b><span class="sub">in-process</span></td>
+            <td class="to-fw">framework subagent <b>(1)</b><span class="sub">loopback REST → config</span></td>
+          </tr>
+          <tr>
+            <td class="cond">iss_build == 1</td>
+            <td class="to-iss">ISS <b>(2)</b><span class="sub">via AgentX</span></td>
+            <td class="to-leg">legacy in-master<span class="sub">ies-auto-mibs → config</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="legend"><span class="leg">Legacy in-master</span> = <code>ies-auto-mibs</code> in <code>libnetsnmpmibs.so</code>, forwarding via <code>LibFrameworkUri</code> (REST → nginx → actix). It carries every <code>iss_build == 1</code> SET, and still serves any <code>iss_build == 0</code> group not yet migrated to <b>(1)</b>.</p>
+  </div>
+
+  <div class="foot">
+    <div><b>Design C</b> migration: comment a group's <code>MOX_SNMP_INIT_ENTRY</code> so the master stops routing it to the legacy path, then register the same OIDs on <b>(1)</b> from the shared mapping — GET gets faster, SET stays byte-identical.</div>
+    <div>Not an end state: the legacy in-master path stays. <code>iss_build == 1</code> OIDs keep ISS <b>(2)</b> for GET and legacy for SET; only <code>iss_build == 0</code> config OIDs migrate to <b>(1)</b>.</div>
+  </div>
+</div></div>

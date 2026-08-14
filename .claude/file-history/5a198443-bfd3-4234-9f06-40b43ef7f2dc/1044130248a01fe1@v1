@@ -1,0 +1,187 @@
+//! Actix web server initialization, shared state, and route configuration.
+
+use std::sync::{Arc, Mutex};
+
+use actix_cors::Cors;
+use actix_web::{middleware::Condition, web, App, HttpServer};
+
+#[cfg(feature = "hello")]
+use actix_web::{get, HttpResponse, Responder};
+
+use app_moxa_token_module as moxa_token;
+use lib_moxa_rust_debug_log_ng::{lib_moxa_debug_log_ng_syslog, LibMoxaDebugLogNgLogLevel};
+use lib_moxa_rust_debug_log_ng::mx_notice;
+use lib_moxa_rust_event_action as lib_moxa_event_action;
+use lib_moxa_rust_pam as lib_moxa_pam;
+use rust_moxa_app_state as app_state;
+use rust_moxa_auth_layer as auth_layer;
+use rust_moxa_bff as bff;
+use rust_moxa_command_layer as command_layer;
+use rust_moxa_command_operation as command_operation;
+use rust_moxa_common::{api_command_operation, file_layer_process_lock};
+use rust_moxa_config_layer as config_layer;
+use rust_moxa_file_layer as file_layer;
+use rust_moxa_file_operation as file_operation;
+use rust_moxa_new_moxa_command_layer as new_moxa_command_layer;
+use rust_moxa_new_moxa_command_operation as new_moxa_command_operation;
+use rust_moxa_status_layer as status_layer;
+use rust_moxa_status_operation as status_operation;
+
+use crate::MODULE_LIST_ID;
+
+/*---------- Local Const ----------*/
+
+/// Define the listening point. `9759` is a magic number.
+const LISTENING_ON: &str = "127.0.0.1:9759";
+const WORKERS: usize = 10;
+const ENABLE_CORS: bool = false;
+
+/*---------- Local functions ----------*/
+
+/// For local test
+#[cfg(feature = "hello")]
+#[get("/hello")]
+async fn hello() -> impl Responder {
+    HttpResponse::Ok().body("Hello world!")
+}
+
+/*---------- Public API ----------*/
+
+pub async fn start_framework_uri_service(
+    plugins_config: plugins_moxa_framework::config::Plugins,
+) -> std::io::Result<()> {
+    // Note: the plugins other than plugins_moxa_config can only be initialized after config_loader
+    // The main reason is tcst which uses the plugin_moxa_la settings
+    let plugins_agent = plugins_moxa_framework::agent::Plugins::new();
+    let plugins_command = plugins_moxa_framework::command::Plugins::new();
+    let plugins_file = plugins_moxa_framework::file::Plugins::new();
+    let mut plugins_status = plugins_moxa_framework::status::Plugins::new();
+    let plugins_moxa_api = plugins_moxa_framework::bff_moxa_api::PluginsMoxaApi::new();
+    let plugins_web_api = plugins_moxa_framework::bff_web_api::PluginsWebApi::new();
+
+    mx_notice!(
+        MODULE_LIST_ID,
+        "main ------------------------------------------------------------"
+    );
+
+    //  cors
+    let enable_cors = ENABLE_CORS;
+    if enable_cors {
+        mx_notice!(MODULE_LIST_ID, "###### CORS Enabled");
+    }
+
+    //  common
+    lib_moxa_event_action::MoxaEventAction::new(); // one time initialization
+    let moxa_token_db = Arc::new(Mutex::new(moxa_token::TokenDb::new()));
+    let moxa_api_key_db = Arc::new(Mutex::new(moxa_token::api_key::ApiKeyDb::new()));
+    let moxa_pam = Arc::new(Mutex::new(lib_moxa_pam::Pam::new()));
+
+    //  command_layer
+    let command_operation = Arc::new(Mutex::new(command_operation::CommandOperation::new()));
+
+    //  config_layer
+    let (storage, configs, config_layer_event_action_handler, config_layer_state, user_mutex) =
+        config_layer::init();
+    let storage = Arc::new(Mutex::new(storage));
+    let configs = Arc::new(Mutex::new(configs));
+    let config_layer_event_action_handler = Arc::new(Mutex::new(config_layer_event_action_handler));
+    let config_layer_state = Arc::new(Mutex::new(config_layer_state));
+    let user_mutex = Arc::new(Mutex::new(user_mutex));
+
+    //  status_layer
+    let status_operation = Arc::new(Mutex::new(status_operation::StatusOperation::new(
+        &mut plugins_status,
+    )));
+
+    //  file_layer
+    let file_operation = Arc::new(Mutex::new(file_operation::FileOperation::new()));
+    let file_layer_process_lock = Arc::new(Mutex::new(file_layer_process_lock::ProcessLock::new()));
+
+    //  new_moxa_command_layer
+    let new_moxa_command_operation = Arc::new(Mutex::new(
+        new_moxa_command_operation::NewMoxaCommandOperation::new("/moxa_cmd"),
+    ));
+
+    // plugins
+    let plugins_agent = Arc::new(Mutex::new(plugins_agent));
+    let plugins_command = Arc::new(Mutex::new(plugins_command));
+    let plugins_config = Arc::new(Mutex::new(plugins_config));
+    let plugins_file = Arc::new(Mutex::new(plugins_file));
+    let plugins_status = Arc::new(Mutex::new(plugins_status));
+    let plugins_moxa_api = Arc::new(Mutex::new(plugins_moxa_api));
+    let plugins_web_api = Arc::new(Mutex::new(plugins_web_api));
+
+    // notify app_moxa_aide_update.service
+    sd_notify::notify(true, &[sd_notify::NotifyState::Ready]).unwrap();
+
+    // api related
+    let api_command_operation =
+        Arc::new(Mutex::new(api_command_operation::ApiCommandOperation::new()));
+
+    //  HttpServer
+    HttpServer::new(move || {
+        let app = App::new()
+            .wrap(Condition::new(enable_cors, Cors::default()))
+            .app_data(web::Data::new(app_state::AppState {
+                // common
+                moxa_token_db: Arc::clone(&moxa_token_db),
+                moxa_api_key_db: Arc::clone(&moxa_api_key_db),
+                moxa_pam: Arc::clone(&moxa_pam),
+
+                // command_layer
+                command_operation: Arc::clone(&command_operation),
+
+                // config_layer
+                storage: Arc::clone(&storage),
+                configs: Arc::clone(&configs),
+                config_layer_event_action_handler: Arc::clone(&config_layer_event_action_handler),
+                config_layer_state: Arc::clone(&config_layer_state),
+                user_mutex: Arc::clone(&user_mutex),
+
+                // file_layer
+                file_operation: Arc::clone(&file_operation),
+                file_layer_process_lock: Arc::clone(&file_layer_process_lock),
+
+                // status_layer
+                status_operation: Arc::clone(&status_operation),
+
+                // new_moxa_command_layer
+                new_moxa_command_operation: Arc::clone(&new_moxa_command_operation),
+
+                // plugins
+                plugins_agent: Arc::clone(&plugins_agent),
+                plugins_command: Arc::clone(&plugins_command),
+                plugins_config: Arc::clone(&plugins_config),
+                plugins_file: Arc::clone(&plugins_file),
+                plugins_status: Arc::clone(&plugins_status),
+                plugins_moxa_api: Arc::clone(&plugins_moxa_api),
+                plugins_web_api: Arc::clone(&plugins_web_api),
+
+                // api related
+                api_command_operation: Arc::clone(&api_command_operation),
+            }));
+
+        #[cfg(feature = "hello")]
+        let app = app.service(hello);
+
+        let app = app.service(web::scope(auth_layer::URI).configure(auth_layer::config));
+        let app = app.service(web::scope(command_layer::URI).configure(command_layer::config));
+        let app = app.service(web::scope(config_layer::URI).configure(config_layer::config));
+        let app = app.service(web::scope(file_layer::URI).configure(file_layer::config));
+        let app = app.service(
+            web::scope(new_moxa_command_layer::URI).configure(new_moxa_command_layer::config),
+        );
+        let app = app.service(web::scope(status_layer::URI).configure(status_layer::config));
+
+        // bff - MoxaAPI
+        let app = app.service(
+            web::scope(bff::moxa_api::core::URI_V1).configure(bff::moxa_api::core::config),
+        );
+        // bff - WebAPI
+        app.service(web::scope(bff::web_api::core::URI).configure(bff::web_api::core::config))
+    })
+    .workers(WORKERS)
+    .bind(LISTENING_ON)?
+    .run()
+    .await
+}

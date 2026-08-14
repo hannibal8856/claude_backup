@@ -1,0 +1,203 @@
+APP_NAME=plugin_moxa_firmware_update
+SILENCE=@
+
+# common
+PWD=${shell pwd}
+BUILD_PATH=${PWD}/build
+USR_BIN_PATH?=/usr/bin
+
+# app
+# Use DOCKER_VERSION to check if in docker or not
+DOCKER_VERSION := $(shell docker --version &>/dev/null)
+
+# Note: Must be in docker
+ifneq ("$(DOCKER_VERSION)","")
+$(error If you want to build for dut, please run the command in docker)
+endif
+
+# build for dut via local
+DESTDIR?=../../output/target
+TARGET?=armv7-unknown-linux-gnueabihf
+export PATH := ${PWD}/../../output/host/bin:${PATH}
+
+PROJECT=fw_update
+
+# document
+ROOT_KEYS_PATH?=/root/keys
+DOCUMENT_PATH=${PWD}/document
+
+# scripts
+SCRIPTS_PATH=${PWD}/scripts
+
+# cli
+CLI_PATH=${PWD}/cli
+CLI_PLUGIN_PATH?=/etc/moxa/app-moxa-cli/plugin/
+
+# file - python
+# FILE_PATH=${PWD}/python/file
+# FILE_PLUGIN_PATH?=/etc/moxa/flask-moxa-file-layer/Plugin/
+
+# debuglogng
+DEBUGLOGNG_PATH=${PWD}/debuglogng
+CFLAGS_DEBUG_LOG_NG += -DMOXA_DEBUG_LOG_NG -I${PWD}/debuglogng/include
+
+# test
+TEST_PATH=${PWD}/test
+TEST_FILE_PATH=${TEST_PATH}/file
+
+# CARGO_FEATURES
+CARGO_FEATURES := ""
+ifneq (,$(findstring MOXA_AES_ENCRYPTION_KEY_MIGRATION,${MOXA_CMTFLAGS}))
+CARGO_FEATURES := ${CARGO_FEATURES},MOXA_AES_ENCRYPTION_KEY_MIGRATION
+endif
+ifneq (,$(findstring MOXA_CUSTOM_DEFAULT,${MOXA_CMTFLAGS}))
+CARGO_FEATURES := ${CARGO_FEATURES},MOXA_CUSTOM_DEFAULT
+endif
+ifneq (,$(findstring MOXA_PASSWORD_POLICY_CHECK,${MOXA_CMTFLAGS}))
+CARGO_FEATURES := ${CARGO_FEATURES},MOXA_PASSWORD_POLICY_CHECK
+endif
+ifneq (,$(findstring TN,${MOXA_CMTFLAGS}))
+CARGO_FEATURES := ${CARGO_FEATURES},TN
+endif
+
+.PHONY: all install clean test test_cli test_plugin app
+
+all: app ${BUILD_PATH}/cli/plugin_cli_firmware_upgrade.so \
+	${BUILD_PATH}/debuglogng/cli/plugin_cli_firmware_update_debug.so \
+	${BUILD_PATH}/debuglogng/plugin_debuglogng_firmware_update.so \
+	rust_clippy_scan
+
+install:
+	# app
+	cd app && cp target/${TARGET}/release/${PROJECT} /tmp/.
+	cd app && install -m 550 target/${TARGET}/release/${PROJECT} ${DESTDIR}/${USR_BIN_PATH}/.
+
+	# document
+	${SILENCE}mkdir -p ${DESTDIR}/${ROOT_KEYS_PATH}
+	${SILENCE}tar xvf ${DOCUMENT_PATH}/opensslKey.tar -C ${DESTDIR}/${ROOT_KEYS_PATH}
+
+	# scripts
+	${SILENCE}install -m 755 ${SCRIPTS_PATH}/fwr_*.sh ${DESTDIR}/${USR_BIN_PATH}
+
+	# cli
+	${SILENCE}mkdir -m 740 -p ${DESTDIR}/${CLI_PLUGIN_PATH}
+	${SILENCE}install -m 755 ${BUILD_PATH}/cli/plugin_cli_firmware_upgrade.so ${DESTDIR}/${CLI_PLUGIN_PATH}
+
+	# file - python
+	# ${SILENCE}mkdir -p ${DESTDIR}/${FILE_PLUGIN_PATH}
+	# ${SILENCE}install -m 755 ${FILE_PATH}/plugin*.py ${DESTDIR}/${FILE_PLUGIN_PATH}
+
+	# debuglogng
+	${SILENCE}mkdir -p ${DESTDIR}/${CLI_PLUGIN_PATH}
+	${SILENCE}install -m 755 ${BUILD_PATH}/debuglogng/cli/plugin_cli_firmware_update_debug.so ${DESTDIR}/${CLI_PLUGIN_PATH}
+
+	${SILENCE}mkdir -m 740 -p ${DESTDIR}/usr/include/lib_moxa_debug_log_ng/
+	${SILENCE}install -m 440 ${DEBUGLOGNG_PATH}/include/plugin_debuglogng_firmware_update.h ${DESTDIR}/usr/include/lib_moxa_debug_log_ng/
+	${SILENCE}install -m 440 ${DEBUGLOGNG_PATH}/plugin_debuglogng_firmware_update_str.c ${DESTDIR}/usr/include/lib_moxa_debug_log_ng/
+
+	${SILENCE}mkdir -p ${DESTDIR}/etc/moxa/debuglogng/plugin/c
+	${SILENCE}install -m 755 ${BUILD_PATH}/debuglogng/plugin_debuglogng_firmware_update.so ${DESTDIR}/etc/moxa/debuglogng/plugin/c
+
+clean:
+
+test: test_plugin test_cli
+
+# app
+app:
+	cd app && cargo build --release --target=${TARGET} --features ${CARGO_FEATURES}
+
+${BUILD_PATH}/unittest:
+	mkdir -p $@
+
+test_plugin:
+	${SILENCE}${TEST_FILE_PATH}/run_unittest.sh
+
+${BUILD_PATH}:
+		mkdir -p $@
+
+test_cli: ${BUILD_PATH}/unittest
+	${SILENCE}mkdir -p ${BUILD_PATH}/unittest/cli
+	${SILENCE}cd ${BUILD_PATH}/unittest/cli && gcc -c ${CFLAGS} -DPOSIX -g -MMD -MP \
+		-include CppUTest/MemoryLeakDetectorMallocMacros.h \
+		$$(find ${CLI_PATH} ${TEST_FILE_PATH}/test/cli -type f -name *.c)
+	${SILENCE}cd ${BUILD_PATH}/unittest/cli && g++ -c ${CFLAGS} -DPOSIX -g -MMD -MP \
+		-include CppUTest/MemoryLeakDetectorMallocMacros.h \
+		$$(find ${CLI_PATH} ${TEST_FILE_PATH}/test/cli -type f -name *.cpp)
+	${SILENCE}g++ ${CFLAGS} -L/usr/lib -L/usr/lib/${CROSS_COMPILE} -g \
+	    -Wl,--wrap=CliMoxaCfgPostObject,--wrap=CliPrintf \
+	    -Wl,--wrap=CliGetSftpParams,--wrap=CliGetTftpParams \
+	    -Wl,--wrap=CliGetUsbFileName,--wrap=CliGetMicroSDFileName \
+	    -o ${BUILD_PATH}/unittest/cli/unittest \
+	    $$(find ${BUILD_PATH}/unittest/cli -type f -name *.o) \
+	    -lCppUTest -lCppUTestExt -lparson
+
+	${SILENCE}${BUILD_PATH}/unittest/cli/unittest -v
+
+# cli
+${BUILD_PATH}/cli:
+	mkdir -p $@
+
+${BUILD_PATH}/cli/plugin_cli_firmware_upgrade.so: ${BUILD_PATH}/cli \
+							${BUILD_PATH}/cli/cli_firmware_upgrade.def.o \
+							${BUILD_PATH}/cli/cli_firmware_upgrade.o
+	${CC} ${CFLAGS} -shared -Wl,-soname,plugin_cli_firmware_upgrade.so.1 -o $@ $(filter %.o,$^)
+
+${BUILD_PATH}/cli/cli_firmware_upgrade.def.o: ${BUILD_PATH}/cli \
+							${BUILD_PATH}/cli/cli_firmware_upgrade.def.c
+	${CC} ${CFLAGS} -c -fPIC -o $@ $(filter %.c,$^)
+
+
+ifeq ($(MOXA_MICRO_SD), y)
+${BUILD_PATH}/cli/cli_firmware_upgrade.def.c: ${BUILD_PATH}/cli \
+							${CLI_PATH}/cli_firmware_upgrade.def
+else
+${BUILD_PATH}/cli/cli_firmware_upgrade.def.c: ${BUILD_PATH}/cli \
+							${CLI_PATH}/cli_firmware_upgrade_without_microsd.def
+endif
+	cmdscan $(filter %.def,$^) $@ clicmds_plugin.h
+
+${BUILD_PATH}/cli/cli_firmware_upgrade.o: ${BUILD_PATH}/cli \
+							${CLI_PATH}/cli_firmware_upgrade.c
+	${CC} ${CFLAGS} -c -fPIC -o $@ $(filter %.c,$^) -lmoxa_system
+
+# debuglogng
+${BUILD_PATH}/debuglogng:
+		mkdir -p $@
+
+${BUILD_PATH}/debuglogng/cli:
+		mkdir -p $@
+
+# debuglogng/cli
+${BUILD_PATH}/debuglogng/cli/plugin_cli_firmware_update_debug.so: ${BUILD_PATH}/debuglogng/cli \
+							${BUILD_PATH}/debuglogng/cli/cli.def.o
+	${CC} -shared -Wl,-soname,plugin_cli_firmware_update_debug.so.1 -o $@ $(filter %.o,$^)
+
+${BUILD_PATH}/debuglogng/cli/cli.def.o: ${BUILD_PATH}/debuglogng/cli \
+							${BUILD_PATH}/debuglogng/cli/cli.def.c
+	${CC} ${CFLAGS_DEBUG_LOG_NG} -c -fPIC -o $@ $(filter %.c,$^)
+
+${BUILD_PATH}/debuglogng/cli/cli.def.c: ${BUILD_PATH}/debuglogng/cli \
+							${DEBUGLOGNG_PATH}/cli/cli.def
+	cmdscan $(filter %.def,$^) $@ clicmds_plugin.h
+
+# debuglogng
+${BUILD_PATH}/debuglogng/plugin_debuglogng_firmware_update.so: ${BUILD_PATH}/debuglogng \
+							${BUILD_PATH}/debuglogng/plugin_debuglogng_firmware_update.o
+	${CC} -shared -Wl,-soname,plugin_debuglogng_firmware_update.so.1 -o $@ $(filter %.o,$^)
+
+${BUILD_PATH}/debuglogng/plugin_debuglogng_firmware_update.o: ${BUILD_PATH}/debuglogng \
+							${DEBUGLOGNG_PATH}/plugin.c
+	${CC} ${CFLAGS_DEBUG_LOG_NG} -c -fPIC -o $@ $(filter %.c,$^)
+
+
+# All local (path) packages in app's dependency graph: lock entries without a "source =" line
+CLIPPY_LOCAL_PKGS = $$(awk '/^\[\[package\]\]/{n="";s=0} /^name =/{gsub(/"/,"",$$3);n=$$3} /^source =/{s=1} /^$$/{if(n&&!s)printf "-p %s ",n} END{if(n&&!s)printf "-p %s ",n}' Cargo.lock)
+
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	# app
+	${SILENCE}cd app && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES} ${CLIPPY_LOCAL_PKGS}
+	${SILENCE}cd app && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES} ${CLIPPY_LOCAL_PKGS} --message-format=json > ${PWD}/rust_clippy_scan_result/${PROJECT}.json
+endif

@@ -1,0 +1,180 @@
+---
+name: nos-rust-clippy
+description: Convert MXNOS/buildroot Rust Clippy scanning from per-package to per-application, and roll the resulting per-repo changes out as GitLab issue+branch+MR. Use when a Clippy scan fails under a pinned rustc (e.g. "rustc 1.85.0 is not supported", icu_*/bytestring/actix demanding 1.86/1.88) although `make <pkg>-rebuild` passes, when bringing a new product branch onto by-application scanning, or when mass-creating the per-package MRs.
+---
+
+# Skill: rust_clippy_by_application
+
+## Why
+
+`RUST_CLIPPY_SCAN_CONFIG=true` makes every Rust package run its own `cargo clippy`.
+A **library** scanned standalone has no `Cargo.lock`, so cargo re-resolves to the latest
+crates → a newer rustc is demanded → the scan fails under a pinned rustc. The normal build
+passes, because it builds through the application's lock. Pinning MSRV per package is
+whack-a-mole.
+
+**Core fix:** stop scanning libraries standalone. Scan only **applications (BIN crates)**,
+and make each application lint its whole local dependency closure via
+`RUSTC_WRAPPER=clippy-driver cargo check`. The application's `Cargo.lock` then governs all
+its libraries (no re-resolution), and the libraries are linted with the application's real
+`--features`.
+
+**Why `clippy-driver`, not `cargo clippy`:** `cargo clippy` only lints workspace members
+(`RUSTC_WORKSPACE_WRAPPER`); `cargo clippy -p <path-dep>` prints `Checking` but does NOT run
+clippy on it. MXNOS libraries are path deps in scattered `*-custom` directories, so the only
+way to lint them is `RUSTC_WRAPPER=clippy-driver` — it applies clippy-driver to EVERY compiled
+crate. crates.io deps are silenced by cargo's automatic `--cap-lints allow`, so only local
+libraries surface.
+
+## Step 1 — Classify application vs library
+
+A package is an **application (BIN)** if its directory has `src/main.rs`, `src/bin/`, or
+`[[bin]]` in `Cargo.toml`; otherwise it is a library.
+
+```bash
+cd buildroot/dl
+find . -maxdepth 4 -name Cargo.toml -not -path '*/target/*' | while read m; do d=$(dirname "$m");
+  { [ -f "$d/src/main.rs" ] || [ -d "$d/src/bin" ] || grep -q '^\[\[bin\]\]' "$m"; } && echo "BIN $d"; done
+```
+
+Depth 4 is required — it is what catches `3rdparty_net_snmp/snmp_script_rust/<bin>` and
+`plugin_*/app`. Name is not a classifier: `plugin_moxa_relay` holds both a BIN (`app/`) and a
+library (`framework/`).
+
+## Step 2 — dl Makefile
+
+**Application** `rust_clippy_scan` — convert
+`cargo clippy … --target-dir=$RUST_TARGET_DIR [--features …]` to:
+
+```
+RUSTC_WRAPPER=clippy-driver cargo check --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} [--features ${CARGO_FEATURES}]
+```
+
+Both the plain line and the `--message-format=json > rust_clippy_scan_result/<name>.json`
+line. For plugins with an app+framework split, keep the `app` scan and **remove the
+`framework` scan lines**.
+
+**Library** — remove the whole `rust_clippy_scan:` block and unhook it from `all:`. Each dl
+repo is its own git repo; commit `clippy scan binaries only`.
+
+## Step 3 — `${moxa}` package `.mk`
+
+For each **library** `moxa/package/net/<pkg>/<pkg>.mk`:
+
+- Remove the `@if [ "${RUST_CLIPPY_SCAN_CONFIG}" = "true" ]; … cp -rf $(@D)/rust_clippy_scan_result … fi` block.
+- Remove `RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)` **only when the scan was its sole
+  consumer** — check the dl Makefile first. Some libraries use the shared target dir for the
+  normal build too; removing it there silently loses the build-time/space optimisation.
+- **Keep both** for application `.mk` (the app scan still uses them).
+
+Buildroot derives the package name from the **directory** and includes `.mk` by `wildcard`,
+so a misnamed `.mk` still works but breaks tooling — flag it, don't rely on it.
+
+## Step 4 — post-build.sh gate
+
+`moxa/board/net/common/post-build.sh`:
+
+1. Hard gate: every `.mk` that still exports `rust_clippy_scan_result` (= the applications,
+   derived dynamically) must produce its json. Guard with
+   `[ -d "${BUILD_DIR}/${pkg}-custom" ] || continue` so packages this product does not build
+   are skipped, and skip dummy packages (`rust_moxa_create_dummy_package.sh` placeholders own
+   a `-custom` dir but compile nothing).
+2. Informational only: a Rust library not referenced by any application prints a `Note:` —
+   no exempt list, no failure. A library depends on an application; not being scanned is not
+   an error. Match coverage via both `<pkg>-custom` (path deps) and `/<pkg>#` (symlinked
+   workspace members such as `rust_moxa_build`'s).
+3. Initialise `exit_code=0` before the `check_rust_pkg_br_dependency.py` call.
+
+## Step 5 — verify
+
+Append a warn-level lint to a library's `src/lib.rs` (or `framework/src/lib.rs`), rebuild that
+library, run an application scan, expect the warning attributed to that library, then restore.
+`cargo check`/`build` do NOT report it — only clippy does, which proves clippy actually ran.
+
+```rust
+pub fn clippy_scan_canary() { return; }   // triggers warn-level clippy::needless_return
+```
+
+If the scan json already carry real diagnostics attributed to library crates, that is stronger
+evidence than a canary and no canary is needed.
+
+Coverage is **feature/config-dependent**: a package that is a dummy in one product will not be
+scanned there. Verify on the same defconfig the build uses. Gotcha: a shared `RUST_TARGET_DIR`
+caches a no-lint check — `touch` the library source to force a re-lint.
+
+## Step 6 — sync application `Cargo.lock` (build → dl)
+
+Verify each **application's** committed lock is current. If a path dependency's `Cargo.toml`
+gained deps, cargo re-resolves at build time and rewrites the lock in
+`output/build/<pkg>-custom/`, which never flows back to `dl/`. A stale committed lock means
+every clean build re-resolves to *latest-compatible* — non-reproducible, and the MSRV failure
+returns.
+
+```bash
+scripts/check_rust_app_lock.sh <buildroot>   # exit 1 if any app's dl ≠ output/build lock
+# for each drifted app: cp output/build/<pkg>-custom/.../Cargo.lock  dl/<pkg>/.../Cargo.lock ; commit "Synchonize Cargo.lock"
+```
+
+Tell-tale of a stale lock in the build log: `Updating crates.io index` /
+`Locking N packages to latest compatible versions` / `Adding …`. **Applications only** —
+libraries carry no committed lock. These syncs become a **separate** MR (Step 7), kept out of
+the clippy MR.
+
+The script reports "0 warnings" when a package has **no** `dl/` lock at all, because it skips
+the comparison. That is a false green: treat "dl has no Cargo.lock" as a failure, not a skip.
+
+## Step 7 — MR rollout
+
+`scripts/` — all DRY-RUN by default, `--go` to act, `SLEEP=3` to avoid the GitLab
+issue-creation rate limit, `TOKEN_FILE=` for a PAT with `api` scope:
+
+- `create_clippy_lib_mrs.sh` — library: open issue → branch `<iid>-<suffix>` from the source
+  branch, amend its single commit to `Issue #<iid>: …`, push, MR.
+- `create_clippy_app_mrs.sh` — application: branch from **fetched** `origin/<target>`, then
+  `git checkout <srcbranch> -- '(^|/)Makefile$'` (Makefile-only → excludes `Cargo.lock`,
+  squashes stale `-p`/duplicate commits), single commit, MR.
+- `create_cargolock_mrs.sh` — separate `Cargo.lock`-sync MR.
+- `check_rust_app_lock.sh` — flags dl↔output/build lock drift (CI gate).
+
+Adapt `DL`, `SRC_BR`, `BASE` per product branch — they are hardcoded; only `TARGET`,
+`LIST_FILE`, `TOKEN_FILE` and `SLEEP` are environment-overridable.
+
+Merge via API: `PUT /projects/:enc/merge_requests/:iid/merge`, retrying while
+`detailed_merge_status=checking`. Merge the dl MRs **before** the `${moxa}` MR — the
+post-build gate added there expects the converted application scans to exist.
+
+### Pre-flight checks that pay for themselves
+
+Run these before `--go`; each corresponds to a failure hit in production.
+
+| Check | Why |
+|---|---|
+| Every repo has a **local** branch ref for the source branch | The scripts resolve `$SRC_BR` locally. Buildroot's fetch leaves repos in detached HEAD, so without `git branch -f <src> origin/<src>` they are all silently skipped. |
+| Idempotency glob is scoped to this rollout's branch suffix | A previous product line's `<iid>-clippy-scan-binary-packages` branches still exist and match a loose `*-clippy-scan-binary-packages` glob → everything reports `EXISTS` and is skipped. |
+| Issue title is unique to this rollout | The scripts reuse an existing **open** issue with the same title. Old rollout issues stay open when the target was not the default branch, so a new rollout silently attaches to them. |
+| For each application, does `origin/<target>` also touch `Makefile` since the source branch diverged? | `git checkout <br> -- Makefile` copies the **whole file**, it does not merge. Any target-side Makefile change is **silently reverted** inside a commit titled "clippy". Cherry-pick would conflict; this will not. Handle such repos by hand: branch from the target and apply only the clippy hunk. |
+| Does the target already contain the same change? | A repo may have received the clippy change through another route; its MR would then carry only noise and conflict. Drop it from the list. |
+| `LIST_FILE` is an absolute path | The scripts `cd "$DL"` before reading it; a relative path yields a silent no-op run. |
+| Every commit is single and Makefile-only | `git show --format= --name-only HEAD` per repo. Compare against the target's *tip*, not the merge-base, or target-side commits appear as spurious reversals. |
+
+## Gotchas
+
+| Gotcha | Detail |
+|---|---|
+| `cargo clippy -p <lib>` | Does NOT lint path deps (only prints `Checking`). Must use `RUSTC_WRAPPER=clippy-driver`. |
+| project path regex | Some repos' `git remote get-url origin` has **no `.git` suffix** → a regex requiring `\.git$` yields a malformed path → GitLab API 404 "Project Not Found" (looks like a permission problem). Use `sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g'`. |
+| repo name ≠ package name | The buildroot package directory need not match the git repo (`3rdparty_rust_dhcpd_parser` → `3rdparty_rust_dhcpd-parser.git`; `lib_moxa_rust_intel_temp_ctrl` → `lib_moxa_rust_intelligent_temperature_control_shm.git`). Never guess a URL — take it from `BR2_PACKAGE_<PKG>_URL` in the package's `Config.in`, or from a workspace that already has it checked out. |
+| issue-creation rate limit | Rapid POSTs fail intermittently even with access. Use `SLEEP=3`; a re-run is idempotent and resumes. |
+| issue auto-close | `Closes #N` only auto-closes when merging to the **default branch**. Targeting a non-default release branch leaves the issues open forever. |
+| token format | The PAT file may be `<label>glpat-<PAT>`; extract with `grep -oE 'glpat-[A-Za-z0-9._-]+'`. |
+| `Cargo.toml` stays | Never remove a library's `Cargo.toml` — it defines the crate. Only the scan machinery and MSRV add-ons (`rust-version`, standalone `.cargo/config.toml`) become removable. |
+| stale `Cargo.lock` | A gitignored `Cargo.lock` left in `dl/<pkg>/` is invisible to `git status` but is rsynced into the build tree, so cargo honours it and the MSRV fix never runs. Tell-tale: the error appears with NO `Updating crates.io index` / `Locking N packages` before it. |
+| inventory without fetching | To audit which repos a product needs, `make <product>_defconfig` resolves the full package set (`select` expanded), and `BR2_PACKAGE_<PKG>_URL` gives each repo — no source download required. Back up `.config` first. |
+| Rust-ness detection | Neither the `/rust/` URL group nor the `.mk` referencing `RUSTC_TARGET_NAME` is reliable alone: some `/rust/` repos hold no crate at all, and some real Rust apps live outside it. Confirm with `Cargo.toml`. |
+
+## Durable alternative to per-package pinning
+
+Per-package MSRV pinning is whack-a-mole. The root cure is freezing the dependency set: a
+committed `Cargo.lock` per application (plus by-application scanning, so libraries never
+resolve standalone) and CI `--locked`; strongest is `cargo vendor`. `resolver="3"` /
+`incompatible-rust-versions="fallback"` only reduce the risk, they never remove it.

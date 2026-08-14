@@ -1,0 +1,59 @@
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are NEVER skipped (SET stays on framework). Add a MIB = add a prefix here.
+#
+# A line may carry flags after the prefix. The only flag is +getfwd: it also
+# forwards the GET of that group's RW columns to the subagent (SET still stays
+# local). Opt-in per group, because forwarding is not free -- it only pays off
+# where the local read is slow. Measured on mxportdb/: forwarding every RW
+# column cost +13.5% on the whole-tree walk (0.694s -> 0.788s) for no gain,
+# since mxPort's RW columns read fast locally.
+#
+# Before adding a prefix, check that ISS actually covers the OIDs: read the
+# branches in app_moxa_iss_10_1_0/code/future/<mod>/inc/<mod>db.h, NOT the length
+# of its tSNMP_OID_TYPE root (that root is only a SysORTable label -- ifmibOID is
+# .1.3.6.1.2.1.2 yet ISS serves .1.3.6.1.2.1.31 too). See ADR-0011.
+#
+# Known deficiency (ADR-0011): if the RW column in-master keeps is the FIRST
+# column of a delegated table, a continuous walk from an ancestor OID skips it
+# (net-snmp master emits an inverted search range across the empty ISS region
+# before the island). Targeted walks and exact GETs are unaffected.
+#
+# +getfwd here matches what shipped before the rules were derived: the four
+# hand-listed forwards were all under this prefix (ifAdminStatus in ifTable;
+# ifLinkUpDownTrapEnable / ifPromiscuousMode / ifAlias in ifXTable).
+# UNVERIFIED (ADR-0028): this flag has never had packet evidence on any product.
+# ADR-0014 required a pcap check; it was never run. Not known-working and not
+# known-broken -- see the mxportdb/ and stdethdb/ silent no-op in ADR-0025.
+# Verify on EDS with fwdcheck.sh (positive AND negative control) before relying
+# on it or removing it.
+ifmibdb/	+getfwd
+# ADR-0011: EtherLike-MIB dot3. ISS serves .10.7.{2,5,9,10,11}; delegating gains
+# 5 columns in-master never implemented (incl. all of dot3CollTable).
+# .10.7 walk: 348 -> 576 whole-tree / 588 summed per table.
+stdethdb/
+# ADR-0012: mxPort.mib. ISS serves .603.1.1.{1,2}. Delegating brings back the
+# two portStatus index columns (.2.1.1.1 / .2.2.1.1) that neither in-master nor
+# NOS 7 mainline returns. .603.1.1 walk: 151 mainline / 163 Plan E / 189 here.
+mxportdb/
+# mxRstp.mib. The RO/RW split falls on a subtree boundary: .603.3.2.1 is the
+# config subtree (9 RW columns, registered in-master for SET) and .603.3.2.2 is
+# the status subtree (18 RO columns, delegated by the RO rule), so no in-master
+# island ends up inside the ISS region. ISS covers all 27 entries.
+# Delegated for speed, not coverage: the .603.3.2 walk is 31.9s / 235 varbinds,
+# and 31.7s of that is the status subtree alone (179 ms/varbind).
+# +getfwd added 2026-08-10 (ADR-0024): every mxRstp GET, RO and RW alike, is now
+# answered by ISS; SET still stays in-master. ADR-0016 had left it off expecting
+# the mxportdb/ outcome -- forwarding an already-fast local read only adds cost.
+# ADR-0024 reported 0.66s -> 0.63s for the .603.3.2 walk. RETRACTED by ADR-0028:
+# interleaved measurement puts A-to-A repeatability at 0.022-0.033s, so a 0.03s
+# "improvement" was never above the noise floor. Forwarding here is real (pcap
+# evidence, twice) but buys no measurable walk time.
+# EDS-G4000: forwarding is unverified on this hardware. The delegation itself
+# passes the ADR-0019 gate 1 here (mxRSTPdb.h -> stp/rstp, built, 27/27 entry
+# OIDs covered); the GET-forward opt-in is not measured.
+# Expect "forwards, no measurable time difference" -- if EDS shows a clear
+# speedup, suspect the method (interleaved? enough rounds? effect larger than
+# A-to-A repeatability?) before believing it. "Does it forward" and "is it
+# faster" are separate questions: fwdcheck.sh answers only the first.
+mxrstpdb/	+getfwd

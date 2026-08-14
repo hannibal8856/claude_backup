@@ -1,0 +1,11 @@
+Source: lib-moxa-snmp-agentx
+Section: base
+Priority: Required
+Maintainer: oscartu <oscarmh.tu@moxa.com>
+Build-Depends: debhelper, libsnmp-dev
+Standards-Version: 3.9.5
+Homepage: http://www.moxa.com/
+
+Package: lib-moxa-snmp-agentx
+Architecture: any
+Description: AgentX subagent shim that keeps libnetsnmpmibs out of the framework process

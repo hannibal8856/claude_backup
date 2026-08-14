@@ -1,0 +1,112 @@
+//! lib_moxa_rust_ies_auto_mibs — Rust FFI over the C `lib_moxa_ies_auto_mibs`.
+//!
+//! Looks up an OID and returns its config-layer URI mapping. Links
+//! `libmoxaiesautomibs.so` (resolved when the final binary links).
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_ulong};
+
+/// Same width as net-snmp `oid` / C `moxa_oid` (unsigned long).
+pub type Oid = c_ulong;
+
+/// Mirrors C `struct ies_map_entry` (see lib_moxa_ies_auto_mibs.h).
+#[repr(C)]
+struct CIesMapEntry {
+    oid: *const c_ulong,
+    oid_len: usize,
+    uri: *const c_char,
+    uri_index: *const c_char,
+    val_type: c_int,
+    mode: c_int,
+}
+
+#[link(name = "moxaiesautomibs")]
+extern "C" {
+    fn ies_map_lookup_by_oid(o: *const c_ulong, olen: usize) -> *const CIesMapEntry;
+    fn ies_map_count() -> usize;
+    fn ies_map_entry_at(i: usize) -> *const CIesMapEntry;
+    fn ies_config_set(config_uri: *const c_char, value: *const c_char) -> c_int;
+    fn ies_config_set_int(config_uri: *const c_char, value: std::os::raw::c_long) -> c_int;
+    fn ies_config_set_bool(config_uri: *const c_char, value: c_int) -> c_int;
+}
+
+/// Owned Rust view of a mapping row.
+#[derive(Debug, Clone)]
+pub struct MapEntry {
+    pub uri: String,
+    pub uri_index: String,
+    pub val_type: i32,
+    pub mode: i32,
+}
+
+/// Exact-match lookup by OID (no instance). `None` if not found.
+pub fn lookup_by_oid(oid: &[Oid]) -> Option<MapEntry> {
+    let p = unsafe { ies_map_lookup_by_oid(oid.as_ptr(), oid.len()) };
+    if p.is_null() {
+        return None;
+    }
+    // Safety: `p` points to a 'static const table entry; the string fields are
+    // NUL-terminated C strings living for the program's lifetime.
+    let e = unsafe { &*p };
+    Some(MapEntry {
+        uri: c_str_to_string(e.uri),
+        uri_index: c_str_to_string(e.uri_index),
+        val_type: e.val_type as i32,
+        mode: e.mode as i32,
+    })
+}
+
+/// Every mapped OID, in table order (so the subagent can register them all).
+pub fn all_oids() -> Vec<Vec<Oid>> {
+    let n = unsafe { ies_map_count() };
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = unsafe { ies_map_entry_at(i) };
+        if p.is_null() {
+            continue;
+        }
+        let e = unsafe { &*p };
+        // Safety: `oid` points to a 'static const subid array of length `oid_len`.
+        let oid = unsafe { std::slice::from_raw_parts(e.oid, e.oid_len) }.to_vec();
+        out.push(oid);
+    }
+    out
+}
+
+/// Write `value` to the config path `config_uri` via the framework's REST
+/// endpoint (loopback), byte-identical to the dlmod's SET. Returns 0 on success.
+pub fn config_set(config_uri: &str, value: &str) -> i32 {
+    let (u, v) = match (CString::new(config_uri), CString::new(value)) {
+        (Ok(u), Ok(v)) => (u, v),
+        _ => return -1, // interior NUL
+    };
+    unsafe { ies_config_set(u.as_ptr(), v.as_ptr()) }
+}
+
+/// Write an INTEGER `value` to the config path `config_uri` via the framework's
+/// REST endpoint (loopback). Returns 0 on success.
+pub fn config_set_int(config_uri: &str, value: i64) -> i32 {
+    let u = match CString::new(config_uri) {
+        Ok(u) => u,
+        Err(_) => return -1,
+    };
+    unsafe { ies_config_set_int(u.as_ptr(), value as std::os::raw::c_long) }
+}
+
+/// Write a JSON BOOLEAN to `config_uri` via the framework's REST endpoint.
+/// For config fields stored as booleans but exposed as SNMP INTEGER TruthValues.
+pub fn config_set_bool(config_uri: &str, value: bool) -> i32 {
+    let u = match CString::new(config_uri) {
+        Ok(u) => u,
+        Err(_) => return -1,
+    };
+    unsafe { ies_config_set_bool(u.as_ptr(), i32::from(value)) }
+}
+
+fn c_str_to_string(p: *const c_char) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}

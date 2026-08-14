@@ -1,0 +1,99 @@
+# ADR-0024: `mxrstpdb/` 加上 `+getfwd` —— mxRstp 的 GET 全部交給 ISS,SET 仍留 in-master
+
+Status:
+  **Accepted(2026-08-10)** —— **推翻 ADR-0016 的一項子決策**(「本行不加 `+getfwd`」)。
+  ADR-0016 的其餘內容(委派 `mxrstpdb/`、RO/RW 落在子樹邊界、config/status index 不一致)
+  維持有效。
+
+Date: 2026-08-10
+
+Context:
+  ADR-0016 把 `mxrstpdb/` 加進 `agentx_owned.list`,但**刻意不加 `+getfwd`**。
+  當時的理由寫在該 ADR 與清單註解裡:`.603.3.2.1` config 子樹本地讀只要 0.41s / 59 vb,
+  已經夠快;而 ADR-0014 在 `mxportdb/` 上量到「轉發每個 RW 欄的 GET 讓整棵 walk 慢 13.5%
+  (0.694s → 0.788s)且沒有任何增益」。結論是:**轉發一個本來就快的本地讀只會加成本。**
+
+  結果是 mxRstp 的 27 個欄位由兩個 agent 分別服務:
+
+  | 子樹 | 欄位 | 服務者 |
+  |---|---|---|
+  | `.603.3.2.1` config | 9 個,全 RW | in-master(讀 ISS 的 `auto_mibs` 檔案快照) |
+  | `.603.3.2.2` status | 18 個,全 RO | ISS AgentX subagent |
+
+  使用者 2026-08-10 指示:**mxRstp 的 SNMP GET,不論 RO 或 RW,全部用 AgentX 送給 ISS 處理。**
+  這在機制上只有一個做法 —— `+getfwd`。`ies_auto_mibs.c:3499` 的
+  `mox_snmp_entry_is_agentx_owned()` 對 `HANDLER_CAN_SET` 無條件 `return 0`,
+  所以 **RW 欄永遠不可能跳過本地註冊**;`+getfwd` 是唯一能讓 RW 欄的 GET 走 AgentX
+  而 SET 留在本地的開關。
+
+Decision:
+  `agentx_owned.list` 的 `mxrstpdb/` 一行加上 `+getfwd`。
+  程式碼零改動 —— 這是純設定變更,`plugin_moxa_snmp` `6de149f`。
+
+  **① ADR-0016 預期的變慢沒有發生**
+
+  在 DUT 上以 bind mount 換掉 `/etc/moxa/netsnmp/agentx_owned.list` 並
+  `systemctl restart app_moxa_snmp_server.service`,單一變數(只差那一行的旗標):
+
+  | walk | 無 `+getfwd` | 有 `+getfwd` | 完整性 |
+  |---|---|---|---|
+  | `.603.3.2` 全樹 | 0.66s | **0.63s** | 227 vb / 27 欄,兩者相同 |
+  | `.603.3.2.1` config | 0.20s | **0.17s** | 59 vb / 9 欄,兩者相同 |
+
+  即 `mxportdb/` 的 +13.5% **在 mxRstp 上不重現**。原因未查(候選:mxPort 的 RW 欄
+  本地讀走的是已快取的 `auto_mibs` 檔,而 mxRstp config 的本地讀路徑較貴),
+  **不在本決策範圍,也不應據此推廣到其他 group** —— 是否加 `+getfwd` 仍應逐 group 實測。
+
+  **② 轉發經 wire 驗證,不是從「值回得來」推論的**
+
+  這一步是本 ADR 的重點。**回得到值不代表走 ISS** —— 沒有可用 probe 時
+  `mox_snmp_handle_entry()` 會靜默 fall through 回本地路徑,行為與成功轉發完全一樣。
+
+  `:705` 上同時有 framework subagent 的流量(背景 6–16 pkt/s),直接數 port 705 的封包
+  無法分辨。改為**只計 ISS 自己那條 TCP stream**(`ss -tnp` 取 `ISS.exe` 的 ephemeral port),
+  並把取樣數拉到 150 次讓訊號蓋過背景:
+
+  | 視窗 | Δ 封包 |
+  |---|---|
+  | idle 15s | +88(≈ 5.9 pkt/s) |
+  | **150× config RW GET(`.603.3.2.1.1.0`)** | **+286** |
+  | 150× mxPort config RW GET(`mxportdb/` 無 `+getfwd`,負對照) | **+30** |
+
+  目標與負對照差 **9.5 倍**,且負對照低於空窗背景率 → **無 ISS 流量**。轉發成立。
+
+  ⚠️ 前三輪量測全部作廢,原因記在下方「方法論」。
+
+  **③ SET 未受影響**
+
+  `.603.3.2.1.4.0`(`RstpConfigSwift`)寫入現值成功並讀回一致。`+getfwd` 只在
+  `MODE_IS_GET(reqinfo->mode)` 分支內生效,SET 路徑未經過該閘。
+
+Consequences:
+  - mxRstp 成為 `agentx_owned.list` 上**第二個 GET 全走 AgentX 的 group**
+    (第一個是 `ifmibdb/`)。`stdethdb/` 與 `mxportdb/` 維持 RO-only 委派。
+  - 對外說法可以改成「mxRstp 的讀取路徑已完全交給 ISS」;但**寫入仍在 in-master**,
+    不可簡化成「mxRstp 已整組搬走」。
+  - ADR-0016 記載的 **config/status 表 index 不一致(某 port config 鍵 13、status 鍵 29)
+    未由本變更解決**,也未惡化 —— 本次量到兩張表的 index 集合皆為
+    `1 2 5 6 7 8 9 10 11 12 29`。該現象是否已在別處被修掉,**未查**。
+  - 目前只以 bind mount 熱套用在 DUT p1 上,**重開機即還原**。要常駐必須重新建置
+    `plugin_moxa_snmp` 並燒錄。
+
+Alternatives considered:
+  - **把 9 個 RW 欄也從 in-master 取消註冊** —— 不可行。SET 必須留在 in-master /
+    framework 的 config 路徑(ADR-0005 / ADR-0016),取消註冊等於同時失去 SET。
+  - **改 `mox_snmp_entry_is_agentx_owned()` 讓 RW 也能被 skip** —— 影響全部四個前綴與
+    其他所有 group,遠超本次請求範圍,且直接違反清單檔頭自述的契約。
+  - **維持現狀並回報「這是刻意設計」** —— 已先向使用者說明 ADR-0016 的理由與預期的
+    效能代價,使用者確認仍要做,故執行。事後量測顯示該代價不存在。
+
+方法論(已寫入 memory):
+  - **DUT 上沒有 `timeout`。** `timeout 8 tcpdump ...` 直接 `command not found`,
+    tcpdump 從未啟動,四個量測視窗全部回 0 —— 而 0 正好是「沒有轉發」的預期值,
+    **看起來像實驗成功地否定了假說,其實是空跑**。正對照(已知必然委派的 RO 欄)
+    同樣回 0 才揭穿這件事。**每個 pcap 視窗都必須配一個正對照。**
+  - **`:705` 是共用的。** framework subagent 與 ISS 都連在上面,只過濾 port 705
+    會把 framework 的背景流量算進來。要分辨必須用 `ss -tnp` 取出 `ISS.exe` 的
+    ephemeral port 再過濾;該 port 每次 snmpd 重啟都會變。
+  - **20 次取樣不夠。** 背景 6 pkt/s 在 3 秒視窗就是 ~20 個封包,和訊號同數量級,
+    正負對照量不出差異。150 次才把比值拉到 9.5 倍。

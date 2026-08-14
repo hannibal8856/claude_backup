@@ -1,0 +1,191 @@
+# SNMP Plan C mod.1 —— `agentx_owned.list` 委派機制的推廣與驗證
+
+## TL;DR
+
+把 `agentx_owned.list` 委派機制從 1 個 MIB group 推廣到 3 個:**成功搬 2 支(標準 MIB 與 MOXA private MIB 各一)、否決 2 支**,並在過程中把「該挑哪一支搬」的判準從靜態條件改成**先量 walk 耗時**。
+
+一天之內走完「選型 → 靜態檢查 → DUT 實測 → 對照組比對 → commit → build → 燒錄 → 驗收」的完整循環,並產出三份 ADR。過程中有兩次自我推翻的判斷,都是靠實測資料修正的。
+
+---
+
+## 背景與目標
+
+- Plan C 的 `agentx_owned.list` 自導入以來**只委派了一個群組**(`ifmibdb/`),機制是否具備通則性從未驗證。
+- iss1 領域共 **45 支 header**,絕大多數仍由 in-master 服務;若機制可用,這是一大塊可遷移的範圍。
+- 機制本身很單純:**RO 欄命中前綴 → in-master 跳過註冊 → snmpd master 路由給 ISS subagent;RW 永遠留本地**。
+- 目標:各挑一支**標準 MIB** 與 **MOXA private MIB** 實測,確認機制不限於單一形態。
+- 附帶目標:完成 T3(turboRing `interface` 欄)的實作與驗收 —— 那屬 iss0,與委派機制無關。
+
+這個機制的原始動機寫在程式碼註解裡:RW 欄的 GET 走本地 value-file 路徑約 600ms,而 MIB walk 會把 RW 欄和 RO 欄綁進同一個多 varbind GETNEXT,一個慢欄位就拖垮整張表。換句話說,**速度才是它存在的理由** —— 這一點在本次後半段成為關鍵。
+
+---
+
+## 參考資料 / 來源
+
+- **機制實作**:`3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` —— `:3366` 載入清單、`:3404` RO/RW 判定、`:3457` skip 迴圈、`:3062` GET-forward 規則表與動機註解。
+- **對照權威**:`snmp_moxa_mib/standard/EtherLike-MIB.mib`(RFC 3635)、`private/mxPort.mib`、`private/mxTrv2.mib` —— 判斷欄位「該不該出現」一律以 MAX-ACCESS / STATUS 為準。
+- **ISS 端涵蓋**:`app_moxa_iss_10_1_0/code/future/<mod>/inc/<mod>db.h` 與各自的 `Register*()` 呼叫點。
+- **既有 ADR**:ADR-0004(`agentx_owned.list` 與 GET-forward 兩個獨立機制的 Design Principle)、ADR-0010(MIB 為權威)。
+- **既有量測**:`~/WORK/SNMP_50ms/snmpwalk/` 的參考 walk 收集,含 `mainline-20260804_0318/`。
+- **CLI 手冊**:`~/WORK/SNMP_50ms/` 下兩份 PDF(204 頁主手冊 + 57 頁 L3)。
+
+本次新產生的證據檔是五份 AgentX pcap(`~/agentx{,2,3,4,5}.pcap`),其中 `agentx5.pcap` 含整棵 walk 的 583 個 GetNext-PDU,是後面找出遍歷缺陷根因的關鍵。既有的參考 walk 收集也發揮了作用 —— 它讓我們省下一次 partition 切換就確認了 RMON 在 mainline 同樣不存在。
+
+---
+
+## 討論脈絡
+
+### 轉折一:建置樹的分歧
+
+- **問題**:準備 build 時發現建置容器掛的是 `~/SNMP_PLAN_E`(branch `snmp-plan-E2`),而所有工作都在 `~/mds4xgl3`(branch `snmp-plan-E`)。
+- **關鍵發現**:E2 有一個 commit 明確寫著「stop installing agentx_owned.list (per D1)」—— 方向與本次工作完全相反。
+- **取捨**:不自行猜測哪條線為準,停下來詢問。
+- **決定**:以 `snmp-plan-E` 為準,改用已存在的 `mx_mds4xgl3` 容器;`~/SNMP_PLAN_E` 改名為 `~/SNMP_PLAN_E2` 使目錄名與分支名一致。
+
+使用者說明 E2 那條線是「走過的路」,改用 namelen 做 AgentX dispatching 而放棄 `agentx_owned.list`,結果 latency 反而變差,因此暫時擱置。這個脈絡讓本次方向站得更穩:我們是拿實測數字在走,不是憑直覺。
+
+### 轉折二:誰在回答?從推論到證明
+
+- **問題**:委派後某個 RW 欄從 walk 消失,但直接 GET 仍讀得到 —— 到底誰在服務?
+- **候選**:值本身分辨不出來(兩邊都回 `INTEGER: 1`),只能靠 pcap。
+- **方法**:配一個「必經 ISS」的 RO 鄰居當**對照組**,兩個 GET 一起打,比較有無 AgentX 往返。
+- **決定**:確立此手法為往後驗證歸屬的標準做法 —— 不需解讀 Register-PDU。
+
+第一、二份 pcap 因為委派當時並未生效而全是 keepalive,成了很乾淨的**負對照基線**。第三份證實 RO 欄的 GET 產生 Get-PDU 送往 ISS、RW 欄則完全無 AgentX 流量,使用者「RW 不被 skip 就一定是 in-master」的推論獲得直接證明。
+
+### 轉折三:兩次自我推翻
+
+- **第一次**:先判定「ISS 遮蔽了 RW 欄」→ 單發 `snmpgetnext` 走得到,推翻。
+- **第二次**:改判「forward rule 是可見性的成因」→ 讀實作後發現 forward 發生在請求**已抵達 in-master handler 之後**,推翻,並撤回原本要補規則的建議。
+- **真正的根因**:整棵樹連續遍歷時,master 送出一個 **start > end 的顛倒 search range**,把夾在 ISS 區域中間的 in-master 註冊整段跳過。
+- **代價**:兩輪推論錯誤,都是靠 pcap 與逐欄分佈比對修正的。
+
+值得記下的教訓是:**筆數是總數不是集合**。當時拿「委派後的分佈」去對照腦中假想的基線而非實測基線,才會誤判。後來改成每次都量逐欄分佈,問題立刻收斂。
+
+### 轉折四:對照組的價值
+
+- **問題**:某些欄位缺席,是 Plan E 造成的還是本來就沒有?
+- **方法**:切到 NOS 7 mainline(`2026_0805_2335`)量同一組數字。
+- **成果**:`mxportdb/` 的 config 側 index 欄在 mainline 也缺 → 既有行為,非回歸;`dot3PauseAdminMode` 的 `snmpset` 兩邊同樣回 `badValue` → SET 本來就被 config layer 擋掉。
+- **決定**:把「與 mainline 對照」納入標準驗證流程。
+
+使用者提出的判準很直接:「如果 NOS 7 那邊 image 也是一樣就沒事」。這一句把「既有缺陷」和「新造成的回歸」切得乾乾淨淨,也讓後續好幾個看似嚴重的發現迅速降級。
+
+### 轉折五:篩選方法改版
+
+- **問題**:依原條件(RO 數量、有無資料、避開踩雷形狀)挑出的 `stdladb/`,條件全過卻**委派後淨損 12 筆、零加速**。
+- **追問**:Plan C 的動機是速度,但整個 session 從未量過耗時。
+- **量測**:未委派 1.05 秒 / 385 筆,委派後 1.12 秒 / 373 筆 —— 完全在雜訊範圍內。
+- **推論**:ISS 的註冊本來就存在、與清單無關;清單只控制 in-master **要不要也註冊**。ISS 若本就贏得 wire,委派毫無收益。
+- **決定**:篩選條件改為**先量 walk 耗時**,慢才值得委派。
+
+這個判準立刻發揮作用:下一個候選 `mxladb/` 量到 0.45 秒 / 50 筆,在**改任何設定之前**就判定無益,省下一整輪委派–量測–還原循環。舊條件則會讓它整輪跑完才發現白做。
+
+---
+
+## 結論與決策
+
+- **`stdethdb/`(EtherLike dot3)委派 —— 採用。** 因為 348→576 varbinds,ISS 補上 5 個 in-master 從未實作的欄位(含整張 dot3CollTable)。知情接受一項缺陷:整棵樹連續 walk 會漏掉 12 筆 `dot3PauseAdminMode`,但該欄實質唯讀且 exact GET 正常。
+- **`mxportdb/`(mxPort.mib)委派 —— 採用。** 因為 163→189,取回的兩個 portStatus index 欄是 in-master 與 mainline **都拿不到**的;且該群組所有帶 flag 的欄都是 RW、一律留本地,委派出去的 RO 欄零特殊處理。
+- **`stdrmodb/` —— 否決。** 因為 RMON 在此產品上根本沒有註冊(`No Such Object`),設定旗標、等待、重開機三種嘗試皆無效,且 mainline 同樣沒有。104 個 RO entry 無從驗證。
+- **`stdladb/` —— 否決。** 因為正確性淨損 12 筆而速度零改善,沒有任何補償收益。
+- **`mxladb/` —— 建議否決。** 因為 walk 僅 0.45 秒(ISS 應已在服務),且真正有 RO 的前綴是 `fsladb/` 而非 `mxladb/`,只有 5 筆;另一前綴 `fscfadb/` 底下全是 RW,加了等於沒加。
+- **候選篩選改以 walk 耗時為首要條件。** 因為它一次唯讀 walk 即可判定、不需改設定或重啟,且直接對應機制的原始動機。
+
+三份 ADR 記錄了上述決策:ADR-0011(stdethdb)、ADR-0012(mxportdb)、ADR-0013(兩項否決 + 篩選方法改版)。ADR-0011 因為實測推翻初稿結論而做過一次大幅修訂,修訂內容標註清楚、未改寫原始 Context 與 Alternatives。
+
+---
+
+## 機制層面的新認識
+
+- **ISS 的註冊範圍看 `*db.h` 的分支涵蓋,不是 `tSNMP_OID_TYPE` root 長度** —— root 只是 SysORTable 標籤。反證:`ifmibOID` 只到 `.1.3.6.1.2.1.2`,但 ISS 確實服務 `.31`。
+- **一張表被兩個 server 拆管時,第 1 欄會從整棵樹連續 walk 消失**;整張表由單一 server 擁有則正常。
+- **`stdladb/` 同群組內拿到一正一反的受控佐證**:`dot3adAggPortTable`(13 RO / 10 RW,拆表)col 1 消失;`dot3adAggPortStatsTable`(8 RO / 0 RW,整張給 ISS)col 1 保留。
+- **`REPLACE_BIT_VALUE` 掛在 RO 欄的疑慮已排除**,且第二次是用有內容的 LACP state BITS 驗的,比第一次只回 `00` 的案例有說服力。
+- **手改 DUT 上的 `agentx_owned.list` 撐不過重開機**(`/etc` 疑為 tmpfs overlay),兩次獨立實證。
+
+最後這一點造成過一次實質浪費:切換 partition 後委派已被還原,卻仍照原計畫抓 pcap,得到一份無效資料。往後跨重開機的量測,取數字前都要先確認委派仍生效。
+
+---
+
+## 後續待辦 / 開放問題
+
+- **T3 未生效,原因待查(優先)** —— 程式已確認進到 image(符號與字串都在),但 `.603.3.4.1.2.1.4.{1,2}` 回 `noSuchInstance`。已排除三個假設,剩「C 側 map 沒產生」與「Rust handler 讀 config 失敗」兩種,wire 症狀相同。
+- **下一步做法**:讓失敗路徑可辨識(讀不到時回特徵值而非一律 `noSuchInstance`),重 build 一次即可分辨。
+- **35 支候選的耗時掃描** —— 純唯讀、不改設定,一輪掃完就能依 ADR-0013 排序。
+- **空表候選可先開功能** —— `vrrpdb/`、`vrrp3db/`、`stdcipdb/` 在 DUT 上 0 筆,有 CLI 手冊可先設定把表填出資料。
+- **`mxdot1xdb/` 不宜排前面** —— 唯一 iss0/iss1 混合的群組,會第一次踩到「同一子樹兩個 owner」。
+- **開放問題**:那個顛倒 search range 是 net-snmp master 的缺陷還是重疊註冊的必然結果?目前只有觀察與假說,未讀 master 原始碼證實。
+
+iss1 整體進度以 RO entry 計約 9%(已搬 82 筆 / 待搬 852 筆)。另有 6 支 RO=0 的群組永遠不可搬 —— 全是 RW,加進清單一筆都不會被 skip。
+
+---
+
+## 附錄
+
+### A. 驗證某個 OID 由誰服務
+
+```sh
+# DUT 上,root。搭配一個「必經 ISS」的 RO 鄰居當對照組
+tcpdump -i lo -s0 -w /tmp/agentx.pcap port 705 &
+TD=$!
+sleep 3
+snmpget -v2c -c public <DUT> <待測 OID>        # RW,預期無 AgentX 流量
+sleep 3
+snmpget -v2c -c public <DUT> <RO 鄰居 OID>     # 已委派,預期有 Get-PDU
+sleep 3
+kill $TD
+```
+
+分析(host 端,注意 tshark 對 AgentX Response 的 varbind 解不開,但 **search range 看得到**):
+
+```sh
+tshark -r agentx.pcap -T fields -e frame.number -e _ws.col.Info
+tshark -r agentx.pcap -Y "frame.number==N" -V | grep -E "Range (Start|End)"
+```
+
+### B. 逐欄分佈比對(比只看總筆數可靠)
+
+```sh
+snmpwalk -v2c -c public -On <DUT> <ROOT> \
+  | sed 's/^\.<ROOT 逃逸後>\.\([0-9.]*\)\.[0-9]* = .*/\1/' | uniq -c
+```
+
+### C. 委派的加入與還原(B 級,改後必須重啟 snmpd)
+
+```sh
+echo '<prefix>/' >> /etc/moxa/netsnmp/agentx_owned.list      # 加入
+sed -i '/^<prefix>\//d' /etc/moxa/netsnmp/agentx_owned.list  # 還原
+```
+
+重啟 snmpd(`init_snmpd.sh` 是一次性腳本,直接 kill 不會被拉起):
+
+```
+moxash → configure terminal → snmp-server access disable
+       → snmp-server access enable (答 y) → end
+```
+
+### D. 建置與燒錄
+
+```bash
+docker start mx_mds4xgl3        # 掛 ~/mds4xgl3;target 不帶 -custom
+cd /home/moxa/mds4xgl3/buildroot
+make lib_moxa_ies_auto_mibs-rebuild && make lib_moxa_rust_ies_auto_mibs-rebuild \
+  && make plugin_moxa_snmp-rebuild && make rust_moxa_build-rebuild \
+  && make app_moxa_framework-rebuild && make
+```
+
+最後的 `make` 會停在 HSM 簽章(GitLab CI pipeline,官方金鑰),**由使用者執行**。
+燒錄用 `examinate-plan-e-swu`,兩道 gate 維持開啟:`--protect 2` 與
+`--control-build 2026_0805_2335`;流程是先切到 mainline 再 `--flash`,寫入 partition 1。
+
+### E. 本次的基線數字(供日後回歸比對)
+
+| OID | mainline | Plan E 委派前 | 委派後 |
+|---|---|---|---|
+| `.1.3.6.1.2.1.10.7`(dot3) | — | 348 | **576**(分表加總 588) |
+| `.1.3.6.1.4.1.8691.603.1.1`(mxPort) | 151 | 163 | **189** |
+| `.1.2.840.10006.300.43`(LAG) | 361 | 385 | 373(已還原) |
+| `.1.3.6.1.2.1.31` / `.2`(ifmibdb) | — | — | 320 / 309 |
+
+比對時**務必註明是整棵走還是分表走** —— 兩者差異來自遍歷缺陷,不是回歸。

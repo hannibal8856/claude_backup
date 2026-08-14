@@ -1,0 +1,21 @@
+您那個 GETNEXT 的疑問，答案是「對，但只對四分之三」
+
+我查了 app_moxa_framework/src/snmp_subagent.rs。framework subagent 註冊 4 個群組，用的是兩種不同方式：
+
+┌───────────────────┬────────────────────────────┬────────────────────┐
+│       群組        │          註冊方式          │   GETNEXT 誰處理   │
+├───────────────────┼────────────────────────────┼────────────────────┤
+│ trustedIpTable    │ IterTable → table_iterator │ net-snmp helper ✅ │
+├───────────────────┼────────────────────────────┼────────────────────┤
+│ snmpTrapHostTable │ IterTable → table_iterator │ net-snmp helper ✅ │
+├───────────────────┼────────────────────────────┼────────────────────┤
+│ l3VlanIfTable     │ IterTable → table_iterator │ net-snmp helper ✅ │
+├───────────────────┼────────────────────────────┼────────────────────┤
+│ mxTurboRingV2     │ Subtree → register_handler │ 自己實作 ❌        │
+└───────────────────┴────────────────────────────┴────────────────────┘
+
+第四個的程式碼註解講得很白：
+
+▎ /// GETNEXT inside a Subtree group: answer with the next mapped OID after the requested one that actually HAS a value... **Stepping over valueless OIDs must happen here, in-process**
+
+而且 lib.rs 還特地提供了 set_request_oid() / set_request_null() 兩支 API，註解寫明「a GETNEXT handler answers with a DIFFERENT OID than the one asked for, so it must set that OID here」——這些 API 存在的唯一理由就是讓 handler 自己回應 GETNEXT。

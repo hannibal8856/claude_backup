@@ -1,0 +1,34 @@
+$ 
+$ cat /etc/moxa/netsnmp/agentx_owned.list 
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are NEVER skipped (SET stays on framework). Add a MIB = add a prefix here.
+ifmibdb/
+stdethdb/
+$ 
+$ moxash
+Welcome to MOXA command shell
+Current time is Friday, May 05, 2023, 03:12 PM
+moxa# !
+moxa(config)# snmp-ser acc dis
+moxa(config)# snmp-ser acc en
+Are you sure you want to enable a non-secure interface (HTTP, Telnet, or SNMPv1/v2c)? [y/N] y
+moxa(config)# 
+moxa(config)# end
+moxa# exit
+$ 
+$ ps ax | grep snmp
+1180 ?        Ss     0:00 /bin/sh /etc/moxa/config-moxa-snmp/init_snmpd.sh
+1181 ?        Sl     0:01 /bin/snmpd -f -C -c /moxa/run/snmp/snmpd.conf,/etc/moxa/netsnmp/config/config_encryption.conf,/etc/moxa/netsnmp/config/dai.conf,/etc/moxa/netsnmp/config/dhcprel
+ay.conf,/etc/moxa/netsnmp/config/dhcpsnp.conf,/etc/moxa/netsnmp/config/eip.conf,/etc/moxa/netsnmp/config/fiber_check.conf,/etc/moxa/netsnmp/config/fiber_check_event.conf,/etc/moxa/netsnm
+p/config/iec62439_2.conf,/etc/moxa/netsnmp/config/ieee8021mstp.conf,/etc/moxa/netsnmp/config/ipsg.conf,/etc/moxa/netsnmp/config/locator_command.conf,/etc/moxa/netsnmp/config/macsec.conf,
+/etc/moxa/netsnmp/config/mms_setting.conf,/etc/moxa/netsnmp/config/modbus_tcp.conf,/etc/moxa/netsnmp/config/moxa_1588.conf,/etc/moxa/netsnmp/config/moxa_c37_238.conf,/etc/moxa/netsnmp/co
+nfig/moxa_iec61850.conf,/etc/moxa/netsnmp/config/moxa_ptp.conf,/etc/moxa/netsnmp/config/multicast_routing.conf,/etc/moxa/netsnmp/config/mxMcp.conf,/etc/moxa/netsnmp/config/mxgoosecheck.c
+onf,/etc/moxa/netsnmp/config/mxlp.conf,/etc/moxa/netsnmp/config/mxmstp.conf,/etc/moxa/netsnmp/config/poe.conf,/etc/moxa/netsnmp/config/profinet.conf,/etc/moxa/netsnmp/config/ptpbase.conf
+,/etc/moxa/netsnmp/config/relay.conf,/etc/moxa/netsnmp/config/relay_command.conf,/etc/moxa/netsnmp/config/snmpd_system_information.conf,/etc/moxa/netsnmp/config/snmpd_system_utilization.
+conf,/etc/moxa/netsnmp/config/status_mxlp.conf,/etc/moxa/netsnmp/config/status_system_information.conf,/etc/moxa/netsnmp/config/time_info.conf,/etc/moxa/netsnmp/config/time_setting.conf,
+/etc/moxa/netsnmp/config/time_zone.conf,/etc/moxa/netsnmp/config/ui_service_management.conf,/etc/moxa/netsnmp/config/agentAddress.conf -p /var/run/snmpd.pid
+1261 ttyS0    S+     0:00 grep snmp
+$ 
+$ cat -n /etc/moxa/version/BUILD_TIME 
+     1  2026_0730_1302

@@ -1,0 +1,212 @@
+# Handoff — 2026-08-04 收工，下一步是 Phase 2
+
+給接手的 session。**先讀這份，再讀** `phase2-briefing-2026-08-04.md`（素材）
+與設計文件 `plan-e-agentx-get-offload-design-2026-08-03.md` §10.2（Phase 2 定義）。
+
+---
+
+## 1. 現在在哪
+
+**Plan E Phase 0 / Phase 1 完成。** SDD plan `plan-e-phase0-1-PLAN-2026-08-03.md`
+的 Task 1–5 全部 complete，Task 6 是條件性、觸發條件未發生。
+ledger 在 `.superpowers/sdd/plan-e-phase0-1-PLAN-2026-08-03/progress.md`（**被 gitignore，只在磁碟上**）。
+
+**Phase 2 的 SDD plan 還沒寫。** 起草到一半被中斷，只完成素材蒐集。
+
+### commits
+
+`dl/3rdparty_net_snmp`（branch `snmp-plan-E2`）
+
+| commit | 內容 |
+|---|---|
+| `655ba95` | children 鏈轉發，取代 probe-OID 表 |
+| `330a1e0` | 修正註解引用的函式名 |
+| `e757b35` | 新註解改英文 |
+| `91e7ed3` | 廢除 agentx_owned.list，全部 entry 本地註冊 |
+| `4b0f050` | namelen 不變式監聽器 |
+| `2ed5f03` | 合成 index 欄留在本地 |
+| `aa598f7` | 轉發移到本地/遠端邊界 |
+| `d0eb866` | 處理 code review 發現 |
+
+`dl/plugin_moxa_snmp`：`8ceffee`（不再安裝 agentx_owned.list）
+
+`~/WORK/SNMP_50ms`（branch `develop`）：`1de495f` `42f0698` `59df139` `92dcb50`
+`6892b99` `b9dace4` `eb8a86a` `ef2c897` `473704b`
+
+### DUT 與 HEAD 不一致
+
+DUT 上跑的是 **`Build 2026_0804_1331`**（= `aa598f7`）。
+`d0eb866` 之後我 build 出 **`Build 2026_0804_1724`**，
+`output/images/FWR_MDS-G4000-L3-4XGS_v7.0_2026_0804_1724.swu`，
+**使用者說正在 update，但沒有回報結果**。
+
+`d0eb866` 唯一的功能性改動是 `IES_GET_FORWARDED` 由 5 改成 100（避開 `SNMP_ERR_GENERR`）。
+兩個值在所有活路徑上都與 `IES_NOERR`／`IES_ERR` 相異，所以行為不變是**看出來的、不是量出來的**。
+燒完請把三項驗收再跑一次，見 §5。
+
+---
+
+## 2. 兩件我先前回報錯的事
+
+### (a) D17 沒有寫進決策日誌 ← 必做
+
+我在 ledger 寫「Task 6 條件性、未觸發、全計畫沒有其他未結項目」。**這是錯的。**
+Task 6 的 **Step 1 是無條件的**（`plan-e-phase0-1-PLAN-2026-08-03.md:992`）：
+
+> **Step 1: 記錄判定結果** —— 無論走哪條路，都要把判定寫進設計文件的決策日誌，
+> 讓後續接手的人知道 D3 的狀態
+
+要新增的內容（plan 裡有原文）：
+
+> `| D17 | Phase 1 不實作整段註冊（D3 延後至 Phase 3） | Task 4 移除 agentx_owned.list`
+> `後不再有欄位被跳過，§3.3 合成 index 與 §4.3 GETNEXT 邊界兩個風險均無觸發條件 |`
+
+寫進 `plan-e-agentx-get-offload-design-2026-08-03.md` 的 §11 決策日誌。
+**這件事會直接影響 Phase 2 的理解**——見下一節。
+
+### (b) 設定 snapshot 的流程我問了但沒得到答案
+
+`capture_baseline.sh` 只存 OID 不存設定。我提的方案是「使用者手動存一份
+`show running-config` 到 capture 目錄，我把流程寫進腳本說明」，**使用者沒有回覆**，
+沒有實作。細節見 `dut-config-affecting-snmp.md`。
+
+---
+
+## 3. Phase 2 起草到一半發現的矛盾 ← 開工前要先釐清
+
+設計文件 §10.2 的 Phase 2 這樣寫：
+
+| 欄位 | 內容 |
+|---|---|
+| 內容 | iss1 私有 MIB 試點 —— **mxPortdb** |
+| go/no-go | 硬門檻；**`portConfigTable` 的 col-1 由 ISS 提供且值正確** |
+| 選它的理由 | `portConfigTable` 是 §3.3 的 24 張風險表之一 → **直接驗證機制一確實解掉合成 index 問題** |
+
+**但機制一（整段註冊 / D3）在 Phase 1 沒有實作，延到 Phase 3 了**（就是上面 D17 那件事）。
+
+而且我從原始碼查證：**mxPortdb 的 4 張表各自都宣告了 col 1**
+（`net_mxPortdb.h` 裡有 4 個 entry 的 oid_list 最後一個 arc 是 1，
+例如 `PortConfigIndex` = `...8691,603,1,1,1,1,1,1`）。
+`moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()`
+（`moxa_snmp_handle_util.c:344`）只有在 `GetTableEntryOID(entry) == 2` 時才建合成欄；
+col 1 存在時走的是 `snprintf(tableURI, ...)` 那條，**不會產生合成 index**。
+
+所以：
+- mxPortdb 沒有合成 index 欄 → 不會被 `2ed5f03` 的 `SYNTHETIC_INDEX` 判斷攔下來
+- col-1 是真欄位，ISS 有能力提供 → **go/no-go 門檻本身是做得到的、也是合理的**
+- 但「直接驗證機制一解掉合成 index 問題」這個**理由**與事實對不起來
+
+**下個 session 開工第一件事：讀設計文件 §3.3**，確認那 24 張風險表的判定標準是什麼，
+以及 mxPortdb / portConfigTable 為何被列入。三種可能：
+1. §3.3 的判定標準不是「缺 col 1」，是別的東西 → §10.2 的理由要改寫
+2. mxPortdb 被列入 §3.3 是誤植 → 要不要換試點對象
+3. 我漏看了某個條件 → 修正我上面的結論
+
+**不要在沒釐清前就寫 Phase 2 plan。** 這決定了驗收條件怎麼訂。
+
+---
+
+## 4. Phase 2 素材（已備妥，不必重查）
+
+`phase2-briefing-2026-08-04.md`，內容包含：
+
+- mxPortdb 實測事實：**17 筆**、全 `iss_build = 1`、**RO 9 / RW 8**、
+  OID 根 `1.3.6.1.4.1.8691.603.1.1`、**5 個 URI = 1 scalar + 4 table**
+  （`portConfigSystemLinkUpDelayEnable` 1、`portConfigTable/` 6、`portStatTable/` 5、
+  `portConfigLinkUpDelayTable/` 3、`portStatLinkUpDelayTable/` 2）
+- 旗標只有兩種：`REPLACE_TRUTH_VALUE` ×3、`URI_MOD_ON_SET` ×3
+
+### 素材裡標記的第一個未知數（優先度高）
+
+**`REPLACE_TRUTH_VALUE` 設在 `iss_build==1` 的 entry 上，但 §7.1 列出 ISS GET path
+只認 4 個旗標，它不在其中。** 這與本週 code review 抓到的
+`mxArpdb` / `URI_FIXED_VALUE` 是**完全同一個型態**（見設計文件 §7.0.1 與附錄）。
+
+若 ISS 本來就回 1/2 就沒事；若不是，這 3 筆的值會在轉發前後改變——
+**那是 Phase 2 的第一個真缺陷，而且落在試點的第一張表上。**
+建議把這條驗證排成 Phase 2 的第一個 task，不是附帶檢查。
+
+---
+
+## 5. 驗收與量測的既有教訓（照做，別重新發明）
+
+### 燒完 image 要跑的三項
+
+```bash
+DUT=192.168.127.253 ; C=public ; GET=/usr/bin/snmpget ; WALK=/usr/bin/snmpwalk
+
+$GET -v2c -c $C -On -r0 -t2 $DUT 1.3.6.1.2.1.1.2.0
+#   期望 .1.3.6.1.4.1.8691.600.1.5.4（不是 .1.3.6.1.2.1）
+
+$WALK -v2c -c $C -On -Cc $DUT 1.3.6.1.4.1.8691.603.3.2.2.1.1.1 | grep -c '^\.'
+#   期望 12
+```
+
+延遲**用 pcap 量，不要用 client wall clock**。理由寫在 `snmpwalk/RESULT-task3.txt`
+的 METHOD 段：`/usr/bin/time snmpget` 量到的是 client 行程，fork/exec 加 net-snmp
+載 MIB 檔自己就吃掉約 40ms，而裝置線上只花 2.9ms。從 pcap 依 `snmp.request_id`
+配對 request/response 才是裝置成本。
+
+### 工具
+
+- `tools/walkdiff.py <a.txt> <b.txt>` —— 分類 MISSING / SURPLUS / DIFFERS
+- `tools/capture_baseline.sh <label> <host> [community]` —— 分段 scoped walk。
+  **今天修過兩個 bug**（`b9dace4`）：stderr 不再混進 OID 檔（原本會把 OID 切成兩半，
+  害我追了一個不存在的缺陷）；擷取有效性改看內容不看 exit code
+- 基線在 `snmpwalk/`，**該目錄整個被 gitignore，只有 `RESULT-*.txt` 與兩份
+  Step 6 證據 capture 進版控**
+
+### 比對的前提（重要）
+
+**兩個 partition 的設定不同步**，walkdiff 的 aggregate 數字是弱證據。
+實測：plan-E2 有 2 個 IP interface、2 個 static VLAN；mainline 兩者都是 0。
+`missing=0` 之所以成立，一部分是因為 mainline 設定得比較少。
+個別事實（某個值、某欄筆數、SET 來回）才可靠。詳見 `dut-config-affecting-snmp.md`。
+
+### 已知不要追的
+
+- `8691.602` 在 `.1.3.6.1.4.1.8691.602.7.1.2.1.4.3.1.2.1` 之後 ISS badValue 中止
+- `8691.603` **兩個 partition 都**停在 `603.3.2.2.1.1.16.12`
+- `1.0.8802`（LLDP）曾出現 2.7MB 的異常 capture，未查
+- 設計文件 §2.5 的「26 個 mandatory objects」**從來沒真的數過**，引用前自己數
+
+---
+
+## 6. 環境（踩過的坑）
+
+| 事項 | 內容 |
+|---|---|
+| build 容器 | 一律 `mx_SNMP_PLAN_E`，tree 在 `/home/moxa/sdc1/home/moxa/SNMP_PLAN_E/buildroot` |
+| 只編程式碼 | `run_in_docker.sh "make <pkg>-rebuild"` —— **不要加 `; make`** |
+| 要燒機才加 | `run_in_docker.sh "make <pkg>-rebuild ; make"`，產出含 HSM 簽章的 `.swu` |
+| build 衝突判斷 | 看 `ls -l /proc/<pid>/cwd`，**不是**看有沒有 make 在跑。這台機器同時養多個專案容器，別的 tree 在 build 不算衝突 |
+| cross toolchain | **只在容器內**。主機上只能 host gcc `-fsyntax-only`，不能真的 cross-compile |
+| `git diff` | **一律加 `--no-ext-diff`**，否則會彈出 meld 打斷使用者。派 subagent 讀 diff 時要在 prompt 裡交代 |
+| DUT console | `dut-console` skill 進到的是 **Linux shell**，不是 Moxa CLI |
+| 產品 shell | `su` 之後執行 `moxash`（`/usr/bin/moxash` → `moxashell.exe` 的 symlink）。指令可縮寫，`sh ru` = `show running-config` |
+| **不要**做的事 | 把 `moxash` 丟進 `dut-console` wrapper。它需要真 TTY，會卡死 console。救援：expect 開 picocom 送 `\034`（Ctrl-\ = SIGQUIT），`\003` 與 `exit` 都無效 |
+| 預設 shell | 使用者要改成 `/bin/sh`（`plugin_moxa_user_account` 的 `admin_sh_develop` 分支）。1724 那顆 image 裡 `/etc/passwd` 還是 `root:/bin/zsh`，尚未生效 |
+
+---
+
+## 7. 模型
+
+使用者想用 **Fable 5** 起草 Phase 2 plan（依 CLAUDE.md §5，SDD 規劃屬
+「migration / refactor planning」）。**`/model` 切換失敗**，訊息是額度不足、
+需要先儲值。這份 handoff 完成時仍在 **Opus 5**。
+
+若新 session 已切到 Fable，注意 CLAUDE.md 的告誡：Fable 有 always-on thinking
+與較嚴的 cyber 安全分類器，SNMP／網路安全相關的 prompt 偶爾會被拒絕；
+遇到就改派 `opus`，不要改寫 prompt 繞過。
+
+---
+
+## 8. 新 session 建議的開場順序
+
+1. 讀本檔 → `phase2-briefing-2026-08-04.md` → 設計文件 §10.2
+2. **補寫 D17** 進設計文件 §11（§2a）
+3. **讀設計文件 §3.3**，釐清 §3 的矛盾。釐清前不要動筆寫 plan
+4. 確認使用者的 image update 結果，跑 §5 的三項驗收
+5. 起草 Phase 2 SDD plan，把 `REPLACE_TRUTH_VALUE` ×3 的驗證排在第一個 task
+
+未回覆的問題有一個：設定 snapshot 要不要做進流程（§2b）。

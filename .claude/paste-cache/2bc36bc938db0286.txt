@@ -1,0 +1,80 @@
+$ telnet localhost:6023
+Connected to localhost:6023
+
+Entering character mode
+Escape character is '^]'.
+
+iss# show snmp agentx statistics
+
+Tx Statistics
+  Transmitted Packets               :279     
+  Open PDU                          :2       
+  Index Allocate PDU                :0       
+  Index DeAllocate PDU              :0       
+  Register PDU                      :136     
+  Add Agent Capabilities PDU        :0       
+  Notify PDU                        :0       
+  Ping PDU                          :141     
+  Remove Agent Capabilities PDU     :0       
+  UnRegister PDU                    :0       
+  Close PDU                         :0       
+  Response PDU                      :0       
+
+Rx Statistics
+  Rx Packets                        :278     
+  Get PDU                           :0       
+  GetNext PDU                       :0       
+  GetBulk PDU                       :0       
+  TestSet PDU                       :0       
+  Commit PDU                        :0       
+  Cleanup PDU                       :0       
+  Undo PDU                          :0       
+  Dropped Packets                   :0       
+  Parse Drop Errors                 :0       
+  Open Fail Errors                  :0       
+  Close PDU                         :0       
+  Response PDU                      :278     
+iss# exit
+Connection closed by foreign host
+$ snmpget -v2c -c public 192.168.127.253 .1.4.1.1.0
+.1.4.1.1.0 = No Such Object available on this agent at this OID
+$ !telent
+zsh: event not found: telent
+$ !telnet
+telnet localhost:6023
+Connected to localhost:6023
+
+Entering character mode
+Escape character is '^]'.
+
+iss# show snmp agentx statistics
+
+Tx Statistics
+  Transmitted Packets               :294     
+  Open PDU                          :2       
+  Index Allocate PDU                :0       
+  Index DeAllocate PDU              :0       
+  Register PDU                      :136     
+  Add Agent Capabilities PDU        :0       
+  Notify PDU                        :0       
+  Ping PDU                          :156     
+  Remove Agent Capabilities PDU     :0       
+  UnRegister PDU                    :0       
+  Close PDU                         :0       
+  Response PDU                      :0       
+
+Rx Statistics
+  Rx Packets                        :293     
+  Get PDU                           :0       
+  GetNext PDU                       :0       
+  GetBulk PDU                       :0       
+  TestSet PDU                       :0       
+  Commit PDU                        :0       
+  Cleanup PDU                       :0       
+  Undo PDU                          :0       
+  Dropped Packets                   :0       
+  Parse Drop Errors                 :0       
+  Open Fail Errors                  :0       
+  Close PDU                         :0       
+  Response PDU                      :293     
+Connection closed by foreign host

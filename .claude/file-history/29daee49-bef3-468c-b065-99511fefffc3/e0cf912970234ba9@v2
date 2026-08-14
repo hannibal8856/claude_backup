@@ -1,0 +1,18 @@
+/*
+ * lib_moxa_ies_auto_mibs — internal interfaces shared between the data-
+ * processing modules in this library. Not installed; not part of the public
+ * lib_moxa_ies_auto_mibs.h contract.
+ */
+#ifndef IES_INTERNAL_H
+#define IES_INTERNAL_H
+
+struct LibFrameworkUri_Handle;
+
+/* The library's single loopback handle to the framework REST endpoint plus the
+ * admin token, both created on first use (config_set.c). Every module that has
+ * to PATCH config goes through this rather than opening its own connection.
+ * Returns 0 on success, -1 if the token file or the handle is unavailable.
+ */
+int ies_uri_handle(struct LibFrameworkUri_Handle **handle, const char **token);
+
+#endif /* IES_INTERNAL_H */

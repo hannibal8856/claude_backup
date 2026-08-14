@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Generate Plan C doc — minimal scope, already deployed/reverted."""
+
+from docx import Document
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+doc = Document()
+
+style = doc.styles['Normal']
+style.font.name = 'Microsoft JhengHei'
+style.font.size = Pt(10.5)
+rpr = style.element.get_or_add_rPr()
+rfonts = rpr.find(qn('w:rFonts'))
+if rfonts is None:
+    rfonts = OxmlElement('w:rFonts')
+    rpr.append(rfonts)
+rfonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
+
+
+def add_h1(text): return doc.add_heading(text, level=1)
+def add_h2(text): return doc.add_heading(text, level=2)
+def add_h3(text): return doc.add_heading(text, level=3)
+
+
+def add_para(text, bold=False, italic=False):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.font.name = 'Microsoft JhengHei'
+    run.bold = bold
+    run.italic = italic
+    return p
+
+
+def add_bullet(text, level=0):
+    p = doc.add_paragraph(style='List Bullet')
+    p.paragraph_format.left_indent = Cm(0.5 + level * 0.5)
+    run = p.add_run(text)
+    run.font.name = 'Microsoft JhengHei'
+    return p
+
+
+def add_code(text):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.font.name = 'Consolas'
+    run.font.size = Pt(9)
+    pPr = p._p.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), 'F2F2F2')
+    pPr.append(shd)
+    return p
+
+
+def add_table(headers, rows, widths_cm=None):
+    t = doc.add_table(rows=1 + len(rows), cols=len(headers))
+    t.style = 'Light Grid Accent 1'
+    t.alignment = WD_TABLE_ALIGNMENT.LEFT
+    hdr = t.rows[0].cells
+    for i, h in enumerate(headers):
+        hdr[i].text = ''
+        run = hdr[i].paragraphs[0].add_run(h)
+        run.font.name = 'Microsoft JhengHei'
+        run.bold = True
+        run.font.size = Pt(10)
+    for ri, row in enumerate(rows):
+        for ci, val in enumerate(row):
+            cell = t.rows[ri+1].cells[ci]
+            cell.text = ''
+            run = cell.paragraphs[0].add_run(str(val))
+            run.font.name = 'Microsoft JhengHei'
+            run.font.size = Pt(10)
+    if widths_cm:
+        for ri in range(len(rows)+1):
+            for ci, w in enumerate(widths_cm):
+                if w:
+                    t.rows[ri].cells[ci].width = Cm(w)
+    return t
+
+
+# ============================================================
+title = doc.add_heading('SNMP Plan C — 最小變動 AgentX RO 加速', level=0)
+sub = doc.add_paragraph()
+sub_run = sub.add_run('ies-auto-mibs + agentx_owned.list + ISS Aricent subagent(已驗證,2026-06-02 revert)')
+sub_run.italic = True
+sub_run.font.size = Pt(11)
+
+meta = doc.add_paragraph()
+meta_run = meta.add_run('日期:2026-06-02   |   平台:MDS-G4000-L3-4XGS   |   狀態:已 revert,知識保留')
+meta_run.italic = True
+meta_run.font.size = Pt(10)
+
+doc.add_paragraph()
+
+# ============================================================
+add_h1('1. TL;DR')
+add_para(
+    '最小變動把 RO ifTable 走 AgentX 給 ISS 處理,讓 NMS 大量 read OID 享 ~3 ms / OID。'
+    'RW 完全不動,仍走 ies-auto-mibs → nginx → actix-web → framework REST。'
+    '~2 週工程,~85 行 C code + 1 個 list 檔 + 4 行 snmpd.conf + ISS 端 2 個 cherry-pick。'
+)
+add_para(
+    '本方案於 2026-06-02 revert,改往更全面的 Plan D 重構方向。'
+    '本文件保留作為知識起點,供未來小型 PoC 或快速 NOS v7.0 移植時參考。',
+    italic=True
+)
+
+# ============================================================
+add_h1('2. 背景與目標')
+
+add_h2('2.1 為什麼選最小變動方案')
+add_bullet('客戶 SLA 壓力:北京十號線案例已 production-deployed NOS v5.x 達 50 ms SLA,v7.0 需有對應解')
+add_bullet('Vincent 2022 proxy PoC 試過,結論 Not Yet(walk 慢 2x、R/W 無法 forward)')
+add_bullet('Yutzu 2025 proxy 在 v5.x production-deployed 但 4 個 blocker 阻擋 v7.0 mainline')
+add_bullet('需要一個「v7.0 mainline-friendly + 最少風險」的中間方案')
+
+add_h2('2.2 目標')
+add_bullet('優先目標:ifTable RO walk / GET 延遲 ~7 ms → ~3 ms(讓北京 SLA 持平 v5.x)')
+add_bullet('不動 SET 路徑(維持 framework 為 source-of-truth)')
+add_bullet('不動 ies-auto-mibs entry array 內任何 entry(可隨時 rollback)')
+add_bullet('用 net-snmp 標準 AgentX 機制,不依賴 proxy 或自寫 lib')
+
+# ============================================================
+add_h1('3. 設計核心')
+
+add_para(
+    '單一原則:**在 ies-auto-mibs init 階段讀外部 list,'
+    '對 RO + URI prefix 符合的 entry 跳過本地 netsnmp_register_*,'
+    '讓 master snmpd 透過 longest-prefix-match 把 request 路由到 ISS AgentX subagent**。'
+)
+
+add_h2('3.1 為什麼需要 list 而不是純 snmpd.conf')
+add_para('因為 ies-auto-mibs 對每個 entry 註冊在 column-level (深度 ~11),'
+         '而 ISS subagent 註冊在 MIB-II tree (深度 ~6)。'
+         'longest-prefix-match 永遠是 ies-auto-mibs 贏。'
+         '純 snmpd.conf 改 master agentx 不會讓 RO 走 ISS,'
+         '必須在 ies-auto-mibs 端 skip register 讓出位置。')
+
+add_h2('3.2 為什麼用 list 而不是 entry flag')
+add_para(
+    '原始 flag-based 設計(在每個 entry struct 加 IES_FLAG_SNMP_AGENTX_OWNED)被否決,'
+    '因為「未來會讓 code 越來越肥」 — 加新 MIB 要動 C source。'
+    'list 駕馭模式:加新 MIB 改 list 檔,不動 C。'
+)
+
+# ============================================================
+add_h1('4. 4 個組件詳述')
+
+add_h2('4.1 組件 1:/etc/moxa/netsnmp/agentx_owned.list')
+add_para('配置檔(plugin_moxa_snmp 套件 install):')
+add_code('''# AgentX-owned URI prefixes.
+#
+# RO entries under these URI prefixes skip local netsnmp_register_*
+# in ies-auto-mibs and are served by the ISS subagent via AgentX
+#
+# RW entries always stay local — they keep going through the
+# URI/framework REST path so JSON persistence stays the source of truth.
+
+ifmibdb/''')
+add_para('預設只列 ifmibdb/,涵蓋所有 ifTable / ifXTable RO column。'
+         '未來加 MIB 改檔重啟 snmpd 即可,不重 build。')
+
+add_h2('4.2 組件 2:ies_auto_mibs.c::mox_snmp_init_entry 內的 reader + skip')
+add_para('位置:3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c,新增 ~85 行')
+add_code('''#define AGENTX_OWNED_LIST_FILE   "/etc/moxa/netsnmp/agentx_owned.list"
+#define AGENTX_OWNED_MAX         (32)
+#define AGENTX_OWNED_PREFIX_LEN  (64)
+
+static char gAgentXOwnedPrefix[AGENTX_OWNED_MAX][AGENTX_OWNED_PREFIX_LEN];
+static int  gAgentXOwnedCount  = 0;
+static int  gAgentXOwnedLoaded = 0;
+
+static void mox_snmp_load_agentx_owned_list(void) {
+    /* 啟動時讀一次,parse '#' 註解、trim whitespace、塞 array */
+    /* 找不到檔 → 靜默回 empty(legacy 行為,全部 register)*/
+}
+
+static int mox_snmp_entry_is_agentx_owned(struct ies_auto_mibs_entry *entry) {
+    /* 兩個 filter,缺一不可: */
+    if (entry->mode != HANDLER_CAN_RONLY)
+        return 0;                /* RW 永遠留本地 → SET 走 framework */
+
+    for (i = 0; i < gAgentXOwnedCount; i++) {
+        if (strncmp(entry->uri, gAgentXOwnedPrefix[i],
+                    strlen(gAgentXOwnedPrefix[i])) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* 插進 mox_snmp_init_entry 的 register loop */
+if (!gAgentXOwnedLoaded)
+    mox_snmp_load_agentx_owned_list();
+
+if (mox_snmp_entry_is_agentx_owned(entry)) {
+    LibUtil_DbgTrace(...);
+    free(entry); entry = NULL;
+    continue;       /* 不呼 netsnmp_register_*,讓 master 路由 */
+}''')
+
+add_h2('4.3 組件 3:config_moxa_snmp_control.c 的 snmpd.conf 生成器加 master agentx')
+add_para('位置:plugin_moxa_snmp/app/config_moxa_snmp_control.c::setup_snmpd_config')
+add_code('''/* 在 authtrapenable 1 之後加: */
+fprintf(fp, "master agentx\\n");
+fprintf(fp, "agentXSocket    %s\\n",  SNMP_AGENTX_MASTER_SOCKET);
+                                 /* "tcp:127.0.0.1:705" */
+fprintf(fp, "agentXTimeout   %d\\n",  SNMP_AGENTX_MASTER_TIMEOUT);
+                                 /* 5 sec */
+fprintf(fp, "agentXRetries   %d\\n",  SNMP_AGENTX_MASTER_RETRIES);
+                                 /* 1 */''')
+add_para('snmpd 啟動後 listen TCP:127.0.0.1:705 接受 subagent 連線。')
+
+add_h2('4.4 組件 4:plugin_moxa_snmp/Makefile install rule')
+add_code('''# AgentX-owned URI prefix list — consumed by ies-auto-mibs in
+# /bin/snmpd to decide which RO entries skip local registration
+# and route to the ISS subagent via AgentX.
+${SILENCE}mkdir -p ${DESTDIR}/etc/moxa/netsnmp
+${SILENCE}install -m 644 ${APP_SCRIPT_PATH}/agentx_owned.list \\
+    ${DESTDIR}/etc/moxa/netsnmp/agentx_owned.list''')
+
+# ============================================================
+add_h1('5. ISS 端前置:啟用 Aricent AgentX subagent code')
+
+add_para('ISS Aricent 內已有完整 AgentX subagent code(snmpv3/snx*.c)但需要 build flag 啟用。'
+         'cherry-pick 2 個 commit:')
+
+add_table(
+    ['Commit', '檔', '改動'],
+    [
+        ['749cc015', 'code/future/LR/pkg/make.ent',    '加 SNMP_LNXIP = YES'],
+        ['8ac27ddf', 'code/future/LR/myconfig.h',      '加 #define SNMP_LNXIP_WANTED'],
+    ],
+    widths_cm=[2.5, 6, 4.5]
+)
+
+add_para('這兩個 commit 讓 ISS build 含進完整 SNMP/AgentX subagent 路徑。Plan C 單獨上(沒這兩個 cherry-pick)等於白做 — master 雖然會 listen 705,但 ISS 端沒人會 connect。')
+
+# ============================================================
+add_h1('6. Runtime 資料流')
+
+add_h2('6.1 GET ifInOctets.1(RO,走 AgentX)')
+add_code('''NMS → snmpd master (port 161)
+   ↓ longest-prefix-match in registration tree
+   ↓
+   ifInOctets (.1.3.6.1.2.1.2.2.1.10) ──
+       ies-auto-mibs 沒 register (mox_snmp_init_entry skip 過)
+   ifTable subtree (.1.3.6.1.2.1.2.2) ──
+       ISS subagent register 過
+   ↓ master 選 ISS (longest-prefix match,no closer local handler)
+   ↓ AgentX GetNext-PDU 透過 TCP:705 送 ISS
+ISS subagent (snxmain.c)
+   ↓ SnmpMain thread 處理
+   ↓ gpMibReg[oid].GetHandler → ifInOctets internal getter
+   ↓ AgentX Response-PDU 回 master
+   ↓ snmpd 包成 SNMP Response 回 NMS
+
+→ 完全繞過 mox_snmp_handle_entry + URI hook + framework REST
+→ 延遲從 ~7 ms 降到 ~3 ms''')
+
+add_h2('6.2 SET ifAdminStatus.1(RW,不動)')
+add_code('''NMS → snmpd master
+   ↓ longest-prefix-match → 命中本地 ies-auto-mibs registration
+     (深度 11,本地 entry RW 沒被 skip)
+   ↓ 比 ISS 註冊的 prefix (深度 6) 深 → 本地贏
+   ↓ mox_snmp_handle_entry → mox_snmp_flask_handle_entry_set
+   ↓ UtilCfgPatchURIConfig → LibFrameworkUri_PatchUri
+   ↓ HTTP 80 → nginx → actix-web 9759 → framework
+   ↓ JSON 寫 /moxa/run/flask-moxa-config-layer/RunningConfig/
+   ↓ 回 SNMP Response
+
+→ 維持 framework SET source-of-truth
+→ SET 路徑完全沒被動到''')
+
+# ============================================================
+add_h1('7. 部署步驟')
+
+add_para('刷新 swu 後:')
+add_bullet('systemctl restart app_moxa_snmp_server  # 讓 snmpd 讀新 conf(含 master agentx 那 4 行)')
+add_bullet('ISS CLI: enable snmpsubagent master ip4 127.0.0.1 port 705  (或改 ISS 啟動 script 自動 enable)')
+add_para('驗證:')
+add_code('''show snmpsubagent                            # 應顯示 connected
+snmpwalk -v2c -c public localhost ifTable    # 應由 ISS 處理(快)
+snmpset -v2c -c private localhost \\
+    IF-MIB::ifAdminStatus.1 i 2              # 應走 framework path(慢但持久化)''')
+
+# ============================================================
+add_h1('8. 工程量與時程')
+
+add_table(
+    ['任務', '估工', '檔'],
+    [
+        ['mox_snmp_init_entry 加 reader + skip',       '3 天', 'ies-auto-mibs/ies_auto_mibs.c (+85 行)'],
+        ['agentx_owned.list 預設內容 + buildroot 整合', '2 天', 'plugin_moxa_snmp/app/script/agentx_owned.list (新)'],
+        ['snmpd.conf 生成器加 master agentx',           '1 天', 'plugin_moxa_snmp/app/config_moxa_snmp_control.c'],
+        ['Makefile install rule',                        '0.5 天', 'plugin_moxa_snmp/Makefile'],
+        ['ISS cherry-pick 2 commit',                     '0.5 天', 'app_moxa_iss_10_1_0/code/future/LR/'],
+        ['build + 整合測試',                              '3 天', '—'],
+        ['驗證 snmpwalk / snmpset 行為',                  '2 天', '—'],
+        ['',                                              '',    ''],
+        ['總工程量',                                       '~2 週','已驗證 build (commits 4f9ead5 + 4951001)'],
+    ],
+    widths_cm=[7, 2, 4]
+)
+
+# ============================================================
+add_h1('9. 限制與不解決的問題')
+
+add_table(
+    ['限制', '不解決的場景'],
+    [
+        ['只動 RO,SET 路徑不變', 'SET 延遲仍 50–500 ms(含 framework REST + sleep)'],
+        ['僅 ifmibdb/ 預設涵蓋', 'Moxa private MIB / OSPF / BGP 等仍走 ies-auto-mibs(慢)'],
+        ['不動 entry array 任何 entry', 'ies-auto-mibs 仍 register 約 800 RW + RO,memory 用量不變'],
+        ['沒抽 lib_moxa_snmp_ies_auto_mibs', 'framework / daemon 拿不到 mapping data;不能變 subagent'],
+        ['沒 lib_moxa_(rust_)snmp_agentx', 'framework / 其他 daemon 不能變 AgentX subagent'],
+        ['ISS SET 仍直接動 ISS internal state', 'framework JSON 跟 ISS 短暫 desync(現況既有問題,本案不解)'],
+    ],
+    widths_cm=[5, 7]
+)
+
+add_para('Plan C 不是 SNMP 全面優化方案,只解 ifTable RO walk / GET。'
+         '其他 SET 優化、private MIB 加速、daemon-owned status OID 加速、'
+         'mapping data 共用、framework 自家 subagent — 全在 **Plan D**(獨立文件)。')
+
+# ============================================================
+add_h1('10. 跟 Plan D 的關係')
+
+add_h2('10.1 二者目標不同')
+add_table(
+    ['面向', 'Plan C', 'Plan D'],
+    [
+        ['變動範圍',          '最小(~85 行 + 1 list)', '全面(2 新 lib + 3 subagent + ~500 RW swap)'],
+        ['工程量',            '~2 週',                    '~6 個月'],
+        ['ies-auto-mibs',     '維持',                     '抽 ~80% 進 lib'],
+        ['SET 路徑',          '不動',                     '統一走 framework REST(含 ISS hook)'],
+        ['framework subagent','無',                       '有(Rust FFI)'],
+        ['Daemon subagent',   '無',                       '有(每 daemon)'],
+        ['lib_moxa_(rust_)snmp_agentx','無',              '有'],
+        ['lib_moxa_snmp_ies_auto_mibs','無',              '有(3 層)'],
+        ['priority shadowing','無(用 list skip)',        '有(subagent priority=50)'],
+        ['GET 改善',          'ifTable RO ~7 ms → ~3 ms','全 OID 5–25 ms → < 1 ms'],
+        ['SET 改善',          '無',                       '50–500 ms → ~5 ms (ISS) / < 1 ms (framework)'],
+    ],
+    widths_cm=[4, 4, 5]
+)
+
+add_h2('10.2 Plan C → Plan D 路徑')
+add_bullet('Plan C 可作為 Plan D 的 **stepping stone**:先小步驗證 AgentX 整合可行,再啟動 Plan D')
+add_bullet('Plan D 完成後 Plan C 機制(agentx_owned.list + list reader)會被 priority shadowing 自然取代')
+add_bullet('Plan C 已 revert,目前 code base 無相關 patch;Plan D 從 ies-auto-mibs 原始狀態起步')
+
+# ============================================================
+add_h1('11. 已 revert 原因 + 知識保留')
+
+add_h2('11.1 為什麼 revert')
+add_bullet('原因 1:agentx_owned.list 雖然 config-driven,但**仍是「需要維護的額外 artifact」**;Plan D 用 REGISTER_MIB priority shadow 取代,連 list 都不用')
+add_bullet('原因 2:Plan C 涵蓋面只有 RO ifTable;客戶 SLA 場景外的其他 OID 改善有限')
+add_bullet('原因 3:SET 路徑不動意味著「framework REST + hardcoded sleep」延遲沒解,Vincent 2026 PDF Tier 1/2 仍要再做')
+add_bullet('原因 4:Plan D 雖工程量大,但長期維護成本顯著低於 Plan C + Vincent Tier 系列疊加')
+
+add_h2('11.2 保留的價值')
+add_bullet('證實 net-snmp master 接 AgentX subagent 的 buildroot 整合可行')
+add_bullet('證實 ISS Aricent subagent code 可透過 SNMP_LNXIP_WANTED build flag 啟用,跟 net-snmp master 對接成功')
+add_bullet('agentx_owned.list 配置模式可作 Plan D 階段 1 PoC 的對照組(雖然 Plan D 不採用)')
+add_bullet('2 個 ISS cherry-pick(SNMP_LNXIP_WANTED)在 Plan D 仍會用到(ISS 端 AgentX 啟用需要)')
+
+# ============================================================
+add_h1('12. 參考資料')
+
+add_h2('12.1 Plan C 試作 commits(已 revert)')
+add_bullet('3rdparty_net_snmp branch snmp-trace-time_diff commit 4f9ead5「[SNMP] Route configured RO entries to ISS via AgentX」')
+add_bullet('plugin_moxa_snmp branch snmp-trace-time_diff commit 4951001「[SNMP] Enable AgentX master and ship agentx_owned.list」')
+
+add_h2('12.2 ISS 端 cherry-pick(Plan D 仍會用到)')
+add_bullet('app_moxa_iss_10_1_0 commit 749cc015「Enable SNMP_LNXIP -> SNMP_LNXIP_WANTED」')
+add_bullet('app_moxa_iss_10_1_0 commit 8ac27ddf「backup myconfig.h」(實際內容是 #define SNMP_LNXIP_WANTED)')
+
+add_h2('12.3 Jira / 工單')
+add_bullet('RDMDS42-32 — 北京十號線 SNMP 加速(本案動機)')
+add_bullet('RDMDS43-17 — 2025 SNMP Enhancement 主案')
+add_bullet('RDNOS-3253 — ISS 啟動時直接 init SNMP agent on port 6161')
+
+add_h2('12.4 跨方案 reference')
+add_bullet('Plan D 完整提案:SNMP_Plan_D_Design_Proposal_2026-06-02.docx(獨立文件)')
+add_bullet('AgentX 機制深度分析:~/agentx_vs_proxy_truth.md')
+add_bullet('北京 10 號線案例:~/beijing_proxy_case_study.md')
+add_bullet('fiber_check 短期優化:~/fiber_check_optimization.md')
+
+# ============================================================
+add_h1('13. Changelog')
+add_bullet('2026-06-02 v1:從原「Plan C v2」docx 拆出,純 Plan C(小變動)範圍,已 revert 知識保留版')
+
+# Save
+out_path = '/home/moxa/SNMP_Plan_C_Design_2026-06-02.docx'
+doc.save(out_path)
+print(f"Saved: {out_path}")

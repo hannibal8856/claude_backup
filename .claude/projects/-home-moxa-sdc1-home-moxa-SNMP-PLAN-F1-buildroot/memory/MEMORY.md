@@ -1,0 +1,2 @@
+- [rtk fabricates ls output](rtk-fabricates-ls-output.md) — hook-rewritten `ls`/`grep` invented directory names that don't exist; verify with `rtk proxy` or `test -d`.
+- [F1 branch isolation](f1-branch-isolation.md) — all changes in this tree go on `snmp-plan-F1`; never commit onto `snmp-plan-E`.

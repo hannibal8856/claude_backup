@@ -1,0 +1,36 @@
+---
+name: project-build-tree-and-container
+description: "Plan E 有兩棵樹兩條分支;建置要用 mx_mds4xgl3 容器 + ~/mds4xgl3,make target 不帶 -custom,最後卡 HSM 簽章由使用者跑"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 13f6131f-3289-46a0-9662-a2a36f544e35
+  modified: 2026-08-06T12:27:02.337Z
+---
+
+**兩棵樹、兩條分支,別搞混:**
+
+| 路徑 | branch | 狀態 |
+|---|---|---|
+| `~/mds4xgl3` | `snmp-plan-E` | **現行方向**,所有 ADR-0011/0012/0013 的工作都在這 |
+| `~/SNMP_PLAN_E2`(2026-08-06 由 `~/SNMP_PLAN_E` 改名) | `snmp-plan-E2` | 已擱置 |
+
+`snmp-plan-E2` 用 namelen 做 AgentX dispatching、依「D1」刪掉 `agentx_owned.list`
+(commit `8ceffee`),使用者判定 latency 不佳、走過同樣的坑,暫時不玩。
+
+**建置容器**:`docker start mx_mds4xgl3`(掛 `~/mds4xgl3`,workdir = repo 根)。
+`mx_SNMP_PLAN_E` 已停止且**無法再用**(bind mount 來源路徑已改名)。
+
+**make target 不帶 `-custom`** —— `output/build/xxx-custom` 的 `-custom` 是 buildroot 的
+版本後綴,不是套件名。正確:`make lib_moxa_ies_auto_mibs-rebuild`。
+順序(memory `feedback_build_order`):C lib → rust FFI → `plugin_moxa_snmp` →
+`rust_moxa_build` → `app_moxa_framework` → `make`。
+也可用 repo 根的 `run_in_docker.sh "make"`。
+
+**最後的 `make` 會停在 HSM 韌體簽章**(`hsm_tool/prepare_kernel_rootfs_to_sign.sh`,
+預設 `HSM_SIGN_METHOD=ci` → 觸發 GitLab CI pipeline,官方金鑰 `SWITCH_Official_General`)。
+**這步由使用者執行,我不自行觸發** —— 超出 DUT 操作授權範圍。簽完 `make` 會續跑產出 `.swu`。
+
+⚠️ 建置會**清空 `output/images/`**,舊 `.swu` 沒有備份(BKP/ 只有 EtherNet/IP zip)。
+
+相關:[[feedback-build-order]]、[[project-dut-dual-image-ab-pair]]

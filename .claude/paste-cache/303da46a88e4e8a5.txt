@@ -1,0 +1,65 @@
+Welcome to MOXA
+moxa login: admin
+ 
+Password: 
+$ su
+Password: 
+$ 
+$ 
+$ 
+$ 
+$ cat -n /etc/moxa/version/BUILD_TIME 
+     1  2026_0727_1526
+$ netstat -antul | grep ":161"
+udp        0      0 0.0.0.0:161             0.0.0.0:*                           
+udp        0      0 :::161                  :::*                                
+$ ss -antp | grep ":705"
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1291,fd=46))                                                  
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:47828 users:(("snmpd",pid=1291,fd=47))                                                  
+ESTAB      0      0          127.0.0.1:47828    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=28))                                                 
+ESTAB      0      0          127.0.0.1:47838    127.0.0.1:705   users:(("app_moxa_framew",pid=1202,fd=62))                                        
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:47838 users:(("snmpd",pid=1291,fd=48))    
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:39 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+iso.3.6.1.4.1.8691.602.7.2.1.3 = No Such Object available on this agent at this OID
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:56 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1
+iso.3.6.1.4.1.8691.602.7.2.1.1.0 = INTEGER: 3
+iso.3.6.1.4.1.8691.602.7.2.1.2.0 = INTEGER: 10
+
+
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:56 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.2.1 = STRING: "192.168.127.209"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.3.1 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.4.1 = STRING: "public"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 = INTEGER: 1
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:56 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.2.1 = STRING: "192.168.127.209"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.3.1 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.4.1 = STRING: "public"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 = INTEGER: 1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:57 $ /usr/bin/snmpset -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 i 4
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 = INTEGER: 4
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:58 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.2.1 = STRING: "192.168.127.209"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.3.1 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.4.1 = STRING: "public"
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 = INTEGER: 1
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:59 $ /usr/bin/snmpset -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 i 6
+iso.3.6.1.4.1.8691.602.7.2.1.3.1.5.1 = INTEGER: 6
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 15:59 $ /usr/bin/snmpwalk  -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.3
+iso.3.6.1.4.1.8691.602.7.2.1.3 = No Such Object available on this agent at this OID
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:00 $ /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.1.0
+iso.3.6.1.4.1.8691.602.7.2.1.1.0 = INTEGER: 3
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:00 $ /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.2.1.2.0
+iso.3.6.1.4.1.8691.602.7.2.1.2.0 = INTEGER: 10
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 16:01 $ 
+

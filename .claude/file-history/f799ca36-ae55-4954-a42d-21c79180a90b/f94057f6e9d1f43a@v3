@@ -1,0 +1,502 @@
+# SNMP Enhancement Session — 2026-06-02
+
+> 整理本 session(2026-05 至 2026-06)針對 MDS-G4000-L3-4XGS 平台 SNMP 處理延遲與架構演進的所有腦力激盪。
+>
+> 結論方向是 AgentX multi-subagent + shared mapping library 架構,逐步取代 ies-auto-mibs / dlmod 主導的現況。
+>
+> **狀態(2026-06-02 後)**:先前驗證過的 Plan C(`agentx_owned.list` 機制 + snmpd.conf master agentx)已 **revert**,進入重新 brainstorm 階段。本文件保留所有架構分析與決策論證作為下一輪規劃的起點。
+
+---
+
+## TL;DR
+
+**現況 SNMP request 經 ies-auto-mibs/dlmod/ISS 三條路徑、平均 GET 5–25 ms、SET 50–500 ms;改用 AgentX 把 ISS / framework / 各 daemon 變 subagent,搭配抽出 mapping library,可達 GET <1 ms、SET <500 µs,工程量 ~5 個月。**
+
+---
+
+## 背景與目標
+
+### Suffers from
+
+- **三套以上 SNMP handling 路徑並存**:ies-auto-mibs (主)、dlmod (plugin .so)、ISS 內建 SNMP daemon、net-snmp 內建 mibII。資料源/dispatch 邏輯散落、難維護
+- **SNMP response latency 高**:cold cache GET 5–150 ms (fork+exec generate_uri_snmp_table);SET 4.2 秒 worst case (hardcoded sleep)
+- **SET 路徑 100% 走 URI**:不管哪條 GET 路徑,SET 最終都會 `LibFrameworkUri_Post/Patch/Delete` 進 framework REST,沒例外但延遲集中
+- **dlmod 繞路**:plugin .so 在 snmpd 內,但仍透過 HTTP loopback 走 nginx → actix-web → framework,跨 process 邊界
+- **跨產品 / 跨客戶優化方案各自獨立**:北京 10 號線、Vincent 2022 / 2026、Plan C 試作各做各的,缺整合
+
+→ 詳見「SNMP handling path」章節的拆解。
+
+### Objective
+
+- **<50 ms / GET**(交控 SLA,北京 10 號線案例)
+- **Unified SNMP request handling for GET/SET**:單一架構覆蓋所有 OID,避免「config 走 framework / status 走 ISS / private 走 dlmod」分裂
+- **可漸進遷移**:不能 big-bang,要 daemon-by-daemon 上線、可 rollback
+- **長期維護成本可控**:增加新 MIB 不能改 3 處(SMI / ies-auto-mibs / framework schema)
+
+---
+
+## 參考資料 / 來源
+
+### Jira / 工單
+
+- **RDMDS42-32** — 北京十號線 SNMP 加速(MDS-G4000-4XGS-L3,NOS v5.x)
+- **RDMDS43-17** — 2025 SNMP Enhancement 主案
+- **RDNOS-3253** — ISS 啟動時直接 init SNMP agent on port 6161
+
+### 既有文件 / 簡報
+
+- **2022 Vincent PoC**:`~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx` + branch `289-read-oid-enhancement@3rdparty_net_snmp`
+- **2025 北京十號線 (Yutzu)**:`~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx` (28 slides)
+- **2026 Vincent 重構計畫**:`~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung (董建隆) - Moxa Confluence.pdf` (22 pages)
+- **本案 reference 簡報**:`~/WORK/SNMP_50ms/SNMP Enhancement 2026.pdf`
+
+### 標準 / 上游
+
+- **RFC 2741**(AgentX 協定)
+- **net-snmp 5.9.3 source**:`/home/moxa/mds4xg/buildroot/output/build/3rdparty_net_snmp-custom/net-snmp-5.9.3/`,特別是 `agent/mibgroup/agentx/{master,subagent,protocol,client}.c`
+- **FRR `lib/agentx.c`**:`~/SRC/frr/lib/agentx.c`(392 行,GPLv2-or-later,作為 lib_moxa_agentx 設計參考)
+- **Aricent ISS SNMP**:`app_moxa_iss_10_1_0/code/future/snmpv3/snx*.c`(已 production 10+ 年)
+
+### Session 期間產出的衍生文件
+
+| 檔 | 內容 |
+|---|---|
+| `~/agentx_vs_proxy_truth.md` | AgentX vs proxy 機制深度分析(net-snmp source 對照,含 GETBULK 行為修正)|
+| `~/beijing_proxy_case_study.md` | 北京 10 號線 proxy 案例 production-deployed deep dive |
+| `~/agentx_multi.md` | Multi-subagent + shared mapping lib 完整規劃(主路線)|
+| `~/fiber_check_optimization.md` | fiber_check link status 取法優化(短/中/長三方案)|
+
+### Plan C 試作(已 revert)
+
+- 曾在 `3rdparty_net_snmp` branch `snmp-trace-time_diff` commit `4f9ead5` 跟 `plugin_moxa_snmp` 同 branch commit `4951001` 驗證 build 過
+- 機制:`agentx_owned.list` + `mox_snmp_init_entry` 跳過 register + snmpd.conf 加 `master agentx` + `agentXSocket tcp:127.0.0.1:705`
+- 2026-06-02 後 **revert**,進入重新 brainstorm
+- 保留的價值:**證實 net-snmp master 接 AgentX subagent 的路徑跟 buildroot 整合可行**,作為未來新方案的起點參考
+
+---
+
+## 討論脈絡
+
+### Issue:現況 SNMP handling path
+
+**GET 路徑分三類**(由 mox_snmp_handle_entry 內部 dispatch):
+
+| # | 觸發條件 | 路徑 | 延遲量級 |
+|---|---|---|---|
+| 1 | entry 有 in-process callback | ChkEntryGetValue / ExeEntryGetValue (LA/VLAN/QoS) | < 0.1 ms |
+| 2 | `iss_build = 1` | dlopen libies_uri_handle_hook.so → AF_UNIX → ISS → 寫 tmpfs file | ~7 ms |
+| 3 | `iss_build = 0` | LibFrameworkUri_GetUri → HTTP loopback → framework | ~5–15 ms |
+
+**SET 路徑** — 所有分支最終都會走 URI:
+
+| 內部分支 | 觸發 flag | 終點 |
+|---|---|---|
+| 標準 scalar/table 寫 | (default)| `UtilCfgPostURIConfig` / Patch / Del → framework |
+| 客製 callback | RegEntrySetValue | 同上 |
+| READ_CREATE row status | flag | 同上 |
+| URI_COMMAND | flag | `UtilCfgTriggerURICommand` → `/command/<uri>` |
+| SYSTEM_COMMAND | flag | 經驗證**也**呼 `UtilCfgTriggerURICommand` |
+
+→ **100% 走 nginx 80 → actix-web 9759 → framework**,沒例外。所以 SET 改架構必須保留 framework 為 source-of-truth。
+
+**dlmod 路徑**:`/etc/moxa/netsnmp/config/*.conf` 載入 ~19 個 plugin .so,每個 plugin 內透過 `lib_moxa_framework_uri` 走 HTTP 到 framework — 走的是相同 nginx loopback 路徑,只是入口從 ies-auto-mibs 換成 dlmod handler。
+
+**Trap 路徑**(獨立):
+- Moxa 應用層 events → MQTT → trap_notification → `/bin/snmptrap`
+- ISS 協定棧 events → ISS 內建 snmptrap.c → 直接 UDP
+- snmpd 本身**不主動發 trap**(disman/event 沒啟用)
+
+### Candidate solution 1:net-snmp proxy
+
+**Vincent 2022 PoC**:
+- 篩 800 個 `iss_build=1 && RONLY` entry,刪掉 ies-auto-mibs 註冊,snmpd.conf 手寫 `proxy` directive 給 ISS port 6161
+- Branch `289-read-oid-enhancement`,唯一 commit `cade061`,純刪除 9600 行,沒新增 code
+- **walk 1.3.6.1.2 慢 2x**(14.9 ms vs 7.3 ms),`snmpwalk 1.3.6.1.4` 慢 ~20%
+- 3 個 blocker:walk 有 gap、R/W 無法 proxy、SNMP-PROXY-MIB 不存在
+- **Decision: Not Yet**
+
+**2025 Yutzu 實作(北京 10 號線)**:
+- 同樣的 proxy 方案,但**只 GET 單一 column.port_idx OID(不 walk)**,且 ISS 啟用 SNMP agent on 6161
+- **改善 100–200x**:case 1 從 600 ms 降到 3 ms,case 2 從 1200 ms 降到 4 ms
+- 72 小時長測(715,445 GET):**99.9% < 50 ms**,99.997% < 100 ms
+- **production-deployed on NOS v5.x**;但 4 個限制(無動態 OID、要帶 index、繞過 framework、無 R/W)阻擋 NOS v7.0 mainline 採用
+
+**啟示**:Vincent 2022 跟 Yutzu 2025 用同方案結果天差地遠,因為 **workload pattern 不同**(walk vs 單 OID GET)。proxy 適合「固定 OID 集合的高頻 GET」,不適合 walk 或 R/W。
+
+### Candidate solution 2:AgentX(本次推薦)
+
+**架構**:net-snmp 當 master,ISS / framework / 各 daemon 當 subagent。OID 依 owner 切割,master 用 longest-prefix-match dispatch。
+
+**Plan C 試作(已 revert,留作參考)**:
+- `ies-auto-mibs/agentx_owned.list` 機制:RO entry 透過 list 配置跳過本地 register,讓 ISS AgentX subagent 接手
+- snmpd.conf 加 `master agentx` + `agentXSocket tcp:127.0.0.1:705`
+- 曾驗證 build 過(commit `4f9ead5` / `4951001`),2026-06-02 revert
+- **狀態**:目前 code base 上沒有此機制,進入重新 brainstorm 階段
+
+**vs proxy 的關鍵差異**(以 net-snmp 5.9.3 source 為據):
+
+| 維度 | proxy | AgentX master |
+|---|---|---|
+| 走 GETBULK forwarding | ❌ 退化成 per-OID GETNEXT(master.c:475 `/* WWWXXX */`)| ❌ 同樣退化(但 fact 兩邊 round-trip 數一樣)|
+| Transport | SNMP/UDP loopback ~100 µs/RTT | AF_UNIX/TCP ~10–50 µs/RTT |
+| R/W 4-phase SET | proxy 對 SET 不完整 | ✅ 完整(TestSet/Commit/Undo/Cleanup)|
+| Walk gap | ❌ proxy 不知 backend OID 集合 | ✅ subagent register 整段 prefix |
+
+→ AgentX 比 proxy 在「walk + R/W + 跨 OID 邊界」場景都優,延遲差異主要來自 transport 層 ~2–3x。
+
+### Candidate solution 3:ISS 當 SNMP handler + framework Rust handler(hybrid)
+
+**評估後排除**。理由:
+- ISS 已存在 Aricent SNMP stack,加 net-snmp AgentX 兩套並存衝突大
+- ISS 不擅長扮演「集中式 SNMP 樞紐」(gpMibReg 機制不易擴充)
+- ISS 變胖 → SPOF
+- 跟既有 plugin_moxa_snmp 對接困難
+
+### Candidate solution 4:Vincent 2026 其他 enhancements
+
+Vincent 2026 PDF 提出三層:
+- **Tier 1**(quick win):編譯 flag `-O0 → -O3 -flto`,Rust `opt-level=s → 3`
+- **Tier 2**:退掉 4.2 秒 sleep(改 retry-poll),pipe IPC 取代 file IPC
+- **Tier 3**:in-process background cache(`snmp_alarm_register` 定時 refresh,GET 讀記憶體)
+
+→ **跟 AgentX 不互斥**:Tier 1/2 可立即吃,Tier 3 精神跟 AgentX subagent (每個 daemon 自己 own data) 一致。
+
+### 衍生發現:fiber_check 案例
+
+trace `status.rs` 發現 `get_snmp_data_by_cli` 跑整個 28-row ifTable 只為了取 link up/down 來決定 RxPower 顯示。但 fiber_check daemon 內 `gIsPortLinkUp[]` 早就有 — 變成 daemon 自己 own status OID 後可 ~300x 改善 SNMP path。
+
+→ 詳見 `~/fiber_check_optimization.md`,作為「daemon 應 own status OID」的範本案例。
+
+---
+
+## Considerations
+
+### proxy vs. AgentX vs. ISS-as-master 三方對照
+
++----------------------+--------------------+--------------------------------------------+----------------------+
+| 維度                 | net-snmp proxy     | AgentX                                     | ISS as SNMP master   |
++----------------------+--------------------+--------------------------------------------+----------------------+
+| 業界主流             | ✅ 標準 directive  | ✅ RFC 2741                                | ❌ Aricent 私有      |
+| 跟 ies-auto-mibs 並存| 🔴 walk 有 gap     | ✅ longest-prefix-match 統一               | n/a                  |
+| R/W 支援             | 🔴 4-phase 不完整  | ✅ 完整                                    | ✅                   |
+| 多 subagent 共存     | n/a                | ✅（設計如此）                             | 🔴 master 模式       |
+|                      |                    |                                            | build 沒編           |
+| Transport overhead   | UDP loopback       | UNIX/TCP ~30 µs                            | n/a                  |
+|                      | ~100 µs            |                                            |                      |
+| 漸進 migration       | 🟡 per-OID 列舉    | ✅ per-prefix list                         | 🔴 big-bang          |
+|                      |                    | （Plan C 試作驗證的機制）                  |                      |
+| 維護耦合度           | 🔴 OID 列表分散    | 🟡 mapping lib 集中                        | 🔴 鎖死 ISS          |
+| 跟既有 plugin 整合   | 🔴 要拔 dlmod      | ✅（`agentx_owned.list` 控制）             | 🔴 plugin_moxa_snmp  |
+|                      |                    |                                            | 全廢                 |
+| 長期可擴充           | 🔴 對新 daemon     | ✅ 加 daemon 變 subagent                   | 🔴 加 daemon         |
+|                      | 不友善             |                                            | 要動 ISS             |
++----------------------+--------------------+--------------------------------------------+----------------------+
+
+**結論:選 AgentX**。
+
+### 為什麼不走純 ISS as master
+
+- ISS build 沒編 AgentX master code(`snx*.c` 都是 subagent 端)
+- 即使解鎖,Aricent stack 不適合扮中央樞紐
+- 失去 net-snmp 標準語意、社群支援、dlmod 機制
+- 跟前次 Plan C 試作的方向衝突
+
+---
+
+## 結論與決策
+
+### 決策 1:採 AgentX multi-subagent 架構為長期路線
+
+**理由**:三方案對照下 AgentX 在 walk / R/W / 漸進遷移 / 維護成本都贏;前次 Plan C 試作已驗證 buildroot 整合可行(雖已 revert);FRR 多 daemon AgentX 模式有 10+ 年 production 經驗。
+
+### 決策 2:net-snmp 當 master,不換掉
+
+**理由**:net-snmp 是 RFC 2741 reference,標準 / 文件 / 社群最完整;dlmod / proxy / agentx 三套 dispatch 機制都成熟。
+
+### 決策 3:ISS 沿用自家 Aricent AgentX,**不重寫**
+
+**理由**:ISS 涵蓋 ~60% std MIB (IF-MIB / OSPF / BGP / VRRP 等),已 production 10+ 年;重寫等於 20–40 週工程 + protocol regression;從 master 角度兩條 AgentX subagent 路徑 RFC 對等。
+
+### 決策 4:framework 寫 Rust AgentX subagent;其他 C daemon 用 `lib_moxa_agentx`
+
+**理由**:framework 是 Rust(actix-web),需 FFI 或 Rust crate;C daemon 多隻,需共用 wrapper 避免每個 daemon 都自寫 boilerplate。`lib_moxa_agentx` 仿 FRR `lib/agentx.c`(392 行)做 clean-room 重寫,底下走 net-snmp(權威性不變)。
+
+### 決策 5:ies-auto-mibs 抽 mapping data 成 `lib_moxa_snmp_ies_auto_mibs` library(hybrid 模式)
+
+**理由**:現有 ies-auto-mibs 內 800+ entry 是 OID ↔ URI ↔ flag ↔ owner 的 single-source-of-truth,搬成 library 後可被 ISS / framework / daemon / trap_notification 多方共用;handler code 仍寫在各 daemon 內(編譯期 type-safe);加新 MIB 動 mapping data + handler 兩處而已。
+
+### 決策 6:GET / SET 路徑分工
+
+- **GET**:命中 daemon 內 in-process function call(直接讀記憶體 / SHM,~50 µs)
+- **SET**:subagent handler 內查 `lib_moxa_snmp_ies_auto_mibs` 拿對應 URI,呼 `LibFrameworkUri_Post/Patch/Delete` 走 framework REST 持久化(保留 source-of-truth)
+- → framework 仍是 SET 唯一持久化點,跟現況哲學一致
+
+### 決策 7:每個 subagent 都要註冊自己的 OID handler + thread
+
+- `lib_moxa_agentx::MoxaAgentX_Init("daemon_name")`
+- `lib_moxa_agentx::MoxaAgentX_RegisterScalar/Table(...)` 對每個 OID
+- 內部跑獨立 thread 處理 AgentX session(不阻塞 daemon 主迴圈)
+- 用 `MoxaAgentX_GetFds`/`ProcessFds` 整合到 daemon 自家 select() / event loop(FRR pattern)
+
+### 決策 8:沿用 Plan C 試作驗證的 `agentx_owned.list` 機制概念作為漸進遷移 fence
+
+**狀態**:Plan C code 已 revert,但機制設計仍是下一輪重新規劃的最佳起點。
+
+每個 daemon 上線時必須**同步**做三件事:
+1. daemon 內 subagent 起來 register OID prefix
+2. snmpd.conf / `*.conf` 不再 dlmod 載入該 plugin
+3. `agentx_owned.list` 加該 prefix(若 ies-auto-mibs 也有)
+
+缺一就 dispatch 不對(已在 `~/agentx_multi.md` §7 詳述)。重新規劃時建議考慮的調整方向:
+- list 是否要支援 RW(目前 Plan C 僅 RO)
+- list 格式是否要承載更多 metadata(owner、priority 等)
+- 是否一開始就跟 mapping lib 整合,避免重複維護
+
+---
+
+## 後續待辦 / 開放問題
+
+### 立即可動(<1 週)
+
+- **fiber_check 方案 A**:daemon 寫 `linkStatus.X` 進 .stat INI,status.rs 移除 `get_snmp_data_by_cli` ifTable call。半天工,~500x 改善 REST 路徑。詳見 `~/fiber_check_optimization.md`
+- **Vincent 2026 Tier 1**:rebuild 加 `-O3 -flto`,Rust `opt-level=3`。預期 20–40% throughput
+
+### PoC 階段(6 週)
+
+照 `~/agentx_multi.md` §8 路線圖:
+- W1: mapping lib API + data(hybrid 模式)
+- W2: net-snmp 加 `agentx/subagent` 編譯選項 + `lib_moxa_agentx` 骨架
+- W3–4: fiber_check 改 subagent
+- W5: snmpd 端整合(dispatch 規則 §7 cross-ref)
+- W6: benchmark + go/no-go 決策點
+
+### 中長期(剩 4 個月)
+
+- 階段 3:framework subagent (Rust FFI to lib_moxa_agentx 或自寫 Rust agentx crate)
+- 階段 4:ISS subagent 整合(沿用 Aricent,只調整 startup + register 範圍)
+- 階段 5:其他 4–8 個 daemon(lldp / dhcp_snp / ptp / time_setting 等,各 3–4 週)
+- 階段 6:snmpd ies-auto-mibs cleanup
+
+### 開放問題
+
+1. **Rust AgentX 取捨**:用既有 crate(如 `agentx-tokio`,生態未驗證)或自寫 FFI 到 `lib_moxa_agentx`?PoC 階段 3 前要決定
+2. **Trap 路徑統一**:現況 ISS 內建 trap (15 處 `SNMP_AGT_RIF_Notify_Trap`)跟 MQTT pipeline 共存。長期是否要把 ISS 那邊也改成走 MQTT?評估改寫 cfa link / OSPF / BGP / RIP / ISIS trap 的成本
+3. **SCHED policy**:Vincent 2026 PDF 提的 SCHED_OTHERS → SCHED_RR for ISS SNMP。跟 AgentX 正交,要不要納入 PoC 對照組?
+4. **mapping lib schema 版本管理**:多 consumer 升級不同步時的相容性策略
+5. **AgentX subagent 啟動順序**:systemd ordering 確保 master 先起來,但 subagent 連不上時 fallback 行為要設計
+6. **License**:FRR `lib/agentx.c` 是 GPLv2-or-later。`lib_moxa_agentx` 要 clean-room 重寫,不能直接搬
+7. **Plan C 重新規劃方向**(2026-06-02 後新增):前次 Plan C 已 revert,重新 brainstorm 時要決定:
+   - 是否仍以「`agentx_owned.list` + 跳過 register」為基底,還是另起爐灶
+   - 是否在第一版就整合 mapping lib(避免重複維護)
+   - 是否擴大 list 涵蓋範圍(RW、command、private MIB)
+   - 命名 / 檔案位置 / Buildroot 套件邊界要重新對齊新方案
+
+---
+
+## 附錄
+
+### A. 5 條 SNMP dispatch path 對照(現況)
+
++---+-----------------------------------------+--------------------------------+---------------+
+| # | 路徑                                    | 何時觸發                       | 延遲          |
++---+-----------------------------------------+--------------------------------+---------------+
+| 1 | mox_snmp_handle_entry internal callback | LA/VLAN/QoS 特殊 handler       | <0.1 ms       |
+| 2 | mox_snmp_handle_entry → URI hook       | iss_build=1 (ifTable etc.)     | ~7 ms         |
+| 3 | mox_snmp_handle_entry → framework REST | iss_build=0                    | ~5–15 ms      |
+| 4 | dlmod plugin → framework REST          | 19 個 plugin OID               | ~5–15 ms      |
+| 5 | net-snmp 內建 mibII                     | system tree、SNMP self-stats   | ~0.01–0.1 ms  |
++---+-----------------------------------------+--------------------------------+---------------+
+
+### B. SET 4-phase + path 對照
+
+```c
+mox_snmp_flask_handle_entry_set 內:
+  flag URI_COMMAND      → UtilCfgTriggerURICommand → framework /command/<uri>
+  flag SYSTEM_COMMAND   → 同上(經驗證)
+  flag READ_CREATE      → row status → framework Post/Patch/Del
+  default               → UtilCfgPostURIConfig / PatchURIConfig / DelURIConfig
+                          → LibFrameworkUri_* → nginx 80 → actix-web 9759
+                          → JSON 寫 /moxa/run/flask-moxa-config-layer/RunningConfig/
+```
+
+### C. 北京 10 號線 proxy 配置(production)
+
+```
+# /moxa/run/snmp/snmpd.conf
+proxy -v 1 -c public 127.0.0.1:6161 .1.3.6.1.2.1.2.2
+proxy -v 1 -c public 127.0.0.1:6161 .1.3.6.1.2.1.31.1.1
+
+# ISS CLI
+enable snmpagent        # listen on port 6161 (per RDNOS-3253)
+```
+
+72 小時結果:avg 7 ms / max 125 ms / >50ms 0.1% / >100ms 0.003%
+
+### D. Plan C 試作的 agentx_owned.list 機制(已 revert,留作下一輪規劃參考)
+
+```c
+/* 3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c::mox_snmp_init_entry */
+if (mox_snmp_entry_is_agentx_owned(entry)) {
+    /* skip netsnmp_register_*,讓 master 路由到 AgentX subagent */
+    free(entry); continue;
+}
+```
+
+```
+# /etc/moxa/netsnmp/agentx_owned.list (預設只有 ifmibdb/)
+ifmibdb/
+```
+
+```
+# /moxa/run/snmp/snmpd.conf (plugin_moxa_snmp 自動生成)
+master agentx
+agentXSocket    tcp:127.0.0.1:705
+agentXTimeout   5
+agentXRetries   1
+```
+
+→ 上述 code 跟設定**目前都不在 code base**,2026-06-02 後 revert。下一輪重新 brainstorm 時可作為起點參考。
+
+### E. lib_moxa_agentx API 草圖(FRR pattern)
+
+```c
+/* Lifecycle */
+int  MoxaAgentX_Init(const char *daemon_name);
+void MoxaAgentX_Shutdown(void);
+
+/* Register */
+int  MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                                int mode, Netsnmp_Node_Handler *handler);
+int  MoxaAgentX_RegisterByMappingEntry(const ies_mapping_entry_t *e,
+                                        Netsnmp_Node_Handler *handler);
+
+/* Event loop integration */
+int  MoxaAgentX_GetFds(fd_set *fds, int *maxfd, struct timeval *timeout);
+int  MoxaAgentX_ProcessFds(const fd_set *fds);
+int  MoxaAgentX_RunInThread(void);
+
+/* Notification */
+int  MoxaAgentX_SendTrap(const oid *trap_oid, size_t olen,
+                          netsnmp_variable_list *varbinds);
+```
+
+### F. lib_moxa_snmp_ies_auto_mibs(mapping lib)entry 草圖
+
+```c
+struct ies_mapping_entry {
+    const oid     *oid;
+    size_t         oid_len;
+    const char    *uri;              /* "ifmibdb/ifTable/" */
+    const char    *uri_index;        /* "ifAdminStatus" */
+    int            val_type;         /* SNMP_DATA_TYPE_INTEGER, ... */
+    int            mode;             /* HANDLER_CAN_RONLY/RWRITE */
+    uint32_t       flags;            /* IES_FLAG_SNMP_* */
+    int            iss_build;        /* 1 = ISS / 0 = framework */
+    const char    *owner;            /* "iss" / "framework" / "fiber_check" / ... */
+};
+
+/* API */
+const ies_mapping_entry_t *ies_mapping_lookup_by_oid(...);
+const ies_mapping_entry_t *ies_mapping_lookup_by_uri(...);
+int ies_mapping_iterate_by_owner(const char *owner, cb, ctx);
+```
+
+### G. Daemon subagent 範本(hybrid 模式)
+
+```c
+/* fiber_check daemon */
+
+/* per-OID handler */
+static int handle_fiberCheckStatTxPower(netsnmp_mib_handler *h, ...) {
+    int port = oid_get_index(requests);
+    int tx_dbm = fiber_shm_read_tx(port);
+    snmp_set_var_typed_value(..., ASN_INTEGER, &tx_dbm, sizeof(tx_dbm));
+    return SNMP_ERR_NOERROR;
+}
+
+/* handler dispatch table */
+static const struct {
+    const char *uri_index;
+    Netsnmp_Node_Handler *handler;
+} sHandlers[] = {
+    { "fiberCheckStatTxPower", handle_fiberCheckStatTxPower },
+    { "fiberCheckStatRxPower", handle_fiberCheckStatRxPower },
+    { NULL, NULL }
+};
+
+int main(void) {
+    MoxaAgentX_Init("fiber_check");
+    ies_mapping_iterate_by_owner("fiber_check", register_cb, sHandlers);
+    MoxaAgentX_RunInThread();
+    /* daemon 主迴圈跑 SFP polling */
+    while (running) fiber_main_tick();
+    MoxaAgentX_Shutdown();
+}
+```
+
+### H. SET 路徑在 subagent 端的處理
+
+```c
+static int handle_ifAdminStatus_set(...) {
+    if (reqinfo->mode == MODE_SET_RESERVE1) {
+        /* validate type, range */
+        return SNMP_ERR_NOERROR;
+    }
+    if (reqinfo->mode == MODE_SET_ACTION) {
+        /* 透過 mapping lib 查 URI */
+        const ies_mapping_entry_t *e = ies_mapping_lookup_by_oid(oid, olen);
+        if (!e) return SNMP_ERR_GENERR;
+
+        /* 組 URI,呼 framework REST(維持 SET source-of-truth) */
+        char uri_path[256];
+        snprintf(uri_path, sizeof(uri_path),
+                 "/api/v1/setting/data/%s/%d/%s",
+                 e->uri, port_idx, e->uri_index);
+        return LibFrameworkUri_PatchUri(handle, uri_path, token, val_json);
+    }
+}
+```
+
+### I. 時程總覽
+
+```
+階段 0   : Plan C 試作(已 revert,知識保留作參考)
+階段 0'  : 重新 brainstorm 落地方案                Week 0–2(本文件之後)
+階段 1   : libies_mapping (data + lookup)        Week 2–4
+階段 1.5 : lib_moxa_agentx (FRR-style wrapper)    Week 3–5
+階段 2   : PoC fiber_check (3 lib 整合驗證)        Week 4–7  ← go/no-go
+階段 3   : framework subagent (Rust FFI)          Week 6–14
+階段 4   : ISS subagent 整合 (Aricent,沿用)       Week 7–9.5
+階段 5   : 其他 4–8 個 daemon (各 3–4 週並行)      Week 10–20
+階段 6   : snmpd ies-auto-mibs cleanup            Week 18–21
+
+總: 21 週 ≈ 5 個月(含重新 brainstorm 2 週)
+```
+
+預期延遲改善:
+
++------------------------+----------+---------------+----------------+
+|                        | 現況     | (前次) Plan C  | 方案 (2) 完成    |
++------------------------+----------+---------------+----------------+
+| GET ifTable RO         | 10–150 ms| ~3 ms         | ~50 µs         |
+| GET Moxa private config| 5–15 ms  | 5–15 ms       | ~100 µs        |
+| SET RW                 | 50–500 ms| 50–500 ms     | ~200–500 µs    |
+| GET fiberCheckStat     | 15 ms    | 15 ms         | ~50 µs         |
++------------------------+----------+---------------+----------------+
+
+→ Plan C 欄為 revert 前曾驗證的效果範圍;目前 code base 已回到「現況」。
+
+---
+
+## Changelog
+
+- **2026-06-02 v1**:初稿。整理 session 2026-05 到 2026-06 期間的腦力激盪。
+- **2026-06-02 v2**:更新 Plan C 狀態為「已 revert」。
+  - TL;DR 加狀態說明
+  - §參考資料「已 deploy 的 Plan C」改為「Plan C 試作(已 revert)」
+  - §討論脈絡 Candidate 2 註明 Plan C 試作已 revert
+  - §決策 1/2/8 文字微調(去掉「已 deploy」假設)
+  - §開放問題新增第 7 條「Plan C 重新規劃方向」
+  - §附錄 D 註明 code 不在 code base
+  - §附錄 I 時程加「階段 0' 重新 brainstorm」2 週
+  - 整體 stance:架構分析與決策論證**保留**,作為下一輪規劃起點。實作面待重新 brainstorm 後重啟。

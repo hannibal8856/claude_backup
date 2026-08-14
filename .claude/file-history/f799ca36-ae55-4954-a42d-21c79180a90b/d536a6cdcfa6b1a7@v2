@@ -1,0 +1,909 @@
+#!/usr/bin/env python3
+"""SNMP Plan C+D pptx for RD review — 22 slides, 繁體中文 + 英文專業名詞。
+
+Goal: 跟主管討論架構可行性,政治上避免踩雷:
+- 對 Vincent / Yutzu / Aricent 前人工作保持尊重
+- Plan C revert 描述為「PoC 流程未完成」而非「失敗」
+- Plan D 數字皆標 estimate / 待驗證
+- 強調 incremental + reversible
+- 風險誠實列出
+"""
+
+from pptx import Presentation
+from pptx.util import Inches, Pt, Cm, Emu
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.dml.color import RGBColor
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
+
+prs = Presentation()
+prs.slide_width  = Inches(13.333)   # 16:9
+prs.slide_height = Inches(7.5)
+
+W, H = prs.slide_width, prs.slide_height
+
+# ============================================================
+# Colors / typography
+# ============================================================
+C_PRIMARY = RGBColor(0x1F, 0x4E, 0x79)   # 深藍標題
+C_ACCENT  = RGBColor(0xC0, 0x50, 0x4D)   # 醒目紅
+C_TEXT    = RGBColor(0x33, 0x33, 0x33)   # 主文
+C_MUTED   = RGBColor(0x80, 0x80, 0x80)   # 註腳
+C_LIGHTBG = RGBColor(0xF2, 0xF2, 0xF2)
+C_OK      = RGBColor(0x2E, 0x86, 0x4F)
+C_WARN    = RGBColor(0xC0, 0x50, 0x4D)
+C_INFO    = RGBColor(0x4A, 0x7B, 0xA0)
+
+FONT_HEAD = 'Microsoft JhengHei'
+FONT_BODY = 'Microsoft JhengHei'
+FONT_CODE = 'Consolas'
+
+
+def _set_font(run, name=FONT_BODY, size=14, bold=False, color=C_TEXT, italic=False):
+    run.font.name = name
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.italic = italic
+    run.font.color.rgb = color
+    # East Asian font
+    rPr = run._r.get_or_add_rPr()
+    rFonts = rPr.find(qn('w:rFonts'))
+    if rFonts is None:
+        rFonts = OxmlElement('w:rFonts')
+        rPr.append(rFonts)
+    rFonts.set(qn('w:eastAsia'), name)
+
+
+def _add_text(tf, text, size=14, bold=False, color=C_TEXT, align=PP_ALIGN.LEFT, italic=False):
+    p = tf.paragraphs[0] if not tf.paragraphs[0].runs and not tf.paragraphs[0].text else tf.add_paragraph()
+    p.alignment = align
+    run = p.add_run()
+    run.text = text
+    _set_font(run, size=size, bold=bold, color=color, italic=italic)
+    return p
+
+
+def _add_bullets(tf, items, size=12, color=C_TEXT, level0_bold=False):
+    """items 可為 str 或 (str, level)。level 0=主, 1=次。"""
+    first = True
+    for item in items:
+        if isinstance(item, tuple):
+            text, level = item
+        else:
+            text, level = item, 0
+        if first and not tf.paragraphs[0].text:
+            p = tf.paragraphs[0]
+            first = False
+        else:
+            p = tf.add_paragraph()
+        p.level = level
+        run = p.add_run()
+        # 加自家 bullet
+        run.text = ('• ' if level == 0 else '◦ ') + text
+        _set_font(run, size=size, color=color, bold=(level == 0 and level0_bold))
+
+
+def new_slide(layout_idx=6):
+    """blank layout"""
+    return prs.slides.add_slide(prs.slide_layouts[layout_idx])
+
+
+def add_title(slide, text, subtitle=None):
+    box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), W - Inches(1.0), Inches(0.9))
+    tf = box.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+    run = p.add_run()
+    run.text = text
+    _set_font(run, size=28, bold=True, color=C_PRIMARY)
+    if subtitle:
+        p2 = tf.add_paragraph()
+        run2 = p2.add_run()
+        run2.text = subtitle
+        _set_font(run2, size=14, color=C_MUTED, italic=True)
+    # 底線
+    line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                                   Inches(0.5), Inches(1.25), W - Inches(1.0), Emu(20000))
+    line.fill.solid()
+    line.fill.fore_color.rgb = C_PRIMARY
+    line.line.fill.background()
+
+
+def add_body_box(slide, top=Inches(1.45), left=Inches(0.6), width=None, height=None):
+    if width is None: width = W - Inches(1.2)
+    if height is None: height = H - top - Inches(0.4)
+    box = slide.shapes.add_textbox(left, top, width, height)
+    box.text_frame.word_wrap = True
+    return box.text_frame
+
+
+def add_footer(slide, n_current, n_total, label="SNMP Plan C+D — RD Review (Internal Draft)"):
+    box = slide.shapes.add_textbox(Inches(0.5), H - Inches(0.4),
+                                    W - Inches(1.0), Inches(0.3))
+    tf = box.text_frame
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+    r1 = p.add_run(); r1.text = label
+    _set_font(r1, size=9, color=C_MUTED, italic=True)
+    p2 = tf.add_paragraph()
+    p2.alignment = PP_ALIGN.RIGHT
+    r2 = p2.add_run(); r2.text = f"{n_current} / {n_total}"
+    _set_font(r2, size=9, color=C_MUTED)
+
+
+def add_table(slide, headers, rows,
+              left=Inches(0.6), top=Inches(1.5),
+              width=None, height=None,
+              col_widths=None, font_size=10):
+    if width is None: width = W - Inches(1.2)
+    if height is None: height = Inches(0.5 + 0.4 * len(rows))
+    n_cols = len(headers)
+    n_rows = 1 + len(rows)
+    tbl_shape = slide.shapes.add_table(n_rows, n_cols, left, top, width, height)
+    tbl = tbl_shape.table
+
+    if col_widths:
+        for i, w in enumerate(col_widths):
+            tbl.columns[i].width = w
+
+    for i, h in enumerate(headers):
+        cell = tbl.rows[0].cells[i]
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = C_PRIMARY
+        tf = cell.text_frame
+        tf.text = ''
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        run = p.add_run()
+        run.text = h
+        _set_font(run, size=font_size + 1, bold=True, color=RGBColor(255,255,255))
+
+    for ri, row in enumerate(rows):
+        for ci, val in enumerate(row):
+            cell = tbl.rows[ri + 1].cells[ci]
+            if ri % 2 == 1:
+                cell.fill.solid()
+                cell.fill.fore_color.rgb = C_LIGHTBG
+            tf = cell.text_frame
+            tf.text = ''
+            p = tf.paragraphs[0]
+            p.alignment = PP_ALIGN.LEFT
+            run = p.add_run()
+            run.text = str(val)
+            _set_font(run, size=font_size, color=C_TEXT)
+
+
+def add_code_box(slide, text, top=Inches(1.5), left=Inches(0.6),
+                  width=None, height=Inches(3.5), font_size=10):
+    if width is None: width = W - Inches(1.2)
+    box = slide.shapes.add_textbox(left, top, width, height)
+    box.fill.solid()
+    box.fill.fore_color.rgb = C_LIGHTBG
+    tf = box.text_frame
+    tf.word_wrap = True
+    for i, line in enumerate(text.split('\n')):
+        if i == 0:
+            p = tf.paragraphs[0]
+        else:
+            p = tf.add_paragraph()
+        run = p.add_run()
+        run.text = line
+        _set_font(run, name=FONT_CODE, size=font_size, color=C_TEXT)
+
+
+N_TOTAL = 22
+
+# ============================================================
+# Slide 1 — Title
+# ============================================================
+s = new_slide()
+# Background fill
+bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, H)
+bg.fill.solid()
+bg.fill.fore_color.rgb = C_PRIMARY
+bg.line.fill.background()
+
+box = s.shapes.add_textbox(Inches(0.8), Inches(2.0), W - Inches(1.6), Inches(4.0))
+tf = box.text_frame
+tf.word_wrap = True
+p = tf.paragraphs[0]
+p.alignment = PP_ALIGN.LEFT
+run = p.add_run(); run.text = "SNMP Read OID 加速"
+_set_font(run, size=44, bold=True, color=RGBColor(255,255,255))
+
+p = tf.add_paragraph()
+run = p.add_run(); run.text = "Plan C (Short-term PoC) + Plan D (Long-term Architecture)"
+_set_font(run, size=22, color=RGBColor(220, 230, 245))
+
+p = tf.add_paragraph()
+p.alignment = PP_ALIGN.LEFT
+run = p.add_run(); run.text = "AgentX multi-subagent architecture proposal"
+_set_font(run, size=16, color=RGBColor(200, 215, 235), italic=True)
+
+# Bottom info
+box2 = s.shapes.add_textbox(Inches(0.8), H - Inches(1.2), W - Inches(1.6), Inches(0.8))
+tf2 = box2.text_frame
+p = tf2.paragraphs[0]
+run = p.add_run(); run.text = "Internal Discussion — RD Review"
+_set_font(run, size=14, color=RGBColor(200, 215, 235), bold=True)
+p = tf2.add_paragraph()
+run = p.add_run(); run.text = "2026-06-02   |   Platform: MDS-G4000-L3-4XGS"
+_set_font(run, size=12, color=RGBColor(180, 200, 225))
+
+# ============================================================
+# Slide 2 — TL;DR
+# ============================================================
+s = new_slide()
+add_title(s, "TL;DR — 一頁看完")
+tf = add_body_box(s, top=Inches(1.6))
+
+_add_text(tf, "問題", size=14, bold=True, color=C_PRIMARY)
+_add_text(tf, "ifTable / fiberCheck OID 讀取延遲超出客戶 SLA (50 ms),前人 sleep removal + net-snmp proxy 改善有限。",
+          size=12)
+
+p = tf.add_paragraph()
+run = p.add_run(); run.text = " "; _set_font(run, size=4)
+
+_add_text(tf, "選擇的方向", size=14, bold=True, color=C_PRIMARY)
+_add_text(tf, "AgentX multi-subagent (RFC 2741) — net-snmp 當 master,ISS / framework / hot-path daemons 各自當 subagent。",
+          size=12)
+
+p = tf.add_paragraph()
+run = p.add_run(); run.text = " "; _set_font(run, size=4)
+
+_add_text(tf, "落地路徑(兩階段)", size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "Plan C (PoC,~2 週)— 小變動驗證 AgentX 整合可行性 (code 已 build,latency 量測待補)",
+    "Plan D (~5.3 個月)— 完整架構重構,抽出共用 lib + 統一 GET/SET path,預期 GET < 1 ms",
+], size=12)
+
+p = tf.add_paragraph()
+run = p.add_run(); run.text = " "; _set_font(run, size=4)
+
+_add_text(tf, "本次討論重點", size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "架構可行性 — Plan D 是否走得通?",
+    "資源 / 時程預估是否合理?",
+    "風險與待釐清項目的優先順序",
+], size=12)
+
+add_footer(s, 2, N_TOTAL)
+
+# ============================================================
+# Slide 3 — 背景:現況痛點
+# ============================================================
+s = new_slide()
+add_title(s, "背景 — 現況痛點", "為什麼 50 ms 是底線")
+tf = add_body_box(s)
+
+_add_bullets(tf, [
+    "ifTable / ifXTable / fiberCheckStat OID:cold cache GET 5–150 ms;跨 table 一次 GET 多 OID 可達 600–1200 ms",
+    "經 Perk 移除 hardcoded sleep() 後 SET 延遲 4.2 s → ~170 ms,但 GET path 仍受 URI hook + fork/exec 限制",
+    "Yutzu / Vincent 用 net-snmp proxy 改善 GET 至 ~3 ms,但 NOS v7.0 mainline 限制較多",
+    "跟 eCos 時代 50 ms criteria 對齊有壓力 — worst case 仍有機會超標",
+    "客戶 NMS(北京交控等)監控觸發告警 → 合約壓力",
+], size=13)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=4)
+
+_add_text(tf, "過去 3 年累積 ~3 套不同優化嘗試各自獨立,缺乏整合 + 長程方向。",
+          size=12, italic=True, color=C_MUTED)
+_add_text(tf, "本次提案目的:收斂出統一架構,讓 v7.0 mainline 可同時兼顧 latency + maintainability。",
+          size=12, italic=True, color=C_MUTED)
+
+add_footer(s, 3, N_TOTAL)
+
+# ============================================================
+# Slide 4 — Objective
+# ============================================================
+s = new_slide()
+add_title(s, "Objective — 三個並列目標")
+tf = add_body_box(s)
+
+_add_text(tf, "1. Latency target", size=16, bold=True, color=C_PRIMARY)
+_add_text(tf, "每個 SNMP GET 在 50 ms 內(跟 eCos 時代 criteria 對齊)",
+          size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "2. Unified SNMP request handling for GET/SET", size=16, bold=True, color=C_PRIMARY)
+_add_text(tf, "單一架構覆蓋所有 OID / 所有 subagent;避免「config 走 framework / status 走 ISS / private 走 dlmod」三套並存",
+          size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "3. Compatible to existing framework", size=16, bold=True, color=C_PRIMARY)
+_add_text(tf, "沿用 nginx + actix-web + plugin trait 機制;不打破 SET 持久化(framework JSON = source of truth)",
+          size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+_add_text(tf, "解讀:50 ms 是「跟舊產品行為一致」的承諾;Unified 是為了維護成本;Compatible 是為了避免大規模 regression。",
+          size=11, italic=True, color=C_MUTED)
+
+add_footer(s, 4, N_TOTAL)
+
+# ============================================================
+# Slide 5 — SNMP GET path 現況
+# ============================================================
+s = new_slide()
+add_title(s, "SNMP handling path 現況 — GET")
+tf = add_body_box(s)
+_add_text(tf, "mox_snmp_handle_entry 內 3 個分支 + dlmod 第 4 條",
+          size=12, italic=True, color=C_MUTED)
+
+add_table(s, ['Path', '觸發條件', 'Backend', 'Latency'],
+[
+    ['Path 1', 'entry 有 in-process callback (LA/VLAN/QoS)',  'snmpd 內 function call',            '< 0.1 ms'],
+    ['Path 2', 'iss_build = 1',                                'dlopen URI hook → ISS → tmpfs',     '~7 ms'],
+    ['Path 3', 'iss_build = 0',                                'LibFrameworkUri_GetUri → framework', '~5–15 ms'],
+    ['Path 4', 'dlmod plugin .so (~19 plugins)',              'lib_moxa_framework_uri → framework', '~5–15 ms'],
+],
+top=Inches(2.0),
+col_widths=[Inches(1.0), Inches(4.5), Inches(4.5), Inches(2.0)],
+font_size=11)
+
+tf2 = add_body_box(s, top=Inches(5.2))
+_add_text(tf2, "觀察",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "dlmod plugin 在 snmpd 內,卻仍透過 HTTP loopback 才能拿到資料 — 跨 process 邊界開銷顯著",
+    "三條 ISS 路徑(URI hook / framework REST / fork+exec)各自獨立,debug 成本高",
+], size=11)
+
+add_footer(s, 5, N_TOTAL)
+
+# ============================================================
+# Slide 6 — SNMP SET path 現況
+# ============================================================
+s = new_slide()
+add_title(s, "SNMP handling path 現況 — SET")
+tf = add_body_box(s)
+
+_add_text(tf, "mox_snmp_handle_entry 內只實作 2 個 phase",
+          size=12, italic=True, color=C_MUTED)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "已實作", size=14, bold=True, color=C_OK)
+_add_bullets(tf, [
+    "MODE_SET_RESERVE1 — dependency check",
+    "MODE_SET_COMMIT — 真寫(走 LibFrameworkUri_Patch/Post/Delete → nginx → actix-web → framework REST)",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "未實作 (no-op return NOERROR)", size=14, bold=True, color=C_WARN)
+_add_bullets(tf, [
+    "MODE_SET_RESERVE2 / MODE_SET_ACTION / MODE_SET_FREE / MODE_SET_UNDO",
+    "結果:Multi-OID partial fail 時 master 想 UNDO 找不到 handler → fire-and-forget 無法撤銷",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "Production 上 NMS 主流是 single-OID SET,所以這個 limitation 沒爆出來",
+          size=11, italic=True, color=C_MUTED)
+_add_text(tf, "→ Plan D framework subagent 會修正成 RFC 2741 標準 phase 處理",
+          size=11, italic=True, color=C_INFO)
+
+add_footer(s, 6, N_TOTAL)
+
+# ============================================================
+# Slide 7 — Candidate i: net-snmp proxy
+# ============================================================
+s = new_slide()
+add_title(s, "Candidate i — net-snmp proxy")
+tf = add_body_box(s)
+
+_add_text(tf, "Vincent 2022 PoC",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "刪 800 個 iss_build=1 && RONLY entry,snmpd.conf 手寫 proxy directive",
+    "Walk 1.3.6.1.2 慢 2x;3 個 blocker(walk gap / R/W 不行 / SNMP-PROXY-MIB 不存在)",
+    "Decision: Not Yet",
+    "Source: ~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx",
+], size=11)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "Yutzu 2025 — 北京 10 號線 production 實作",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "同方案,但 NMS 只用單 OID GET (不 walk),ISS 啟用內建 SNMP agent on port 6161",
+    "Case 1: 600 ms → 3 ms;Case 2: 1200 ms → 4 ms;72hr 長測 99.9% < 50 ms",
+    "Production-deployed on NOS v5.x",
+    "4 個 blocker 阻 NOS v7.0 mainline 採用:無動態 OID / 必帶 index / 繞 framework / 無 R/W",
+    "Source: ~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx",
+], size=11)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "兩者用同方案結果天差地遠,關鍵是 workload pattern — walk 失敗,固定 OID 高頻監控成功",
+          size=11, italic=True, color=C_INFO)
+
+add_footer(s, 7, N_TOTAL)
+
+# ============================================================
+# Slide 8 — Candidate ii: ISS as SNMP handler
+# ============================================================
+s = new_slide()
+add_title(s, "Candidate ii — ISS as SNMP handler + framework Rust handler")
+tf = add_body_box(s)
+
+_add_text(tf, "概念",
+          size=14, bold=True, color=C_PRIMARY)
+_add_text(tf, "ISS 內含 Aricent SNMP stack,理論上可變成主要 SNMP 處理者;framework 寫 Rust handler 補 Moxa-private 部分",
+          size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "排除原因", size=14, bold=True, color=C_WARN)
+_add_bullets(tf, [
+    "Aricent SNMP stack 設計上不擅長「集中式 SNMP 樞紐」(gpMibReg 機制不易擴充)",
+    "ISS 變胖會成為 SPOF(ISS 掛掉 → SNMP 全掛)",
+    "跟既有 plugin_moxa_snmp 機制衝突(需重寫所有 plugin)",
+    "ISS 內已有兩套 SNMP code (自家 trap + AgentX subagent),再加 master 角色維護成本高",
+    "工程量 20–40 週重寫,風險大",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "評估結果:本案不採用,但保留 ISS 既有 AgentX subagent 部分作為 Plan D 的基礎",
+          size=11, italic=True, color=C_MUTED)
+
+add_footer(s, 8, N_TOTAL)
+
+# ============================================================
+# Slide 9 — Candidate iii: AgentX (本案選擇)
+# ============================================================
+s = new_slide()
+add_title(s, "Candidate iii — AgentX (本案選擇方向)")
+tf = add_body_box(s)
+
+_add_text(tf, "架構",
+          size=14, bold=True, color=C_PRIMARY)
+_add_text(tf, "net-snmp 當 AgentX master,ISS / framework / hot-path daemons 各自當 subagent。透過 RFC 2741 標準協定統一 dispatch。",
+          size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "為什麼這方向值得投資",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "RFC 2741 standard — net-snmp 是 reference implementation,工具 / 文件 / 社群最完整",
+    "FRR (frrouting) 用 multi-subagent 模式 production 10+ 年(bgpd / ospfd / isisd / ldpd...),pattern 成熟",
+    "漸進可遷移 — 一個 daemon 變一個 subagent,沒上線就 fallback 到 ies-auto-mibs,可 rollback",
+    "不破壞既有 framework — SET 仍走 nginx → actix-web,JSON 持久化模型不變",
+    "支援完整 R/W 4-phase(unlike proxy)",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "Plan C PoC 已 build 過(commits 4f9ead5 + 4951001),buildroot 整合可行;latency 實測待補",
+          size=11, italic=True, color=C_INFO)
+
+add_footer(s, 9, N_TOTAL)
+
+# ============================================================
+# Slide 10 — Candidate iv: Vincent 2026 Tier 1/2/3
+# ============================================================
+s = new_slide()
+add_title(s, "Candidate iv — Vincent 2026 重構計畫 Tier 1/2/3")
+tf = add_body_box(s)
+
+add_table(s, ['Tier', '內容', '效益', '跟本案關係'],
+[
+    ['1', '編譯 flag -O0 → -O3 -flto,Rust opt-level=s → 3', '~20–40% throughput',  '可立即吃,獨立於 AgentX'],
+    ['2', '退掉 4.2 秒 sleep (改 retry-poll),pipe IPC 取代 file IPC', 'SET 4.2 s → ~170 ms', '可立即吃,獨立於 AgentX'],
+    ['3', 'in-process background cache (snmp_alarm_register 定時 refresh,GET 讀記憶體)', '~< 1 ms', 'AgentX subagent 天然取代'],
+],
+top=Inches(1.8),
+col_widths=[Inches(0.6), Inches(5.0), Inches(2.8), Inches(3.6)],
+font_size=11)
+
+tf2 = add_body_box(s, top=Inches(5.0))
+_add_text(tf2, "結論",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "Tier 1 / Tier 2 跟 AgentX 不互斥,屬於 quick win,建議獨立排程",
+    "Tier 3 (in-process cache) 跟 AgentX subagent 解法重疊,有 AgentX 後不需要 cache 層",
+    "Source: ~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement.pdf",
+], size=11)
+
+add_footer(s, 10, N_TOTAL)
+
+# ============================================================
+# Slide 11 — 各方案優缺點對照
+# ============================================================
+s = new_slide()
+add_title(s, "各方案優缺點 — 對照表")
+
+add_table(s, ['維度', 'proxy', 'ISS-as-master', 'AgentX (本案)', 'Vincent Tier 1/2'],
+[
+    ['標準性',                'non-standard',    'Aricent 私有',  '✅ RFC 2741',        '✅ 編譯/協定不變'],
+    ['Walk 行為',              '🔴 慢 2x',         'n/a',           '✅ 整段 prefix',     '不變'],
+    ['R/W 支援',               '🔴 4-phase 不完整','✅',             '✅ 完整',             '不涉及'],
+    ['漸進遷移',               '🟡 per-OID',       '🔴 big-bang',    '✅ per-daemon',       '✅ 獨立每 tier'],
+    ['跟 framework 整合',     '🔴 繞 framework',  '🔴 全廢 plugin', '✅ broad ownership',  '✅ 不影響'],
+    ['GET 改善 (預期)',       '單 OID 100x',      '不確定',         '全 OID 5–25 ms → < 1 ms','略佳'],
+    ['SET 改善 (預期)',       '無',              '可',             '50–500 ms → < 1 ms',  'Tier 2: → ~170 ms'],
+    ['工程量',                '~2 週',           '20–40 週',       'Plan C 2 週 / Plan D ~5 個月','Tier 1 < 1 週'],
+],
+top=Inches(1.5),
+col_widths=[Inches(2.0), Inches(2.4), Inches(2.4), Inches(2.8), Inches(2.4)],
+font_size=10)
+
+tf2 = add_body_box(s, top=Inches(6.2))
+_add_text(tf2, "重點:AgentX 是唯一同時滿足「標準性 + 全 OID 覆蓋 + R/W 完整 + 漸進遷移 + 兼容 framework」的選項",
+          size=11, italic=True, color=C_INFO)
+
+add_footer(s, 11, N_TOTAL)
+
+# ============================================================
+# Slide 12 — 為什麼選 AgentX
+# ============================================================
+s = new_slide()
+add_title(s, "為什麼選 AgentX — 不是「最棒」,是「最適合」")
+tf = add_body_box(s)
+
+_add_text(tf, "AgentX 在 5 個維度上同時及格",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "標準性 — RFC 2741,工具 / 文件 / 社群最完整",
+    "全 OID 覆蓋 — RO + RW,scalar + table 通吃",
+    "R/W 4-phase 完整 — TestSet / CommitSet / UndoSet / CleanupSet",
+    "漸進遷移 — daemon-by-daemon 上線,有 fallback,可 rollback",
+    "兼容既有 framework — SET 路徑不變,JSON 持久化模型保留",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "誠實的限制",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "工程量大(~5.3 個月),需要長期承諾",
+    "net-snmp AgentX wire 對 GETBULK 處理有 known quirk (退化為 GETNEXT),但跟 proxy 一樣,不是 AgentX 特有",
+    "Rust AgentX 生態未成熟 → 走 FFI 包既有 C lib(統一性)",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "前人努力(Vincent / Yutzu / Aricent)的價值持續累積:",
+          size=11, italic=True, color=C_MUTED)
+_add_bullets(tf, [
+    "Yutzu 北京案例的延遲數據是 Plan D 預期值的 baseline",
+    "Vincent Tier 1/2 可獨立疊加,跟 AgentX 互補",
+    "Aricent ISS SNMP stack 不重寫,持續服役",
+], size=11, color=C_MUTED)
+
+add_footer(s, 12, N_TOTAL)
+
+# ============================================================
+# Slide 13 — Plan C 設計
+# ============================================================
+s = new_slide()
+add_title(s, "Plan C — Short-term PoC", "最小變動驗證 AgentX 整合可行性")
+tf = add_body_box(s)
+
+_add_text(tf, "Scope (4 個小改動)",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "ies-auto-mibs 加 ~85 行 list reader + skip,讀 /etc/moxa/netsnmp/agentx_owned.list",
+    "snmpd.conf 加 master agentx + agentXSocket tcp:127.0.0.1:705 (4 行)",
+    "ISS 端 cherry-pick 2 commits 啟用 SNMP_LNXIP_WANTED (啟動 Aricent AgentX subagent code)",
+    "agentx_owned.list 預設只列 'ifmibdb/',只把 ifTable RO 推給 ISS 處理;RW 完全不動",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "Expected behavior",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "ifTable RO entry 命中 list prefix → ies-auto-mibs skip register → master 透過 longest-prefix-match 路由給 ISS subagent",
+    "RW entry 維持 ies-auto-mibs handler → SET 走 framework REST(完全等同現況)",
+    "預期 GET 延遲 ifTable RO: ~7 ms → ~3 ms (參考 Yutzu 北京 case)",
+], size=12)
+
+add_footer(s, 13, N_TOTAL)
+
+# ============================================================
+# Slide 14 — Plan C 狀態 + PoC 範圍
+# ============================================================
+s = new_slide()
+add_title(s, "Plan C — 當前狀態 + PoC 完整 cycle")
+tf = add_body_box(s)
+
+_add_text(tf, "PoC 完整 cycle 應有 4 步驟",
+          size=14, bold=True, color=C_PRIMARY)
+add_table(s, ['步驟', '內容', '狀態'],
+[
+    ['1', '程式碼變動 + buildroot 整合 (commits 4f9ead5 + 4951001)',     '✅ 完成'],
+    ['2', 'ifTable RO GET / walk latency 量測 — 目標 ~7 ms → ~3 ms',     '⚠️ 未執行'],
+    ['3', 'Walk gap / SET 路徑 regression 驗證(SET 沒動,應等同現況)',  '⚠️ 未執行'],
+    ['4', '跟 Beijing v5.x proxy 數據橫向對比',                          '⚠️ 未執行'],
+],
+top=Inches(2.4),
+col_widths=[Inches(0.7), Inches(7.5), Inches(2.0)],
+font_size=11)
+
+tf2 = add_body_box(s, top=Inches(4.5))
+_add_text(tf2, "現況 (2026-06-02)",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "步驟 1 完成,步驟 2–4 暫未執行即 revert(改往 Plan D 探討)",
+    "Plan C 的 latency 有效性還沒被本平台量化驗證,只有 buildroot 跑得起來的證實",
+    "Commits 可隨時還原重啟,2 個 ISS cherry-picks 在 Plan D 也仍會用到(資產保留)",
+], size=11)
+
+p = tf2.add_paragraph(); _set_font(p.add_run(), size=4)
+_add_text(tf2, "建議:若要單獨重啟 Plan C 取得短期 quick win,直接補做步驟 2–4 即可(~1 週)",
+          size=11, italic=True, color=C_INFO)
+
+add_footer(s, 14, N_TOTAL)
+
+# ============================================================
+# Slide 15 — Plan D 核心架構
+# ============================================================
+s = new_slide()
+add_title(s, "Plan D — 核心架構", "Multi-subagent + Shared library + Broad/Strict ownership")
+tf = add_body_box(s)
+
+_add_text(tf, "5 個核心 building blocks",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "lib_moxa_snmp_ies_auto_mibs (3 層 data + SET dispatch + URI action) — 從 3rdparty_net_snmp 獨立",
+    "lib_moxa_snmp_agentx (C) + lib_moxa_rust_snmp_agentx (Rust FFI) — FRR-style wrapper",
+    "ISS subagent — 沿用 Aricent SnxMain,~500 個 RW SetHandler 套 adapter 統一走 framework REST",
+    "Framework subagent — Rust FFI,broad ownership 接所有 config + status OID",
+    "Hot-path daemon subagent — fiber_check / lldp / dhcp_snp 等 2–3 隻獨立 (strict ownership)",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "OID Ownership 機制",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "Subagent 透過 REGISTER_MIB() with priority=50 自我宣告擁有權",
+    "Net-snmp longest-prefix-match + priority comparison → subagent 贏過 ies-auto-mibs (priority 127)",
+    "不需要外部 agentx_owned.list — 達到「code = truth」、低耦合高內聚",
+], size=12)
+
+add_footer(s, 15, N_TOTAL)
+
+# ============================================================
+# Slide 16 — Plan D 階段時程
+# ============================================================
+s = new_slide()
+add_title(s, "Plan D — 階段時程", "~23 週 (~5.3 個月)")
+
+add_table(s, ['階段', '任務', '估工', 'Go/No-go'],
+[
+    ['1',   'lib_moxa_snmp_ies_auto_mibs 抽出 + 3 層整理',                          '5 週',      '—'],
+    ['1.5', 'lib_moxa_snmp_agentx + lib_moxa_rust_snmp_agentx wrapper',           '2 週',      '—'],
+    ['2',   'PoC fiber_check daemon subagent (strict)',                            '3 週',      '✓ 決策點'],
+    ['3',   'framework subagent (Rust FFI, broad ownership)',                      '8 週',      '—'],
+    ['4',   'ISS subagent 整合 (Aricent + ~500 RW handler adapter)',               '6–8 週',    '—'],
+    ['5',   'Hot path daemon strict subagent (fiber_check + lldp + dhcp_snp 等)',  '3–5 週',    '—'],
+    ['6',   'snmpd ies-auto-mibs cleanup',                                          '2–3 週',    '—'],
+    ['',    '總時程 (估計值,實作中可能調整)',                                       '~23 週',    ''],
+],
+top=Inches(1.5),
+col_widths=[Inches(0.8), Inches(7.5), Inches(1.8), Inches(2.0)],
+font_size=11)
+
+tf2 = add_body_box(s, top=Inches(5.5))
+_add_text(tf2, "決策點 (Week 6 — 階段 2 PoC 結束)",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "Fiber_check daemon AgentX subagent 是否能正確接 master,GET latency 是否符合預期",
+    "若 No-go → 回頭評估 Plan C 重啟或 Vincent Tier 1/2 quick win",
+    "若 Go → 階段 3 / 4 / 5 可部分並行,加速完成",
+], size=11)
+
+add_footer(s, 16, N_TOTAL)
+
+# ============================================================
+# Slide 17 — AgentX 4-phase + framework subagent 優勢
+# ============================================================
+s = new_slide()
+add_title(s, "AgentX SET 4-phase 規範 + framework subagent 優勢")
+tf = add_body_box(s, top=Inches(1.4))
+
+_add_text(tf, "AgentX wire PDU ↔ net-snmp mode 對映",
+          size=13, bold=True, color=C_PRIMARY)
+add_table(s, ['AgentX PDU', 'net-snmp mode', 'subagent 動作'],
+[
+    ['AGENTX_MSG_TESTSET',    'MODE_SET_RESERVE1',                'validate (type / range / dep)'],
+    ['AGENTX_MSG_COMMITSET',  'MODE_SET_ACTION',                  '★ 真正寫資料'],
+    ['AGENTX_MSG_UNDOSET',    'MODE_SET_UNDO',                    'rollback ACTION'],
+    ['AGENTX_MSG_CLEANUPSET', 'MODE_SET_COMMIT 或 MODE_SET_FREE', 'finalize / 寫盤'],
+],
+top=Inches(1.9),
+col_widths=[Inches(3.5), Inches(3.5), Inches(5.0)],
+font_size=10)
+
+tf2 = add_body_box(s, top=Inches(4.0))
+_add_text(tf2, "Framework subagent 的 in-process 優勢",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "Framework 自己就是 framework — SET handler 不走 HTTP loopback,直接呼 config_operation::update_config()",
+    "延遲:ISS / daemon ~5 ms (HTTP) vs framework ~100–500 µs (in-process) — 約 10x 差距",
+    "GET handler 同樣 in-process — 透過 URI prefix 自動分流到 config_layer 或 status_layer",
+    "完整支援 4-phase (TESTSET / COMMITSET / UNDOSET / CLEANUPSET) — 比現況 ies-auto-mibs 的 quirk 更標準",
+], size=11)
+
+add_footer(s, 17, N_TOTAL)
+
+# ============================================================
+# Slide 18 — 7 條核心決策
+# ============================================================
+s = new_slide()
+add_title(s, "Plan D — 7 條核心決策")
+
+add_table(s, ['#', '決策', '理由'],
+[
+    ['D1', 'net-snmp 當 AgentX master,不換掉',                            'RFC reference 實作最完整,生態最成熟'],
+    ['D2', 'ISS 沿用 Aricent AgentX (snx*.c),不重寫',                     '~60% std MIB 已 production 10+ 年,重寫成本 20–40 週'],
+    ['D3', 'framework + daemons 用 lib_moxa_(rust_)snmp_agentx 統一 wrapper', 'FRR-style,避免每個 daemon 重複寫 boilerplate'],
+    ['D4', 'lib_moxa_snmp_ies_auto_mibs 獨立成 3 層 library',              '抽 ies-auto-mibs source 的 ~80%,共用 OID/URI mapping'],
+    ['D5', 'OID 擁有權靠 REGISTER_MIB() priority shadowing,不用 list',    '自我宣告,低耦合高內聚,沒需要維護的額外 artifact'],
+    ['D6', 'SET 統一 patch framework REST (含 ISS Aricent hook)',          '維持 framework JSON 為 source of truth,避免 desync'],
+    ['D7', 'Rust 端走純 FFI,不用既有 Rust AgentX crate',                  '統一性 — C wrapper 同時服務 C daemon 跟 Rust framework'],
+],
+top=Inches(1.5),
+col_widths=[Inches(0.7), Inches(4.5), Inches(6.8)],
+font_size=10)
+
+add_footer(s, 18, N_TOTAL)
+
+# ============================================================
+# Slide 19 — 延遲預期對照
+# ============================================================
+s = new_slide()
+add_title(s, "延遲預期對照", "目標數字,實作後需實測驗證")
+
+add_table(s, ['場景', '現況', 'Plan C (預期,未實測)', 'Plan D (設計目標)'],
+[
+    ['GET ifTable RO',                  '10–150 ms', '~3 ms',         '< 1 ms'],
+    ['GET Moxa private config',         '5–15 ms',   '5–15 ms (不影響)','~100 µs'],
+    ['GET fiberCheckStat',              '15 ms',     '15 ms (不影響)',  '~50 µs (strict daemon)'],
+    ['SET RW (走 framework)',           '50–500 ms', '50–500 ms (不變)','~200–500 µs'],
+    ['SET RW (ISS / daemon, 經 adapter)','50–500 ms', '50–500 ms (不變)','~5 ms'],
+],
+top=Inches(1.8),
+col_widths=[Inches(3.5), Inches(2.5), Inches(3.0), Inches(3.0)],
+font_size=11)
+
+tf = add_body_box(s, top=Inches(4.7))
+_add_text(tf, "標示說明",
+          size=13, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "Plan C 欄為「理論推估 + Beijing case 參考」,本平台尚未實測驗證",
+    "Plan D 欄為設計目標,實作後也需實測對齊,中間階段以實測結果調整",
+    "現況數據來自 Vincent 2026 PDF + Beijing PPT + session trace",
+], size=11)
+
+add_footer(s, 19, N_TOTAL)
+
+# ============================================================
+# Slide 20 — 風險與待釐清
+# ============================================================
+s = new_slide()
+add_title(s, "風險與待釐清")
+tf = add_body_box(s, top=Inches(1.4))
+
+_add_text(tf, "已識別的技術風險",
+          size=13, bold=True, color=C_PRIMARY)
+add_table(s, ['風險', '影響', '緩解'],
+[
+    ['~500 個 Aricent RW SetHandler 替換工程量', '階段 4 拖長',             '用 X-macro / Python 自動產生 adapter'],
+    ['Hook Aricent SET 接口複雜度未知',          'ISS 整合卡關',             '先做 ifAdminStatus PoC,成功再推廣'],
+    ['Rust AgentX 生態不成熟',                    'framework subagent 卡關',  '已決議走 C wrapper + FFI'],
+    ['Mapping lib version 不同步',                'consumer 行為不一致',       'ies_mapping_version() 啟動 cross-check'],
+    ['Multi-subagent 啟動順序',                   '部分 OID 暫時 fallback',    'systemd ordering + ies-auto-mibs fallback'],
+],
+top=Inches(1.9),
+col_widths=[Inches(4.0), Inches(3.2), Inches(4.8)],
+font_size=10)
+
+tf2 = add_body_box(s, top=Inches(5.0))
+_add_text(tf2, "需要主管 / 團隊一起判斷的開放問題",
+          size=13, bold=True, color=C_PRIMARY)
+_add_bullets(tf2, [
+    "Trap 路徑長期是否要統一到 MQTT?(目前 ISS 內建 trap + MQTT 兩條並存)",
+    "Plan C 是否要短期先重啟 (~1 週) 補完 latency 量測作為 Plan D baseline?",
+    "資源排程:Plan D 5.3 個月內是否有其他競爭性 priority?",
+], size=11)
+
+add_footer(s, 20, N_TOTAL)
+
+# ============================================================
+# Slide 21 — 後續待辦
+# ============================================================
+s = new_slide()
+add_title(s, "後續待辦")
+tf = add_body_box(s)
+
+_add_text(tf, "立即可動 (< 1 週,獨立於 Plan D)",
+          size=14, bold=True, color=C_OK)
+_add_bullets(tf, [
+    "Vincent Tier 1:rebuild 加 -O3 -flto + Rust opt-level=3 → 預期 20–40% throughput",
+    "fiber_check 短期優化(daemon 寫 linkStatus.X 進 .stat INI)→ status.rs 移除 ifTable call,~500x 改善 REST 路徑",
+    "SCHED_RR for ISS SNMP (已實作 + 納入 NOS)→ 記錄此狀態避免重複規劃",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "Plan D PoC 階段 (前 6 週)",
+          size=14, bold=True, color=C_INFO)
+_add_bullets(tf, [
+    "Week 1–3:lib_moxa_snmp_ies_auto_mibs 設計 + 抽出",
+    "Week 2–4:lib_moxa_snmp_agentx wrapper",
+    "Week 3–6:fiber_check daemon subagent PoC",
+    "Week 6:Go/No-go 決策點,基於實測 latency 決定是否進階段 3–6",
+], size=12)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "Plan C 重啟(若需要,~1 週)",
+          size=14, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "還原兩個 commits (4f9ead5 + 4951001) + ISS cherry-picks",
+    "補做 latency 量測:snmpwalk ifTable / snmpget × 100 / tcpdump AgentX 流量",
+    "結果可作 Plan D 基線參考",
+], size=12)
+
+add_footer(s, 21, N_TOTAL)
+
+# ============================================================
+# Slide 22 — References + Q&A
+# ============================================================
+s = new_slide()
+add_title(s, "References + Q&A")
+tf = add_body_box(s)
+
+_add_text(tf, "既有文件 (~/WORK/SNMP_50ms/)",
+          size=13, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "snmp_oid_read_enhancement_2.pptx — Vincent 2022 proxy PoC",
+    "Beijing_subway_10_snmp.pptx — Yutzu 2025 北京 10 號線 production proxy",
+    "3rdparty_net_snmp enhancement - Vincent Tung.pdf — Vincent 2026 Tier 1/2/3 重構計畫",
+    "SNMP Enhancement 2026.pdf — 本案 reference 簡報",
+], size=11)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=6)
+
+_add_text(tf, "本次 brainstorm 衍生文件",
+          size=13, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "SNMP_Plan_C_Design_2026-06-02.docx (13 章) — Plan C 完整設計",
+    "SNMP_Plan_D_Design_2026-06-02.docx (11 章 + Aricent RW handler 附錄) — Plan D 完整設計",
+    "session-snmp-final-summary-2026-06-02.md — 整體 brainstorm 收斂(slide-ready)",
+    "agentx_vs_proxy_truth.md / beijing_proxy_case_study.md / fiber_check_optimization.md",
+], size=11)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+_add_text(tf, "Jira / 工單",
+          size=13, bold=True, color=C_PRIMARY)
+_add_bullets(tf, [
+    "RDMDS42-32 — 北京十號線 SNMP 加速 (本案動機)",
+    "RDMDS43-17 — 2025 SNMP Enhancement 主案",
+    "RDNOS-3253 — ISS 啟動時 init SNMP agent on port 6161",
+], size=11)
+
+p = tf.add_paragraph(); _set_font(p.add_run(), size=8)
+
+p = tf.add_paragraph()
+p.alignment = PP_ALIGN.CENTER
+run = p.add_run()
+run.text = "Q & A — Discussion"
+_set_font(run, size=22, bold=True, color=C_PRIMARY)
+
+add_footer(s, 22, N_TOTAL)
+
+# ============================================================
+out = '/home/moxa/SNMP_Plan_CD_RD_Review_2026-06-02.pptx'
+prs.save(out)
+print(f"Saved: {out}")

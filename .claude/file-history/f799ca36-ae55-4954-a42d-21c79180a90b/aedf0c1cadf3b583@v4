@@ -1,0 +1,82 @@
+/*
+ * lib_moxa_ies_auto_mibs — lookup.
+ *
+ * The table is the hand-written seed (mapping_data.c, e.g. system_information)
+ * PLUS the entries reused from the canonical ies-auto-mibs net_*.h arrays
+ * (mapping_reuse.c). Linear scan over both (small N).
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+
+#include <string.h>
+
+extern const struct ies_map_entry g_ies_map_table[];
+extern const size_t               g_ies_map_table_len;
+
+/* Provided by mapping_reuse.c (or a stub in the host test). Returns the
+ * ies-auto-mibs-derived entries and their count. */
+extern const struct ies_map_entry *ies_map_reuse_table(size_t *len);
+
+static int
+oid_eq(const struct ies_map_entry *e, const moxa_oid *o, size_t olen)
+{
+    return e->oid_len == olen &&
+           memcmp(e->oid, o, olen * sizeof(moxa_oid)) == 0;
+}
+
+const struct ies_map_entry *
+ies_map_lookup_by_oid(const moxa_oid *o, size_t olen)
+{
+    size_t i, rlen;
+    const struct ies_map_entry *rt;
+
+    if (o == NULL)
+    {
+        return NULL;
+    }
+
+    for (i = 0; i < g_ies_map_table_len; i++)
+    {
+        if (oid_eq(&g_ies_map_table[i], o, olen))
+        {
+            return &g_ies_map_table[i];
+        }
+    }
+
+    rt = ies_map_reuse_table(&rlen);
+    for (i = 0; i < rlen; i++)
+    {
+        if (oid_eq(&rt[i], o, olen))
+        {
+            return &rt[i];
+        }
+    }
+    return NULL;
+}
+
+size_t
+ies_map_count(void)
+{
+    size_t rlen;
+    ies_map_reuse_table(&rlen);
+    return g_ies_map_table_len + rlen;
+}
+
+const struct ies_map_entry *
+ies_map_entry_at(size_t i)
+{
+    size_t rlen;
+    const struct ies_map_entry *rt;
+
+    if (i < g_ies_map_table_len)
+    {
+        return &g_ies_map_table[i];
+    }
+    i -= g_ies_map_table_len;
+
+    rt = ies_map_reuse_table(&rlen);
+    if (i < rlen)
+    {
+        return &rt[i];
+    }
+    return NULL;
+}

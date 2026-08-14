@@ -1,0 +1,318 @@
+/*
+ * lib_moxa_snmp_agentx - AgentX subagent shim for app_moxa_framework.
+ *
+ * Derived from FRR's lib/agentx.c, which solves the same problem against a
+ * different reactor. The init sequence, the select/read/timeout cycle and the
+ * non-blocking guard in mx_agentx_handle_read() all come from there.
+ */
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+#include <net-snmp/library/large_fd_set.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+
+#include "lib_moxa_snmp_agentx/agentx.h"
+
+/*
+ * The public API passes OID subidentifiers as unsigned long so the Rust FFI
+ * does not need net-snmp's headers. That is only sound while net-snmp's oid
+ * typedef is the same width, so the casts below are checked here rather than
+ * assumed. On this target oid is unsigned long (library/oid.h:17).
+ */
+typedef char mx_agentx_oid_width_check
+    [(sizeof(oid) == sizeof(unsigned long)) ? 1 : -1];
+
+static mx_agentx_get_cb  g_get_cb;
+static void             *g_get_ctx;
+static int               g_initialised;
+static char              g_name[64];
+
+/*
+ * The one in-flight request.
+ *
+ * Every net-snmp call in this library runs on the caller's single thread, and
+ * the dispatcher invokes the handler synchronously, so at most one request is
+ * ever open. A table would be dead weight. The id is a generation counter
+ * rather than an index: it exists so that a reply arriving for a request that
+ * has already been closed is rejected instead of writing into a varbind that
+ * net-snmp has moved on from.
+ */
+static netsnmp_agent_request_info *g_cur_reqinfo;
+static netsnmp_request_info       *g_cur_request;
+static unsigned long               g_cur_req_id;
+static unsigned long               g_next_req_id = 1;
+
+static netsnmp_request_info *
+mx_agentx_claim(unsigned long req)
+{
+    if (g_cur_request == NULL || req != g_cur_req_id) {
+        return NULL;
+    }
+    return g_cur_request;
+}
+
+static int
+mx_agentx_dispatch(netsnmp_mib_handler *handler,
+                   netsnmp_handler_registration *reginfo,
+                   netsnmp_agent_request_info *reqinfo,
+                   netsnmp_request_info *requests)
+{
+    netsnmp_request_info *req;
+
+    (void) handler;
+    (void) reginfo;
+
+    /*
+     * GET only. SET never moves off in-master (design section 6.2), and
+     * GETNEXT across a whole arc needs the OID table that lives in
+     * lib_moxa_ies_auto_mibs, so it is not this library's business.
+     */
+    if (reqinfo->mode != MODE_GET) {
+        return SNMP_ERR_NOERROR;
+    }
+
+    for (req = requests; req != NULL; req = req->next) {
+        int rc;
+
+        if (g_get_cb == NULL) {
+            netsnmp_set_request_error(reqinfo, req, SNMP_NOSUCHOBJECT);
+            continue;
+        }
+
+        g_cur_reqinfo = reqinfo;
+        g_cur_request = req;
+        g_cur_req_id  = g_next_req_id++;
+
+        rc = g_get_cb(g_cur_req_id,
+                      (const unsigned long *) req->requestvb->name,
+                      req->requestvb->name_length,
+                      g_get_ctx);
+
+        /*
+         * Either the handler reported failure, or it returned without calling
+         * one of mx_agentx_reply_* (which is what clears g_cur_request).
+         * Both mean there is no value for this OID.
+         */
+        if (rc != 0 || g_cur_request != NULL) {
+            netsnmp_set_request_error(reqinfo, req, SNMP_NOSUCHOBJECT);
+        }
+
+        g_cur_request = NULL;
+        g_cur_reqinfo = NULL;
+    }
+
+    return SNMP_ERR_NOERROR;
+}
+
+int
+mx_agentx_init(const char *name)
+{
+    if (g_initialised) {
+        return 0;
+    }
+    if (name == NULL || name[0] == '\0') {
+        return -1;
+    }
+
+    snprintf(g_name, sizeof(g_name), "%s", name);
+
+    /* Must precede init_agent(): it is what selects subagent mode over
+     * master mode for this process. */
+    netsnmp_enable_subagent();
+
+    if (init_agent(g_name) != 0) {
+        return -1;
+    }
+    init_snmp(g_name);
+
+    g_initialised = 1;
+    return 0;
+}
+
+void
+mx_agentx_shutdown(void)
+{
+    if (!g_initialised) {
+        return;
+    }
+    snmp_shutdown(g_name);
+    g_initialised = 0;
+    g_cur_request = NULL;
+    g_cur_reqinfo = NULL;
+}
+
+int
+mx_agentx_register_arc(const unsigned long *arc, size_t oid_len, int priority)
+{
+    netsnmp_handler_registration *reg;
+
+    if (!g_initialised || arc == NULL || oid_len == 0 ||
+        oid_len > MAX_OID_LEN) {
+        return -1;
+    }
+
+    reg = netsnmp_create_handler_registration("mx_agentx", mx_agentx_dispatch,
+                                              (const oid *) arc, oid_len,
+                                              HANDLER_CAN_RONLY);
+    if (reg == NULL) {
+        return -1;
+    }
+    reg->priority = priority;
+
+    if (netsnmp_register_handler(reg) != MIB_REGISTERED_OK) {
+        return -1;
+    }
+    return 0;
+}
+
+int
+mx_agentx_select_info(int *maxfd, int *fds, size_t fds_cap,
+                      long *timeout_us, int *block)
+{
+    netsnmp_large_fd_set lfds;
+    struct timeval tv = { 0, 0 };
+    int local_maxfd = 0;
+    int local_block = 1;
+    int fd;
+    size_t n = 0;
+
+    if (maxfd == NULL || fds == NULL || timeout_us == NULL || block == NULL) {
+        return -1;
+    }
+
+    netsnmp_large_fd_set_init(&lfds, FD_SETSIZE);
+    snmp_select_info2(&local_maxfd, &lfds, &tv, &local_block);
+
+    for (fd = 0; fd < local_maxfd; fd++) {
+        if (!netsnmp_large_fd_is_set(fd, &lfds)) {
+            continue;
+        }
+        if (n >= fds_cap) {
+            netsnmp_large_fd_set_cleanup(&lfds);
+            return -1;
+        }
+        fds[n++] = fd;
+    }
+    netsnmp_large_fd_set_cleanup(&lfds);
+
+    *maxfd = local_maxfd;
+    *block = local_block;
+    /* snmp_select_info2 only fills tv when it wants a deadline; when block is
+     * set the caller must wait without one. */
+    *timeout_us = local_block
+                      ? -1L
+                      : (long) (tv.tv_sec * 1000000L + tv.tv_usec);
+
+    return (int) n;
+}
+
+void
+mx_agentx_handle_read(int fd)
+{
+    netsnmp_large_fd_set lfds;
+    int flags;
+    int restore = 0;
+
+    if (fd < 0) {
+        return;
+    }
+
+    /*
+     * snmp_read2() will block on a blocking socket, and net-snmp does not
+     * guarantee the AgentX socket is non-blocking. FRR hit this and guards the
+     * same way (lib/agentx.c:57). Failure to read the flags is not fatal -
+     * fall through and let snmp_read2 do what it can.
+     */
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags != -1 && !(flags & O_NONBLOCK)) {
+        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1) {
+            restore = 1;
+        }
+    }
+
+    netsnmp_large_fd_set_init(&lfds, FD_SETSIZE);
+    netsnmp_large_fd_setfd(fd, &lfds);
+    snmp_read2(&lfds);
+    netsnmp_large_fd_set_cleanup(&lfds);
+
+    if (restore) {
+        (void) fcntl(fd, F_SETFL, flags);
+    }
+
+    netsnmp_check_outstanding_agent_requests();
+}
+
+void
+mx_agentx_handle_timeout(void)
+{
+    snmp_timeout();
+    run_alarms();
+    netsnmp_check_outstanding_agent_requests();
+}
+
+int
+mx_agentx_reply_integer(unsigned long req, long value)
+{
+    netsnmp_request_info *r = mx_agentx_claim(req);
+
+    if (r == NULL) {
+        return -1;
+    }
+    snmp_set_var_typed_value(r->requestvb, ASN_INTEGER,
+                             (const u_char *) &value, sizeof(value));
+    g_cur_request = NULL;
+    return 0;
+}
+
+int
+mx_agentx_reply_octets(unsigned long req, const unsigned char *buf, size_t len)
+{
+    netsnmp_request_info *r = mx_agentx_claim(req);
+
+    if (r == NULL || (buf == NULL && len != 0)) {
+        return -1;
+    }
+    snmp_set_var_typed_value(r->requestvb, ASN_OCTET_STR,
+                             (const u_char *) buf, len);
+    g_cur_request = NULL;
+    return 0;
+}
+
+int
+mx_agentx_reply_oid(unsigned long req, const unsigned long *value,
+                    size_t oid_len)
+{
+    netsnmp_request_info *r = mx_agentx_claim(req);
+
+    if (r == NULL || value == NULL || oid_len == 0 || oid_len > MAX_OID_LEN) {
+        return -1;
+    }
+    snmp_set_var_typed_value(r->requestvb, ASN_OBJECT_ID,
+                             (const u_char *) value, oid_len * sizeof(oid));
+    g_cur_request = NULL;
+    return 0;
+}
+
+int
+mx_agentx_reply_nosuch(unsigned long req)
+{
+    netsnmp_request_info *r = mx_agentx_claim(req);
+
+    if (r == NULL) {
+        return -1;
+    }
+    netsnmp_set_request_error(g_cur_reqinfo, r, SNMP_NOSUCHOBJECT);
+    g_cur_request = NULL;
+    return 0;
+}
+
+void
+mx_agentx_set_get_handler(mx_agentx_get_cb cb, void *ctx)
+{
+    g_get_cb  = cb;
+    g_get_ctx = ctx;
+}

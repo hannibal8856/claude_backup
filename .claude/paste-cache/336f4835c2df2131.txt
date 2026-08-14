@@ -1,0 +1,35 @@
+$ cat /etc/moxa/netsnmp/agentx_owned.list 
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are NEVER skipped (SET stays on framework). Add a MIB = add a prefix here.
+ifmibdb/
+stdethdb/
+$ 
+$ 
+$ snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.2.1.10.7 | wc -l
+576
+$ 
+$ for r in 2 5 9 10 11; do
+for>   printf ".10.7.%-3s " "$r"
+for>   snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.2.1.10.7.$r | wc -l
+for> done
+.10.7.2   216
+.10.7.5   192
+.10.7.9   36
+.10.7.10  72
+.10.7.11  72
+$ 
+$ snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.2.1.10.7.10 | head -14
+.1.3.6.1.2.1.10.7.10.1.1.1 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.2 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.3 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.4 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.5 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.6 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.7 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.8 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.9 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.10 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.11 = INTEGER: 1
+.1.3.6.1.2.1.10.7.10.1.1.12 = INTEGER: 1
+$ 

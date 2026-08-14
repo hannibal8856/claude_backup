@@ -1,0 +1,252 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_mx_event_port_c
+#define _IES_AUTO_MIBS_FLAGS_mx_event_port_c
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_mx_event_port
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOn/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOn/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOn/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOff/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOff/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "portEvent/portOff/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOn/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOn/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOn/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOff/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOff/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "rateLimitEvent/rateLimitedOff/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOn/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOn/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOn/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOff/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOff/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "chainProtectEvent/chainProtectOff/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOn/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOn/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOn/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOff/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOff/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ringProtectEvent/ringProtectionOff/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "psecEvent/psecViolationPortDown/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "psecEvent/psecViolationPortDown/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "psecEvent/psecViolationPortDown/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "lpEvent/loopProtectPortOff/enable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "lpEvent/loopProtectPortOff/action/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "lpEvent/loopProtectPortOff/portsPbmp") ) 
+    {
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "portLinkUPEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags);
+        }
+    }
+
+    return IES_NOERR;
+}
+
+
+
+#endif //_IES_AUTO_MIBS_FLAGS_mx_event_port_c

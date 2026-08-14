@@ -1,0 +1,36 @@
+#!/bin/bash
+# fwdcheck.sh <TARGET_OID> <POSITIVE_OID> <NEGATIVE_OID> [N] [IDLE] [PEER]
+#
+# Copies fwdcheck_remote.sh to the DUT and runs it there. Everything that
+# matters happens on the device, because the AgentX traffic is on its loopback.
+#
+# PEER picks which subagent to watch (default ISS; use app_moxa_framew for the
+# framework subagent). Both share :705, so the choice matters.
+set -u
+
+TARGET=${1:?usage: fwdcheck.sh <target> <positive> <negative> [N] [IDLE] [PEER]}
+POS=${2:?missing POSITIVE control OID -- it is not optional, see SKILL.md}
+NEG=${3:?missing NEGATIVE control OID -- it is not optional, see SKILL.md}
+N=${4:-150}
+IDLE=${5:-15}
+PEER=${6:-ISS}
+
+export DUT=${DUT:-192.168.127.253}
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+command -v expect >/dev/null || { echo "FATAL: expect not installed"; exit 1; }
+
+echo "copying fwdcheck_remote.sh to $DUT ..."
+expect -c "
+set timeout 120
+log_user 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no $HERE/fwdcheck_remote.sh admin@$DUT:/tmp/
+expect -re {[Pp]assword:} { send \"moxa\r\" }
+expect eof
+" || { echo "FATAL: scp failed"; exit 1; }
+
+expect "$HERE/dutssh.exp" \
+    "sh /tmp/fwdcheck_remote.sh $TARGET $POS $NEG $N $IDLE $PEER" \
+  2>&1 | sed -n -e '/watching peer/,/capture left at/p' \
+                -e '/^INVALID/p'

@@ -1,0 +1,756 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+
+
+/* std c header file */
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+
+/* module header file */
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_system/lib_moxa_system_hotswap_mgmt_info_api.h"
+#include "libmoxa_system/lib_moxa_system_module_info_api.h"
+#include "libmoxa_system/lib_moxa_system_port_info_api.h"
+#include "libmoxa_system/lib_moxa_system_module_port_info_api.h"
+#include "libmoxa_fiber_check/lib_moxa_fiber_ddm_sff8472.h"
+#include "libmoxa_util/util_sem.h"
+#include "libmoxa_util/util_shm.h"
+#include "fiber_check_debug.h"
+#include "fiber_check_main.h"
+#include "fiber_check_ddm.h"
+#include "fiber_check_api.h"
+#include "fiber_check_monitor.h"
+#include "fiber_check_defines.h"
+#include "lib_moxa_debug_log_ng/plugin_debuglogng_fiber_check.h"
+
+#define FOUR_BYTE_BITS 32
+#define FIBER_CHECK_PBMP_LEN 4 //MAX Port = UINT32 Bits * LEN = 32 * 4 = 128 ports
+
+static struct FiberCheckStatus gFiberCheckStatus;
+
+static uint8_t MAX_PORT_NUM = 0;
+static uint8_t MAX_MODULE_NUM = 0;
+static uint8_t MAX_POWER_MODULE_NUM = 0;
+static pthread_mutex_t sFiberCheckStatusMntrMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t sFiberCheckPortUpdateInfoMutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t gInitedBitmap = 0;
+
+struct FiberCheckUpdateInfo {
+    uint32_t mPbmp[FIBER_CHECK_PBMP_LEN];
+    uint32_t mCheckVendor[FIBER_CHECK_PBMP_LEN];
+    uint32_t mUpdateBaseData[FIBER_CHECK_PBMP_LEN];
+};
+
+static struct FiberCheckUpdateInfo gNeedToUpdatePbmp;
+
+/**
+ * @brief Reset specific port's data
+ *
+ * @param[in]   aPortNo               Specified logical port index (0-based).
+ * @returns                           0 means success, other means fail
+ */
+static int _ResetFiberDdmStatus(const uint8_t aPortNo)
+{
+    struct FiberCheckPortStatus tmpStatus;
+    struct FiberCheckStatus*  fiber_check_status_shm_ptr = NULL;
+    int ret = FIBER_CHECK_ERR_DEFAULT;
+
+    memset(&tmpStatus, 0, sizeof(struct FiberCheckPortStatus));
+
+     // Wait semaphore
+    LibUtil_SemWait(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    // Open share memory
+    ret = LibUtil_ShmOpen(kShmSrvBlkTypeFiberCheckStatusSrv, (char**) &fiber_check_status_shm_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm open failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    memcpy(&gFiberCheckStatus.mPortStatus[aPortNo], &tmpStatus, sizeof(struct FiberCheckPortStatus));
+    memcpy(fiber_check_status_shm_ptr, &gFiberCheckStatus, sizeof(struct FiberCheckStatus));
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    // Detach shm segment
+    ret = LibUtil_ShmClose((char*) fiber_check_status_shm_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm close failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    // Release semaphore
+    LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief Access io to update real time ddm status
+ *
+ * @param[in]   aPortNo               Specified logical port index (0-based).
+ * @param[in]   aFiberCheckPortStatus Target status structure to keep status
+ * @returns                           0 means success, other means fail
+ */
+static int32_t _GetFiberDdmStatus(const uint8_t aPortNo, struct FiberCheckPortStatus * aFiberCheckPortStatus)
+{
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    struct FiberCheckStatus*  fiber_check_status_shm_ptr = NULL;
+    struct FiberCheckPortStatus tmpStatus;
+    struct FiberBaseInfo tmpBaseInfo;
+    char port_str[20] = {0};
+    uint32_t slot = 0;
+    uint32_t module_port = 0;
+
+    LibSystem_GetEthModulePortIdxByPortIdx(aPortNo, &module_port);
+    LibSystem_GetEthModuleIdxByPortIdx(aPortNo, &slot);
+    snprintf(port_str, 20, "%d/%d", slot + 1, module_port + 1);
+
+    memset(&tmpBaseInfo, 0, sizeof(struct FiberBaseInfo));
+    memset(&tmpStatus, 0, sizeof(struct FiberCheckPortStatus));
+
+    ret = FiberCheckDdm_GetFiberBaseInfo(aPortNo, &tmpBaseInfo, false);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d cannot get fiber base info, ret = %d\n",
+                                      aPortNo, ret);
+        goto SET_SHM;
+    }
+
+    //So far have valid A0h info
+    tmpStatus.mValid = true;
+
+    memcpy(tmpStatus.mModelName, tmpBaseInfo.mModelName, sizeof(tmpStatus.mModelName));
+    memcpy(tmpStatus.mSerialNumber, tmpBaseInfo.mSerialNumber, sizeof(tmpStatus.mSerialNumber));
+    tmpStatus.mWaveLength = tmpBaseInfo.mWaveLength;
+    tmpStatus.mSupportDdm = tmpBaseInfo.mSupportDdm;
+
+    if (!tmpStatus.mSupportDdm) {
+        // FIBER_CHECK_APP_DEBUG_MSG("port %d, not support ddm\n",
+        //                               aPortNo);
+        goto SET_SHM;
+    }
+
+    ret = FiberCheckDdm_GetDdmTemperature(aPortNo, &tmpStatus.mTemperatureC);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d get ddm temp error, ret = %d\n",
+                                      aPortNo, ret);
+        tmpStatus.mSupportDdm = false;
+        goto SET_SHM;
+    }
+
+    ret = FiberCheckDdm_GetDdmVoltage(aPortNo, &tmpStatus.mVoltage);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d get ddm volt error, ret = %d\n",
+                                      aPortNo, ret);
+        tmpStatus.mSupportDdm = false;
+        goto SET_SHM;
+    }
+
+    //follow eCos logic
+    if ((tmpStatus.mVoltage > (DDM_VOLTAGE_DEFAULT + DDM_VLOTAGE_TOLERANCE)) ||
+        (tmpStatus.mVoltage < (DDM_VOLTAGE_DEFAULT - DDM_VLOTAGE_TOLERANCE))) {
+        FIBER_CHECK_APP_ERR_MSG("port %d, voltage read error\n",
+                                      aPortNo);
+        tmpStatus.mVoltage = DDM_VOLTAGE_DEFAULT;
+    }
+
+    ret = FiberCheckDdm_GetDdmTxBiasCurrent_ma(aPortNo, &tmpStatus.mTxBiasCurrent);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d, tx bias current read error ret = %d\n",
+                                      aPortNo, ret);
+        //Current fiber check does not present this info to user, do nothing
+    }
+
+    ret = FiberCheckDdm_GetDdmTxPower_dbm(aPortNo, &tmpStatus.mTxPower);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d, tx power read error ret = %d\n",
+                                      aPortNo, ret);
+        tmpStatus.mSupportDdm = false;
+        goto SET_SHM;
+    }
+
+    ret = FiberCheckDdm_GetDdmRxPower_dbm(aPortNo, &tmpStatus.mRxPower);
+    if (FIBER_CHECK_OK != ret) {
+        FIBER_CHECK_APP_ERR_MSG("port %d, rx power read error ret = %d\n",
+                                      aPortNo, ret);
+        tmpStatus.mSupportDdm = false;
+        goto SET_SHM;
+    }
+
+    // FIBER_CHECK_APP_DEBUG_MSG("port %d %s Wavelen: %d SN: %s ddm:%d TxPwr: %f RxPwr: %f Volt: %f Current: %f Temperature: %f\n", aPortNo,
+    //             tmpStatus.mModelName,
+    //             tmpStatus.mWaveLength,
+    //             tmpStatus.mSerialNumber,
+    //             tmpStatus.mSupportDdm,
+    //             tmpStatus.mTxPower,
+    //             tmpStatus.mRxPower,
+    //             tmpStatus.mVoltage,
+    //             tmpStatus.mTxBiasCurrent,
+    //             tmpStatus.mTemperatureC);
+    LIBMOXADEBUGLOGNG_SYSLOG(port_str, FIBER_CHECK_STR_ID_FIBER_MONITOR_DUMP_CURRENT_FIBER_MODULE_INFO,
+                             port_str, tmpStatus.mModelName, tmpStatus.mWaveLength, tmpStatus.mSerialNumber, tmpStatus.mTxPower,
+                             tmpStatus.mRxPower, tmpStatus.mVoltage, tmpStatus.mTxBiasCurrent, tmpStatus.mTemperatureC);
+SET_SHM:
+
+    // Wait semaphore
+    LibUtil_SemWait(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    // Open share memory
+    ret = LibUtil_ShmOpen(kShmSrvBlkTypeFiberCheckStatusSrv, (char**) &fiber_check_status_shm_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm open failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    memcpy(&gFiberCheckStatus.mPortStatus[aPortNo], &tmpStatus, sizeof(struct FiberCheckPortStatus));
+    memcpy(fiber_check_status_shm_ptr, &gFiberCheckStatus, sizeof(struct FiberCheckStatus));
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    // Detach shm segment
+    ret = LibUtil_ShmClose((char*) fiber_check_status_shm_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm close failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    // Release semaphore
+    LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    memcpy(aFiberCheckPortStatus, &tmpStatus, sizeof(struct FiberCheckPortStatus));
+
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief Init parameters of Fiber Check subtask status monitor"
+ *
+ * @param[in]  aSysPara         Parameters come from parent process
+ * @returns                     void
+ */
+static void _InitSystemParameter(const struct FiberCheckModelParameter* aSysPara)
+{
+    int32_t ret = -1;
+
+
+    //set static global parameters for easier local use
+    if(aSysPara != NULL){
+        MAX_PORT_NUM = aSysPara->mMaxPortNum;
+        MAX_MODULE_NUM = aSysPara->mMaxModuleNum;
+        MAX_POWER_MODULE_NUM = aSysPara->mMaxPowerModuleNum;
+    }else{
+        FIBER_CHECK_APP_ERR_MSG("system parameters init fail\n");
+    }
+
+    //Init global status
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    memset(&gFiberCheckStatus, 0 , sizeof(struct FiberCheckStatus));
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return;
+}
+
+/**
+ * @brief Check if port valid
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                   true means valid, false means invalid
+ */
+bool FiberCheckMntr_IsPortValid(const uint8_t aPortNo)
+{
+    bool val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mValid;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Get real time temperature value in degree C
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  Real time temperature value in degree C
+ */
+float FiberCheckMntr_GetPortTempC(const uint8_t aPortNo)
+{
+    float val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mTemperatureC;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Get the whole current status structure
+ *
+ * @param[in]   aPortNo          Specified logical port index (0-based).
+ * @param[out]  aFiberPortStatus Status Structure
+ * @returns                      0 means success, other means fail
+ */
+int FiberCheckMntr_GetPortRealTimeStatus(const uint8_t aPortNo, struct  FiberCheckPortStatus *aFiberPortStatus)
+{
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    memcpy(aFiberPortStatus, &gFiberCheckStatus.mPortStatus[aPortNo], sizeof(struct  FiberCheckPortStatus));
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief Get real time tx power value in dbm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time tx power value
+ */
+float FiberCheckMntr_GetPortTxPower(const uint8_t aPortNo)
+{
+    float val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mTxPower;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Get real time rx power value in dbm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time rx power value
+ */
+float FiberCheckMntr_GetPortRxPower(const uint8_t aPortNo)
+{
+    float val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mRxPower;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Get real time voltage value
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time voltage value
+ */
+float FiberCheckMntr_GetPortVoltage(const uint8_t aPortNo)
+{
+    float val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mVoltage;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Get real time tx bias current value
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time tx bias current value
+ */
+float FiberCheckMntr_GetPortTxBiasCurrent(const uint8_t aPortNo)
+{
+    float val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mTxBiasCurrent;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+/**
+ * @brief Check if port support ddm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                   true means support, false means not support
+ */
+bool FiberCheckMntr_IsPortSupportDdm(const uint8_t aPortNo)
+{
+    bool val;
+
+    pthread_mutex_lock(&sFiberCheckStatusMntrMutex);
+    val = gFiberCheckStatus.mPortStatus[aPortNo].mSupportDdm;
+    pthread_mutex_unlock(&sFiberCheckStatusMntrMutex);
+
+    return val;
+}
+
+
+/**
+ * @brief Get module changing bitmap.
+ * Example:
+    1100110  gInitedBitmap
+    1011001  new_bitmap
+    0111111  (gInitedBitmap ^ new_bitmap)
+    0011001  aInsertedBitmap
+    0100110  aRemovedBitmap
+ *
+ * @param[out]  aInsertedBitmap inserted module bitmap, which 1 implies changing from not present to present, 0 implies no changing
+ * @param[out]  aRemovedBitmap  removed module bitmap, which 1 implies changing from present to not present, 0 implies no changing
+ * @returns                     0 means success, others fail.
+ */
+static int32_t _GetHotswappedModules(uint32_t* aInsertedBitmap, uint32_t* aRemovedBitmap)
+{
+    uint32_t new_bitmap = 0;
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+
+    ret = LibSystem_GetValidMdList(&new_bitmap);
+    if (ret != LIB_SYSTEM_RET_SUCCESS) {
+        FIBER_CHECK_APP_DEBUG_MSG("%s,%s,%d\n", __FILE__, __func__, __LINE__);
+        return ret;
+    }
+
+    if(gInitedBitmap != new_bitmap){
+        //get changing module bitmap and then get inserted module
+        if(aInsertedBitmap != NULL){
+            *aInsertedBitmap = (gInitedBitmap ^ new_bitmap) & new_bitmap;
+        }
+        //get changing module bitmap and then get removed module
+        if(aRemovedBitmap != NULL){
+            *aRemovedBitmap = (gInitedBitmap ^ new_bitmap) & (~new_bitmap);
+        }
+    }else{
+        if(aInsertedBitmap != NULL){
+            *aInsertedBitmap = 0;
+        }
+        if(aRemovedBitmap != NULL){
+            *aRemovedBitmap = 0;
+        }
+    }
+
+    return ret;
+}
+
+
+/**
+ * @brief Check if new modules inserted and update fiber info
+ *
+ * @returns                     void
+ */
+static void _CheckHotswap(void)
+{
+    uint32_t inserted_bitmap = 0;
+    uint32_t removed_bitmap = 0;
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    uint32_t start_port = 0;
+    uint32_t end_port = 0;
+    uint32_t port_num_on_module = 0;
+    uint32_t module_num_on_product = 0;
+    uint8_t init_status = kInitStatusFalse;
+
+    if(LibSystem_IsModularProduct() == LIB_SYSTEM_DEF_FALSE){
+        return;
+    }
+
+    ret = _GetHotswappedModules(&inserted_bitmap, &removed_bitmap);
+    if (ret != LIB_SYSTEM_RET_SUCCESS) {
+        FIBER_CHECK_APP_ERR_MSG("%s,%s,%d\n", __FILE__, __func__, __LINE__);
+        return;
+    }
+
+    //removed modules actions
+    if(removed_bitmap != 0){
+        FIBER_CHECK_APP_DEBUG_MSG("removed_bitmap=0x%X \n", removed_bitmap);
+        for(uint8_t slot = 0; slot < MAX_MODULE_NUM; slot++) {
+            if(removed_bitmap & (0x1 << slot)){
+                //remove init finish flag
+                gInitedBitmap = gInitedBitmap & ~(0x1 << slot);
+
+                LibSystem_GetMaxNumOfEthModules(&module_num_on_product);
+                LibSystem_GetPortIdxByEthModuleIdxAndEthModulePortIdx(slot, 0, &start_port);
+                if(slot + 1 < module_num_on_product){
+                    //the removing module is not the last module of product
+                    LibSystem_GetPortIdxByEthModuleIdxAndEthModulePortIdx(slot + 1, 0, &end_port);
+                }else{
+                    //the removing module is the last module of product
+                    LibSystem_GetMaxPortNumInSystem(&end_port);
+                }
+                FIBER_CHECK_APP_DEBUG_MSG("remove slot %u start_port %u end_port %u\n", slot, start_port, end_port);
+                for(int port = start_port; port < end_port; port++){
+                    ret = FiberCheckMntr_UpdateFiberDdmStatus(port, true, true);
+                    if (ret != FIBER_CHECK_OK) {
+                        FIBER_CHECK_APP_ERR_MSG("FiberCheckMntr_UpdateFiberDdmStatus fail ret = %d\n", ret);
+                    }
+                }
+            }
+        }
+    }
+
+    //inserted modules actions
+    if((inserted_bitmap & ~gInitedBitmap) != 0){
+        FIBER_CHECK_APP_DEBUG_MSG("inserted_bitmap=0x%X ~gInitedBitmap=0x%X\n", inserted_bitmap, ~gInitedBitmap);
+        for(uint8_t slot = 0; slot < MAX_MODULE_NUM; slot++) {
+            if((inserted_bitmap & ~gInitedBitmap) & (0x1 << slot)){
+                //set init finish flag
+                gInitedBitmap = gInitedBitmap | (0x1 << slot);
+
+                LibSystem_GetMaxNumOfEthModules(&module_num_on_product);
+                LibSystem_GetPortIdxByEthModuleIdxAndEthModulePortIdx(slot, 0, &start_port);
+                if(slot + 1 < module_num_on_product){
+                    //the removing module is not the last module of product
+                    LibSystem_GetPortIdxByEthModuleIdxAndEthModulePortIdx(slot + 1, 0, &end_port);
+                }else{
+                    //the removing module is the last module of product
+                    LibSystem_GetMaxPortNumInSystem(&end_port);
+                }
+                FIBER_CHECK_APP_DEBUG_MSG("inserted slot %u start_port %u end_port %u\n", slot, start_port, end_port);
+                for(int port = start_port; port < end_port; port++){
+                    ret = FiberCheckMntr_UpdateFiberDdmStatus(port, true, true);
+                    if (ret != FIBER_CHECK_OK) {
+                        FIBER_CHECK_APP_ERR_MSG("FiberCheckMntr_UpdateFiberDdmStatus fail ret = %d\n", ret);
+                    }
+                }
+            }
+        }
+    }
+
+    return;
+}
+
+/**
+ * @brief Force to update specific port's ddm status
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @param[in]   aCheckVendor If need to check vendor. (ISS will do for us, only check when reload service)
+ * @param[in]   aUpdateBaseData If need to update base data. (A0h data will not be changed in run time)
+ * @returns                  0 means success, others fail.
+ */
+int FiberCheckMntr_UpdateFiberDdmStatus(const uint8_t aPortNo, const bool aCheckVendor, const bool aUpdateBaseData)
+{
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    struct FiberCheckPortStatus tmpStatus;
+    struct FiberBaseInfo tmpBaseInfo;
+    // Check if port index out of bound
+    if (aPortNo >= LIB_SYSTEM_DEF_MAX_PORT_NUM_IN_SYSTEM) {
+        FIBER_CHECK_APP_ERR_MSG("input error (port index: %d), exiting.\n", aPortNo);
+        return FIBER_CHECK_ERR_DEFAULT;
+    }
+    //Check base info first to update base info database
+    if (aUpdateBaseData) {
+        ret = FiberCheckDdm_GetFiberBaseInfo(aPortNo, &tmpBaseInfo, true);
+        if (FIBER_CHECK_OK != ret) {
+            FIBER_CHECK_APP_DEBUG_MSG("port %d cannot get fiber base info, ret = %d\n",
+                                        aPortNo, ret);
+            ret = _ResetFiberDdmStatus(aPortNo);
+            if (FIBER_CHECK_OK != ret) {
+                FIBER_CHECK_APP_ERR_MSG("port %d cannot reset fiber ddm status, ret = %d\n",
+                                        aPortNo, ret);
+            } else {
+                FIBER_CHECK_APP_DEBUG_MSG("port %d Clear fiber ddm status\n", aPortNo);
+            }
+            return ret;
+        }
+    }
+
+    if (aCheckVendor) {
+        ret = FiberCheck_CheckVendorName(aPortNo);
+        if (ret != FIBER_CHECK_OK) {
+#ifndef MOXA_SUPPORT_3RDPARTY_SFP
+            FIBER_CHECK_APP_DEBUG_MSG("Unrecognized Vendor Name %d\n", ret);
+            ret = _ResetFiberDdmStatus(aPortNo);
+            if (FIBER_CHECK_OK != ret) {
+                FIBER_CHECK_APP_ERR_MSG("port %d cannot reset fiber ddm status, ret = %d\n",
+                                        aPortNo, ret);
+            } else {
+                FIBER_CHECK_APP_DEBUG_MSG("port %d Clear fiber ddm status\n", aPortNo);
+            }
+            return ret;
+#else
+            FIBER_CHECK_APP_DEBUG_MSG("This port %d don't use Moxa's SPF ; ret %d\n", aPortNo, ret);
+#endif
+        }
+    }
+
+    ret = _GetFiberDdmStatus(aPortNo, &tmpStatus);
+    if (ret != FIBER_CHECK_OK) {
+        FIBER_CHECK_APP_ERR_MSG("_GetFiberDdmStatus fail ret = %d\n", ret);
+    }
+
+    return ret;
+}
+
+/**
+ * @brief Set port need to be update async
+ *
+ * @param[in]   aPortNo         Specified logical port index (0-based).
+ * @param[in]   aCheckVendor    If need to check vendor. (ISS will do for us, only check when reload service)
+ * @param[in]   aUpdateBaseData If need to update base data. (A0h data will not be changed in run time)
+ * @returns                     0 means success, others fail.
+ */
+int FiberCheckMntr_SetPortNeedUpdateAsync(const uint8_t aPortNo, const bool aCheckVendor, const bool aUpdateBaseData)
+{
+    int unit = 0;
+    int unit_port = 0;
+
+    unit = aPortNo / FOUR_BYTE_BITS;
+    unit_port = aPortNo % FOUR_BYTE_BITS;
+
+    pthread_mutex_lock(&sFiberCheckPortUpdateInfoMutex);
+    gNeedToUpdatePbmp.mPbmp[unit] = gNeedToUpdatePbmp.mPbmp[unit] | (0x1 << unit_port);
+    if (aCheckVendor) {
+        gNeedToUpdatePbmp.mCheckVendor[unit] = gNeedToUpdatePbmp.mCheckVendor[unit] | (0x1 << unit_port);
+    }
+    if (aUpdateBaseData) {
+        gNeedToUpdatePbmp.mUpdateBaseData[unit] = gNeedToUpdatePbmp.mUpdateBaseData[unit] | (0x1 << unit_port);
+    }
+    pthread_mutex_unlock(&sFiberCheckPortUpdateInfoMutex);
+
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief Check if port need to be asynchronous update
+ *
+ * @returns void
+ */
+static void _CheckPortNeedUpdateAsync(void)
+{
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    bool check_vendor = false;
+    bool update_base_data = false;
+    char port_str[20] = {0};
+    uint32_t slot = 0;
+    uint32_t module_port = 0;
+
+
+    pthread_mutex_lock(&sFiberCheckPortUpdateInfoMutex);
+    for (int i = 0; i < FIBER_CHECK_PBMP_LEN; i++) {
+        if (gNeedToUpdatePbmp.mPbmp[i] != 0) {
+            for (int j = 0; j < FOUR_BYTE_BITS; j++) {
+                if (gNeedToUpdatePbmp.mPbmp[i] & (0x1 << j)) {
+                    //Clear need to update bit
+                    gNeedToUpdatePbmp.mPbmp[i] = gNeedToUpdatePbmp.mPbmp[i] & ~(0x1 << j);
+                    if (gNeedToUpdatePbmp.mCheckVendor[i] & (0x1 << j)) {
+                        check_vendor = true;
+                        //Clear check vendor bit
+                        gNeedToUpdatePbmp.mCheckVendor[i] = gNeedToUpdatePbmp.mCheckVendor[i] & ~(0x1 << j);
+                    }
+                    if (gNeedToUpdatePbmp.mUpdateBaseData[i] & (0x1 << j)) {
+                        update_base_data = true;
+                        //Clear update base data bit
+                        gNeedToUpdatePbmp.mUpdateBaseData[i] = gNeedToUpdatePbmp.mUpdateBaseData[i] & ~(0x1 << j);
+                    }
+                    LibSystem_GetEthModulePortIdxByPortIdx(i * FOUR_BYTE_BITS + j, &module_port);
+                    LibSystem_GetEthModuleIdxByPortIdx(i * FOUR_BYTE_BITS + j, &slot);
+                    memset(port_str, 0, sizeof(port_str));
+                    snprintf(port_str, 20, "%d/%d", slot + 1, module_port + 1);
+                    if (update_base_data) {
+                        LIBMOXADEBUGLOGNG_SYSLOG(port_str, FIBER_CHECK_STR_ID_FIBER_MONITOR_ASYNC_UPDATE_ALL_INFO, port_str);
+                    } else {
+                        LIBMOXADEBUGLOGNG_SYSLOG(port_str, FIBER_CHECK_STR_ID_FIBER_MONITOR_ASYNC_UPDATE_DDM_INFO, port_str);
+                    }
+
+                    ret = FiberCheckMntr_UpdateFiberDdmStatus(i * FOUR_BYTE_BITS + j, check_vendor, update_base_data);
+
+                    check_vendor = false;
+                    update_base_data = false;
+                    FIBER_CHECK_APP_DEBUG_MSG("Async update ddm status port: %d\n", i * FOUR_BYTE_BITS + j);
+                    if (ret != FIBER_CHECK_OK) {
+                        FIBER_CHECK_APP_ERR_MSG("FiberCheckMntr_UpdateFiberDdmStatus fail ret = %d\n", ret);
+                    }
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&sFiberCheckPortUpdateInfoMutex);
+}
+
+/**
+ * @brief Update next port's A2h ddm status
+ *
+ * @returns void
+ */
+static void _UpdateNextPortDdmStatusA2h(void)
+{
+    static int32_t port = 0;
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    char port_str[20] = {0};
+    uint32_t slot = 0;
+    uint32_t module_port = 0;
+
+    if (port >= MAX_PORT_NUM) {
+        port %= MAX_PORT_NUM;
+    }
+
+    //Prevent infinite loop when no port is valid, allow loop 1 time.
+    while (!FiberCheckMntr_IsPortSupportDdm(port % MAX_PORT_NUM) && port < (2 * MAX_PORT_NUM)) {
+        port++;
+    }
+
+    //Prevent update port 0, if no port is valid.
+    if (port >= (2 * MAX_PORT_NUM)) {
+        port %= MAX_PORT_NUM;
+        return;
+    }
+
+    LibSystem_GetEthModulePortIdxByPortIdx(port % MAX_PORT_NUM, &module_port);
+    LibSystem_GetEthModuleIdxByPortIdx(port % MAX_PORT_NUM, &slot);
+    memset(port_str, 0, sizeof(port_str));
+    snprintf(port_str, 20, "%d/%d", slot + 1, module_port + 1);
+    LIBMOXADEBUGLOGNG_SYSLOG(port_str, FIBER_CHECK_STR_ID_FIBER_MONITOR_PERIODIC_UPDATE_DDM_INFO, port_str);
+    ret = FiberCheckMntr_UpdateFiberDdmStatus(port % MAX_PORT_NUM, false, false);
+    if (ret != FIBER_CHECK_OK) {
+        FIBER_CHECK_APP_DEBUG_MSG("FiberCheckMntr_UpdateFiberDdmStatus fail ret = %d\n", ret);
+    }
+
+    port++;
+}
+
+
+/**
+ * @brief Fiber Check subtask monitor main
+ *
+ * @param[in]  aParameter       Parameters come from parent process(Fiber Check main)
+ * @returns                     void
+ */
+void* FiberCheckMntr_Main(void* aParameter)
+{
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+
+    _InitSystemParameter((struct FiberCheckModelParameter*) aParameter);
+    memset(&gNeedToUpdatePbmp, 0, sizeof(struct FiberCheckUpdateInfo));
+
+    //quick init
+    for(uint8_t port = 0; port < MAX_PORT_NUM; port++){
+        ret = FiberCheckMntr_UpdateFiberDdmStatus(port, true, true);
+        if (ret != FIBER_CHECK_OK) {
+            FIBER_CHECK_APP_DEBUG_MSG("FiberCheckMntr_UpdateFiberDdmStatus fail ret = %d\n", ret);
+        }
+    }
+
+    while (1) {
+        _CheckHotswap();
+        _CheckPortNeedUpdateAsync();
+        _UpdateNextPortDdmStatusA2h();
+        sleep(1);
+    }
+
+    return NULL;
+}
+

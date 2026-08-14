@@ -1,0 +1,14 @@
+# Migrated to the app_moxa_framework subagent (reuse): mxFiberCheck_MibEntry[]
+# in 3rdparty_net_snmp/ies-auto-mibs/net_mxFiberCheck.h, registered via
+# g_reuse_srcs[] in lib_moxa_ies_auto_mibs/src/mapping_reuse.c. The six columns
+# that are not plain config/status leaves (the txPower/rxPower array pairs and
+# resetToDefault) are handled by lib_moxa_ies_auto_mibs/src/fiber_check.c, which
+# is a port of plugin_snmp_fiber_check.c's own routines.
+#
+# fiber_check_event.conf is NOT affected: plugin_snmp_fiber_check_event.so is a
+# separate plugin serving a different subtree.
+#
+# plugin_snmp_fiber_check.so is still built and installed; it is simply no
+# longer loaded.
+#
+# dlmod fiber_check /etc/moxa/netsnmp/plugin/plugin_snmp_fiber_check.so

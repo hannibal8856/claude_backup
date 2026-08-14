@@ -1,0 +1,477 @@
+#ifndef _MOXA_SNMP_HANDLE_UTILITY_H_
+#define _MOXA_SNMP_HANDLE_UTILITY_H_
+
+#define     MOXA_SNMP_ENTRY_FLAGS_SET(flagBitsNum, flagBitsArray)   ( ((flagBitsArray)[(flagBitsNum)/8]) |= ( (0x01 << ((flagBitsNum) % 8))) )
+#define     MOXA_SNMP_ENTRY_FLAGS_CLR(flagBitsNum, flagBitsArray)   ( ((flagBitsArray)[(flagBitsNum)/8]) &= (~(0x01 << ((flagBitsNum) % 8))) )
+#define     MOXA_SNMP_ENTRY_FLAGS_CHK(flagBitsNum, flagBitsArray)   ( ((flagBitsArray)[(flagBitsNum)/8]) &  ( (0x01 << ((flagBitsNum) % 8))) )
+
+#define     LIST_INSERT_TAIL_FOR_MOXA_SNMP_ENTRY(head, elm, field) do { \
+    struct ies_auto_mibs_entry *e1  = NULL;  \
+    struct ies_auto_mibs_entry *e2  = NULL;  \
+    if ( LIST_EMPTY(head) )                  \
+    {                                        \
+        LIST_INSERT_HEAD(head, elm, field);  \
+    }                                        \
+    else                                     \
+    {                                        \
+        LIST_FOREACH(e1, head, field) {      \
+            e2 = e1;                         \
+        }                                    \
+        LIST_INSERT_AFTER(e2, elm, field);   \
+    }                                        \
+} while(0);
+
+#define MOXA_SNMP_COMPARE_URI(__entry_uri_string, __uri) \
+    ( ( 0 == strncmp(__entry_uri_string, __uri, strlen(__uri)) ) ? 0 : (-1) )
+
+
+#define MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_CREATE  (1)
+#define MOXA_SNMP_TABLE_ENTRY_LIST_HEAD_DUMP    (2)
+
+typedef enum
+{
+    MOXA_SNMP_VALUE_STR_BUF = 1,
+    MOXA_SNMP_VALUE_BIT_BUF = 2,
+} moxaSNMPSetBuf_t;
+
+typedef enum
+{
+    MOXA_SNMP_BIT_ENABLE  = 1,
+    MOXA_SNMP_BIT_DISABLE = 2,
+} moxaSNMPBitValue_t;
+
+struct moxaSnmpSetBuffer
+{
+    moxaSNMPSetBuf_t     type;
+
+    char                 valStrBuf[MOXA_SNMP_MAX_STR_VALUE_LEN];
+    int                  valStrBufLen;
+
+    moxaSNMPBitValue_t   valBitBuf[MOXA_SNMP_MAX_BIT_VALUE_LEN];
+    int                  valBitBufLen;
+};
+
+/**
+ * @brief get new list-head for table Entry list head
+
+ * @param[out]   retListHead     return new avaliable listHead;
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryGetNewListHead( struct moxaSnmpTableEntry_listHead **retListHead  );
+
+/**
+ * @brief dump list-head content for table Entry list head
+
+ * @param        N/A
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryDumpListHead( void );
+
+/**
+ * @brief create list-head entry for uri Mib Table entry
+          needed for creating uri-MIB-table oid-value-file
+
+ * @param[in]    entry        moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUriTableEntryCreateListHead( struct ies_auto_mibs_entry  *entry );
+
+/**
+ * @brief create index-entry for moxa snmp entry
+
+ * @param[in]    entry        moxa snmp entry
+ * @param[out]   retEntry     return index-entry for moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCreateIndexEntry( struct ies_auto_mibs_entry  *entry,
+                                                     struct ies_auto_mibs_entry **retEntry );
+
+/**
+ * @brief register moxa snmp entry into netSNMP
+
+ * @param[in]    entry        moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryRegisterToNetSNMP( struct ies_auto_mibs_entry  *entry );
+
+/**
+ * @brief check wether this is scalar entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckScalar( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief check wether this is ISS mib entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckFromIss( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief check wether this is URI mib entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, other no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckFromUri( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief check wether this is single index mib table entry
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      1 means yes, others no
+ */
+int32_t moxaSnmpHandle_UtilMibEntryCheckSingleIndexTable( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief get table entry oid
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns     table entry oid
+ */
+int32_t moxaSnmpHandle_UtilMibEntryGetTableEntryOID( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief auto generate table-index-entry
+          following is the reason for this function.
+          1. coz for most of the case, there is no table-index-entry in the db-file generated 
+             from iss.
+
+          2. when generate db for None-ISS MIB entry.
+             With this function, No need to generate table-index-entry.
+
+          3. NetSNMP need table-index-entry to hadle SNMP request from table-index-entry.
+
+ * @param[in]    entry     moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry( struct ies_auto_mibs_entry *entry );
+
+/**
+ * @brief use select for usleep
+
+ * @param[in]    usec           microsecond
+
+   use select for useleep function which is more
+   accurate than use usleep directly.
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilUSleep( unsigned long usec );
+
+/**
+ * @brief Poll framework status URI until "ready" or retries exhausted.
+ *        Vincent's retry-poll replacement for hardcoded SET sleeps.
+ *
+ * @param[in]    handle         framework URI handle (gUriHandle)
+ * @param[in]    status_uri     URI returning JSON with "ready":true
+ * @param[in]    token          security token
+ * @param[in]    max_retries    max GET attempts
+ * @param[in]    poll_ms        sleep between attempts, milliseconds
+ *
+ * @returns      0 if ready reported, -1 if retries exhausted
+ *               Caller should proceed regardless — SET has already been
+ *               accepted by the prior PUT/PATCH/POST/DELETE.
+ */
+int32_t moxaSnmpHandle_UtilPollIssReady( struct LibFrameworkUri_Handle *handle,
+                                          const char *status_uri,
+                                          const char *token,
+                                          int         max_retries,
+                                          int         poll_ms );
+
+/**
+ * @brief handle snprint format string into buf
+
+ * @param[in]    buf           buffer for snprintf
+ * @param[in]    bufLen        buffer total len for snprintf
+ * @param[out]   bufPosition   buffer current position for snprintf
+ * @param[in]    fmtString     format string for snprintf
+ * @param[in]    ...           format string parameter for snprintf
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringSnprintf(char   *buf,
+                                         int      bufLen,
+                                         int     *bufPosition,
+                                         char    *fmtString,
+                                                  ... );
+
+/**
+ * @brief handle transfer object-id-string to oid
+
+ * @param[in]    buf           object-id-string buffer
+ * @param[in]    bufLen        object-id-string buffer len
+ * @param[out]   retOID        return oid buffer
+ * @param[out]   retOIDLen     return oid buffer len
+ * @param[in]    retOIDMaxLen  return oid buffer max len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToObjectID( const char *buf,
+                                             int         bufLen,
+                                             oid        *retOID,
+                                             size_t     *retOIDLen,
+                                             int         maxOidBufLen );
+
+/**
+ * @brief handle transfer string to hex-value
+
+ * @param[in]    buf     hex string buffer
+ * @param[in]    bufLen  hex string buffer Len
+
+ * @returns      parsing result
+ */
+char moxaSnmpHandle_UtilStringToHexValue( const char *buf,
+                                          int         bufLen );
+
+/**
+ * @brief handle transfer ip string to ipv4 value
+
+ * @param[in]    buf     ip string buffer
+ * @param[in]    bufLen  ip string buffer len
+ * @param[in]    retVal  return value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToIPv4Value( const char   *buf,
+                                              int           bufLen,
+                                              unsigned int *retVal );
+
+/**
+ * @brief handle transfer u64string to counter64 value
+
+ * @param[in]    buf        u64string buf
+ * @param[in]    bufLen     u64string buf len
+ * @param[in]    retC64Val  return counter64 value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilStringToCount64Value( const char          *buf,
+                                                 int                  bufLen,
+                                                 struct counter64    *retC64Val );
+/**
+ * @brief do strchr within bufLen
+
+ * @param[in]    buf      buffer
+ * @param[in]    bufLen   buffer len
+ * @param[in]    token    token to parse
+
+ * @returns      a pointer to the first occurrence of the character c in the string s.
+                 NULL means fail
+ */
+char * moxaSnmpHandle_UtilStringStrchr( char *buf,
+                                        int   bufLen,
+                                        char  token  );
+
+/**
+ * @brief handle transfer snmp hex OctString to bitValue
+
+ * @param[in]    request          netsnmp request
+ * @param[out]   setBuffer        return value buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpRequestToBitValue( netsnmp_request_info       *request,
+                                                  struct moxaSnmpSetBuffer   *setBuffer );
+/**
+ * @brief get snmp-set-buffer
+
+ * @param[in]    reqinfo   netsnmp register handle
+ * @param[in]    request   netsnmp request
+ * @param[in]    entry     moxa snmp entry
+ * @param[out]   setBuffer moxa snmp set value buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpGetSetBuffer( netsnmp_agent_request_info *reqinfo,
+                                             netsnmp_request_info       *request,
+                                             struct ies_auto_mibs_entry *entry,
+                                             struct moxaSnmpSetBuffer   *setBuffer  );
+/**
+ * @brief update snmp-get-request
+
+ * @param[in]    reqinfo    netsnmp register handle
+ * @param[in]    request    netsnmp request
+ * @param[in]    entry      moxa snmp entry
+ * @param[in]    valStr     value string
+ * @param[in]    reqOid     request oid
+ * @param[in]    reqOidLen  request oid len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpUpdateGetRequest( netsnmp_agent_request_info *reqinfo,
+                                                 netsnmp_request_info       *request,
+                                                 struct ies_auto_mibs_entry *entry,
+                                                 char                       *valStr,
+                                                 oid                        *reqOid,
+                                                 int                         reqOidLen );
+
+/**
+ * @brief get oid-index for singl-oid-index-table
+
+ * $param[in]    netsnmp_request_info   netsnmp request
+ * @param[in]    entry                  moxa snmp entry
+ * @param[out]   oidIndex               oid-index for table-entry
+
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmpGetOIDIndex( netsnmp_request_info       *request,
+                                            struct ies_auto_mibs_entry *entry,
+                                            int                        *oidIndex );
+
+/**
+ * @brief check oidIndex to tell this is normal-port or port-channel-port
+          and return internal-interface-port-number
+
+ * $param[in]    oidIndex   oid table index
+ * @param[out]   ifaceType  LA_NORMAL_PORT / LA_PORT_CHANNEL
+ * @param[out]   ifacePort  internal interface port
+
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPortGetIfacePort( int32_t   oidIndex,
+                                             int32_t  *ifaceType,
+                                             int32_t  *ifacePort   );
+
+/**
+ * @brief set runnin config to startup config and sleep
+
+ * @param[in]    entry                  moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgSetRunningToStartupConfigAndSleep( struct ies_auto_mibs_entry *entry );
+
+
+/**
+ * @brief get uri-config from uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     return jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgGetURIConfig( char        *uriPath,
+                                            JSON_Value **jsonVal );
+
+/**
+ * @brief get uri-config string from uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     return jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgGetURIConfigString( char        *uriPath,
+                                                  char        *configStr,
+                                                  int32_t      configStrMax );
+
+/**
+ * @brief post uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     json set value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgPostURIConfig( char      *uriPath,
+                                            JSON_Value *jsonVal );
+
+/**
+ * @brief patch uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+ * @param[out]   jsonVal     json set value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgPatchURIConfig( char     *uriPath,
+                                            JSON_Value *jsonVal );
+
+/**
+ * @brief del uri-config by uri-path
+
+ * $param[in]    uriPath     uri path
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgDelURIConfig( char *uriPath );
+
+/**
+ * @brief 1. trigger command by cmdPath
+          2. strcmp  cmdString for checking command is success or not
+
+ * $param[in]    uriPath     uri path
+ * $param[in]    jsonVal     jsonVal
+ * $param[in]    cmdString   checking command is success or not
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilCfgTriggerURICommand( char       *cmdPath,
+                                                 JSON_Value *jsonVal,
+                                                 char       *cmdString );
+
+/**
+ * @brief get uri pBMP from uriPath
+
+ * $param[in]    uriPath     uri path
+ * $param[out]   setBuf      snmp set buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPBMP_GetURIConfig( char                     *uriPath,
+                                              struct moxaSnmpSetBuffer *setBuf   );
+
+/**
+ * @brief set setBuf into uriPath for Port BitMap format
+
+ * $param[in]    uriPath     uri path
+ * $param[out]   setBuf      snmp set buffer
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilPBMP_SetURIConfig( char                     *uriPath,
+                                              struct moxaSnmpSetBuffer *setBuf   );
+
+/**
+ * @brief get json table count
+
+ * $param[in]    uriPath     uri path for json table
+ * @param[out]   tableCount  json table count
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilJsonGetTableCnt( char     *uriPath,
+                                            int32_t  *tableCount );
+
+/**
+ * @brief dump json val
+
+ * @param[in]    functionName  function Name
+ * @param[in]    functionLine  function line
+ * @param[in]    uriPath       uriPath
+ * @param[in]    jsonVal       jason value
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilDumpJsonVal( char        *functionName,
+                                        int          functionLine,
+                                        char        *uriPath,
+                                        JSON_Value  *jsonVal       );
+#endif //_MOXA_SNMP_HANDLE_UTILITY_H_

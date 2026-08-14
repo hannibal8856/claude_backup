@@ -1,0 +1,154 @@
+//! AgentX subagent task.
+//!
+//! Holds one AgentX session to snmpd and drives net-snmp's event loop from
+//! tokio. This task registers **zero** OIDs: its whole value is separating "can
+//! the framework hold an AgentX session inside its runtime" from "does serving
+//! an OID work", so that a failure has one candidate cause instead of two. The
+//! first `register_arc` arrives with the `mx_device_io` pilot.
+//!
+//! Threading: net-snmp is not thread-safe, so every call below has to happen on
+//! one and the same thread (design D5 / section 5.3). That is enforced rather
+//! than documented: `Session` is `!Send`, so this future can only be started
+//! with `spawn_local`, and `tokio::spawn` will not compile.
+//!
+//! Reconnection is net-snmp's job, not ours. Its subagent module already
+//! reconnects with its own alarm and ping; ISS paid for relearning that twice.
+
+use std::collections::HashMap;
+use std::os::unix::io::RawFd;
+use std::time::Duration;
+
+use lib_moxa_rust_debug_log_ng::{lib_moxa_debug_log_ng_syslog, LibMoxaDebugLogNgLogLevel};
+use lib_moxa_rust_debug_log_ng::{mx_error, mx_notice};
+use lib_moxa_rust_snmp_agentx::Session;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
+
+use crate::MODULE_LIST_ID;
+
+/// The name snmpd sees for this subagent.
+const AGENTX_NAME: &str = "moxa-framework";
+
+/// Where snmpd listens for AgentX on this product.
+///
+/// It has to match the `agentXSocket` line that plugin_moxa_snmp writes into
+/// snmpd.conf - see config_moxa_snmp_control.c:794, which is where the value is
+/// decided. Getting it wrong is silent: net-snmp's compiled-in default is the
+/// unix socket /var/agentx/master, init succeeds either way, and the subagent
+/// then retries a connection that will never be accepted.
+const AGENTX_SOCKET: &str = "tcp:127.0.0.1:705";
+
+/// How often net-snmp pings the master, and how often it retries a connection
+/// that has not been made.
+///
+/// This must be non-zero. At zero net-snmp attempts the connection exactly
+/// once and never again, so losing the startup race to snmpd - which is what
+/// happens on a cold boot, where both start together - leaves the subagent
+/// permanently disconnected with nothing logged anywhere. Measured on this
+/// product: the framework connects on a manual restart and never on boot.
+///
+/// It also bounds how long after boot the session appears.
+const AGENTX_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long to wait when net-snmp reports neither a descriptor to watch nor a
+/// deadline. That combination means there is nothing to wake us, so without a
+/// bound the task would sleep forever and the session would never recover.
+const IDLE_POLL: Duration = Duration::from_secs(1);
+
+/// Run the subagent until it fails.
+///
+/// Returns only on error; the caller decides whether that is fatal. It is not:
+/// the framework's HTTP service is unaffected by the subagent being down, which
+/// is what makes this task reversible.
+pub async fn run_subagent() -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = Session::init(AGENTX_NAME, Some(AGENTX_SOCKET), AGENTX_PING_INTERVAL)?;
+    // "started", not "connected": init only enables subagent mode and asks
+    // net-snmp to connect. Whether the session is up is visible on the master
+    // (ss -tnp | grep 705), not from this return value.
+    mx_notice!(
+        MODULE_LIST_ID,
+        &format!(
+            "AgentX subagent {AGENTX_NAME} started, master {AGENTX_SOCKET}, \
+             ping {}s",
+            AGENTX_PING_INTERVAL.as_secs()
+        )
+    );
+
+    // No register_arc calls: see the module comment.
+
+    // net-snmp's descriptor set changes when the AgentX session reconnects, so
+    // it is re-queried every iteration. The AsyncFd registrations are kept
+    // across iterations for the descriptors that did not change: tokio's epoll
+    // registration is edge-triggered, and dropping and recreating it on every
+    // wake-up can lose a readiness edge for data already sitting in the socket.
+    let mut registered: HashMap<RawFd, AsyncFd<RawFd>> = HashMap::new();
+
+    loop {
+        let info = session.select_info()?;
+
+        registered.retain(|fd, _| info.fds.contains(fd));
+        for &fd in &info.fds {
+            if !registered.contains_key(&fd) {
+                registered.insert(fd, AsyncFd::with_interest(fd, Interest::READABLE)?);
+            }
+        }
+
+        if registered.is_empty() {
+            // Nothing to watch. Honour net-snmp's deadline if it gave one, and
+            // otherwise come back shortly rather than blocking forever.
+            tokio::time::sleep(info.timeout.unwrap_or(IDLE_POLL)).await;
+            session.handle_timeout();
+            continue;
+        }
+
+        let ready_fd = wait_for_readable(&registered, info.timeout).await;
+
+        match ready_fd {
+            Some(fd) => session.handle_read(fd),
+            None => session.handle_timeout(),
+        }
+    }
+}
+
+/// Wait until one of the descriptors is readable, or the deadline expires.
+///
+/// Returns the descriptor that became readable, or `None` on timeout.
+async fn wait_for_readable(
+    registered: &HashMap<RawFd, AsyncFd<RawFd>>,
+    timeout: Option<Duration>,
+) -> Option<RawFd> {
+    let readable = async {
+        let waits = registered
+            .iter()
+            .map(|(&fd, async_fd)| Box::pin(async move { (fd, async_fd.readable().await) }));
+
+        let ((fd, guard), _, _) = futures_util::future::select_all(waits).await;
+
+        // Clearing readiness is what stops the next readable() returning
+        // immediately and spinning: snmp_read2() drains the socket, so the
+        // edge has been consumed by the time this returns.
+        if let Ok(mut guard) = guard {
+            guard.clear_ready();
+        }
+        fd
+    };
+
+    match timeout {
+        Some(deadline) => tokio::time::timeout(deadline, readable).await.ok(),
+        None => Some(readable.await),
+    }
+}
+
+/// Start the subagent on the current thread and keep the process running if it
+/// cannot start.
+///
+/// `spawn_local`, not `spawn`: the future is `!Send` because every net-snmp
+/// call has to stay on one thread. `#[actix_web::main]` already runs on a
+/// current-thread runtime with a LocalSet, so this needs no runtime of its own.
+pub fn spawn() {
+    tokio::task::spawn_local(async {
+        if let Err(e) = run_subagent().await {
+            mx_error!(MODULE_LIST_ID, &format!("AgentX subagent stopped: {e}"));
+        }
+    });
+}

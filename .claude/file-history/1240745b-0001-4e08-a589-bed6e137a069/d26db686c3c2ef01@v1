@@ -1,0 +1,6 @@
+- [Rust clippy-scan MSRV fix](rust-clippy-scan-msrv-fix.md) — fixing RUST_CLIPPY_SCAN_CONFIG=true failures under pinned rustc 1.85
+- [Build & verify via docker](build-and-verify-via-docker.md) — run real rustc-1.85 build in container mx_NOS_v6.0_develop
+- [User verifies builds himself](user-verifies-builds-himself.md) — don't run make rebuild to verify; hand off to user
+- [Clippy by-application scan](clippy-by-application-scan.md) — CLIPPY_LOCAL_PKGS rollout to 19 BIN packages, 2026-06-10
+- [Clippy GitLab MR workflow](clippy-gitlab-mr-workflow.md) — scripts + gotchas for mass issue/branch/MR; libs done, apps pending
+- [git --no-ext-diff](git-no-ext-diff.md) — user's git launches meld GUI on diff; always use --no-ext-diff

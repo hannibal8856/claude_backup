@@ -1,0 +1,185 @@
+#ifndef _ISS_SNMP_URI_REMAP_STD1S1DB_C_
+#define _ISS_SNMP_URI_REMAP_STD1S1DB_C_
+
+ies_handle_t 
+remapper_handle_update_std1s1db_ieee8021MstpPortTable
+(
+    u8           *iputURI,
+    u8           *oputURI,
+    u8           *iputFile,
+    u8           *oputFile
+)
+{
+    char                uri_col_buf[IES_MAX_URI_COL][IES_MAX_URI_COL_LEN]  = {0x0};
+    int                 uri_col_idx                                        = 0;
+    char               *uri_col_port                                       = NULL;
+    int                 uri_col_port_idx                                   = 0;
+    int                 uri_col_port_flag                                  = 0;
+    int                 uri_col_port_len                                   = 0;
+    char               *uri_col_port_tmp                                   = NULL;
+    char                uri_col_port_buf[IES_MAX_URI_COL_LEN]              = {0x0};
+    int                 uri_col_port_oid[IES_MAX_URI_COL_LEN]              = {0x0};
+    int                 uri_col_port_oid_len                               = 0;
+    int                 oputURI_idx                                        = 0;
+    iss_remapper_port_t ret                                                = OID_PORT_ERROR;
+    int                 port                                               = 0;
+    int                 update_port                                        = 0;
+    int                 i;
+
+    if ( IES_NOERR != remapper_util_buf_handle_get_uri_col_buf(
+            iputURI, (char *)uri_col_buf, &uri_col_idx) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    uri_col_port      = uri_col_buf[ uri_col_idx - 1 ];
+    uri_col_port_len  = strlen(uri_col_port);
+    uri_col_port_flag = ( NULL == remapper_util_buf_strchr ( uri_col_port, uri_col_port_len, '.') ) ? 0 : 1;
+
+    if ( uri_col_port_flag )
+    {
+        uri_col_port_tmp = remapper_util_buf_strchr( uri_col_port, uri_col_port_len, '/' );
+        if ( NULL == uri_col_port_tmp )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            return IES_ERR;
+        }
+        *uri_col_port_tmp = '\0';
+        snprintf(uri_col_port_buf, sizeof(uri_col_port_buf), "\'%s\'\n", uri_col_port);
+        if ( IES_NOERR != remapper_util_snmp_trans_val_to_ifidxObj(
+                uri_col_port_buf, uri_col_port_oid, 
+                IES_MAX_URI_COL_LEN, &uri_col_port_oid_len) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__ );
+            return IES_ERR;
+        }
+        port = uri_col_port_oid[uri_col_port_oid_len];
+    }
+    else
+    {
+        port = atoi( uri_col_port );
+    }
+
+    ret = remapper_util_check_data_port(port, &update_port, 
+        IES_URI_HANDLE_TYPE_UPDATE, REMAP_PORT_TYPE_1BASE);
+
+    if ( OID_PORT_NORMAL == ret )
+    {
+        if ( uri_col_port_flag )
+        {
+            for ( i = 0; i < uri_col_port_oid_len; i++ )
+            {
+                remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                    &uri_col_port_idx, "%d.", uri_col_port_oid[i]);
+            }
+            remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                &uri_col_port_idx, "%d/", port);
+        }
+        else
+        {
+            snprintf(uri_col_port, IES_MAX_URI_COL_LEN, "%d/", port);
+        }
+    }
+    else
+    if ( OID_PORT_FILTER == ret )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__ );
+        return IES_ERR;
+    }
+    else
+    if ( OID_PORT_UPDATE == ret )
+    {
+        if ( uri_col_port_flag )
+        {
+            for ( i = 0; i < uri_col_port_oid_len; i++ )
+            {
+                remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                    &uri_col_port_idx, "%d.", uri_col_port_oid[i]);
+            }
+            remapper_util_buf_sprintf(uri_col_port, IES_MAX_URI_COL_LEN, 
+                &uri_col_port_idx, "%d/", update_port);
+        }
+        else
+        {
+            snprintf(uri_col_port, IES_MAX_URI_COL_LEN, "%d/", update_port);
+        }
+
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        return IES_ERR;
+    }
+
+    for ( i = 0, oputURI_idx = 0; i <= uri_col_idx; i++ )
+    {
+        remapper_util_buf_sprintf((char *)oputURI, IES_MAX_URI, 
+            &oputURI_idx, "%s", uri_col_buf[i]);
+    }
+
+    rename( (const char *)iputFile, (const char *)oputFile );
+    return IES_NOERR;
+}
+
+/****************************************************************************
+ Description        : 
+
+    update remapper for std1s1db 
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_std1s1db_update
+(
+    u8 *iputURI, 
+    u8 *oputURI, 
+    u8 *iputFile, 
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        {
+            .uri    = "std1s1db/ieee8021MstpPortTable/",
+            .update = remapper_handle_update_std1s1db_ieee8021MstpPortTable,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_update(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, oputURI, iputFile, oputFile );
+}
+
+/****************************************************************************
+ Description        : 
+
+    read remapper for std1s1db
+
+*****************************************************************************/
+iss_remapper_handle_t 
+remapper_std1s1db_read
+(
+    u8 *iputURI, 
+    u8 *iputFile, 
+    u8 *oputFile
+)
+{
+    struct remapper_mib_handler table [] = 
+    {
+        {
+            .uri   = "std1s1db/ieee8021MstpPortTable",
+            .read  = remapper_handle_table_read_for_port_index_table,
+        },
+    };
+
+    return remapper_util_lookup_mib_table_handler_for_read(
+        table, sizeof(table) / sizeof(table[0]), 
+        iputURI, iputFile, oputFile );
+}
+
+
+#endif // _ISS_SNMP_URI_REMAP_STD1W1DB_C_

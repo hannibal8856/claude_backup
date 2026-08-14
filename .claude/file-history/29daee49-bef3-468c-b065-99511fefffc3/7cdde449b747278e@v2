@@ -1,0 +1,316 @@
+#ifndef _NET_MX_FIBER_CHECK_H_
+#define _NET_MX_FIBER_CHECK_H_
+
+/*
+ * mxFiberCheck (MOXA-FIBER-CHECK-MIB, .1.3.6.1.4.1.8691.603.5.3)
+ *
+ * Second group migrated off the dlmod path, transcribed from
+ * plugin_moxa_fiber_check/snmp/plugin_snmp_fiber_check.c. Two per-port
+ * index-tables, no scalars:
+ *
+ *   .1 fiberCheckConfigPortTable   config layer, 9 columns, RW
+ *   .2 fiberCheckStatPortTable     status layer, 13 columns, RO
+ *
+ * Both index columns (.1.1 and .2.1) are declared read-only in the MIB but the
+ * dlmod never returned them, so a walk saw 20 of the MIB's 22 accessible
+ * objects. The framework's index-table support returns them, so this migration
+ * closes that gap: expect 22 columns, not 20.
+ *
+ * Six columns are not plain leaves and carry a suffix in uri_index telling
+ * mapping_reuse.c which extraction to use (array_variant_col()):
+ *
+ *   "<field>[0]"  low end of a 2-element string array
+ *   "<field>[1]"  high end of the same array
+ *   "<field>[]"   the whole array rendered "[<low>, <high>]"
+ *   "<field>[!]"  no backing field; GET is always TruthValue false(2)
+ *
+ * The pair columns share one config field, so the suffix — not the field name —
+ * is what distinguishes them. Extraction and the whole-row SET live in
+ * lib_moxa_ies_auto_mibs/src/fiber_check.c, ported from the plugin.
+ *
+ * The status table needs the status layer rather than the config layer; the
+ * setup fn in ies_auto_mibs_setup_net_mxFiberCheck.c sets
+ * IES_FLAG_SNMP_URI_STATUS on those entries (same mechanism as mx_deviceIO).
+ *
+ * No IES_FLAG_SNMP_URI_INTERFACE anywhere here: that flag adjusts a port-index
+ * *value* read out of config, whereas this table's 0-based/1-based row shift is
+ * already done by the index-table path builder ("<uri><row-1>/<column>").
+ */
+
+#define MX_FC_CFG_TBL   "mxfiberCheck/general/portTable/"
+#define MX_FC_STAT_TBL  "fiberCheckStatus/monitor/portTable/"
+
+struct ies_auto_mibs_entry mxFiberCheck_MibEntry[] =
+{
+    /* ---- .1 fiberCheckConfigPortTable (config layer, RW) ---- */
+    {
+        .name        = "fiberCheckConfigPortIndex",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "index",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,1},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+    },
+    {
+        .name        = "fiberCheckConfigMode",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "mode",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,2},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+    },
+    {
+        .name        = "fiberCheckConfigTemperatureWarnC",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "temperatureWarningC",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,3},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckConfigTemperatureWarnF",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "temperatureWarningF",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,4},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    /* txPowerWarning is one array field: [0] is the low end, [1] the high end.
+     * The MIB orders the columns high (.5) then low (.6). */
+    {
+        .name        = "fiberCheckConfigTxPowerWarnHigh",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "txPowerWarning[1]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,5},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckConfigTxPowerWarnLow",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "txPowerWarning[0]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,6},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckConfigRxPowerWarnHigh",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "rxPowerWarning[1]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,7},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckConfigRxPowerWarnLow",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "rxPowerWarning[0]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,8},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    /* An action, not a stored field: GET is always false(2), SET of true(1)
+     * clears the whole row back to auto. */
+    {
+        .name        = "fiberCheckConfigResetToDefault",
+        .uri         = MX_FC_CFG_TBL,
+        .uri_index   = "resetToDefault[!]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,1,1,1,1,9},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RWRITE,
+        .iss_build   = 0,
+    },
+
+    /* ---- .2 fiberCheckStatPortTable (status layer, RO) ---- */
+    {
+        .name        = "fiberCheckStatPortIndex",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "index",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,1},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_INTEGER,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+    },
+    {
+        .name        = "fiberCheckStatModelName",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "modelName",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,2},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatSN",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "serialNumber",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,3},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatWaveLength",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "wavelength",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,4},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatTemperatureC",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "temperatureC",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,5},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatTemperatureF",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "temperatureF",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,6},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatVoltage",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "voltage",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,7},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatTxPower",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "txPower",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,8},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatRxPower",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "rxPower",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,9},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatTemperatureLimitC",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "temperatureLimitC",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,10},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatTemperatureLimitF",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "temperatureLimitF",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,11},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    /* Status limits are arrays too, but the MIB has one column for the pair, so
+     * both ends are rendered into it as "[<low>, <high>]". */
+    {
+        .name        = "fiberCheckStatTxPowerLimit",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "txPowerLimit[]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,12},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+    {
+        .name        = "fiberCheckStatRxPowerLimit",
+        .uri         = MX_FC_STAT_TBL,
+        .uri_index   = "rxPowerLimit[]",
+        .oid_list    = {1,3,6,1,4,1,8691,603,5,3,2,1,1,1,13},
+        .oid_len     = 15,
+        .oid_index   = 1,
+        .val_type    = SNMP_DATA_TYPE_OCTET_PRIM,
+        .mode        = HANDLER_CAN_RONLY,
+        .iss_build   = 0,
+        .oct_type    = IES_URI_SNMP_OCT_STRING_ASCII,
+    },
+};
+
+#endif //_NET_MX_FIBER_CHECK_H_

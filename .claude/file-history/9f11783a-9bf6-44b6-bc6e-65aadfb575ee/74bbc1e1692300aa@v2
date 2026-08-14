@@ -1,0 +1,14 @@
+echo __DUTRUN_BEGIN__
+echo "## whoami: $(id -u)"
+echo "## BUILD_TIME:"; cat /etc/moxa/build_time 2>/dev/null || grep -ri build_time /etc/moxa/ 2>/dev/null | head -3
+echo "## tools:"
+for t in tcpdump ss netstat snmpwalk snmpget lsof; do
+  p=$(command -v $t 2>/dev/null); echo "  $t = ${p:-MISSING}"
+done
+echo "## AgentX sockets (:705):"
+(ss -tnpa 2>/dev/null || netstat -tnpa 2>/dev/null) | grep 705
+echo "## processes of interest:"
+ps 2>/dev/null | grep -Ei 'snmpd|framework|iss|agentx' | grep -v grep
+echo "## agentx_owned.list (head):"
+head -20 /etc/moxa/netsnmp/agentx_owned.list 2>/dev/null || echo "  (not found)"
+echo __DUTRUN_END__

@@ -1,0 +1,98 @@
+# Task 6 Steps 2–3 — 第一次上機失敗的紀錄（2026-08-05）
+
+程式碼寫完、build 乾淨、DUT 上跑得起來、AgentX 註冊成功，**但整段 arc 變成
+noSuchObject**。DUT 已還原。這份記錄的重點是失敗的形狀和下一步怎麼切開假設。
+
+## 狀態
+
+| 項目 | 狀態 |
+|---|---|
+| Task 6 Step 1（before 對照組） | 完成，p50 113.3ms，`RESULT` 待寫 |
+| Task 6 Step 2–3（註冊 + 服務 GET） | 程式碼完成、build 過、**上機不通** |
+| Task 6 Step 4–5（walkdiff、after） | 未開始 |
+| Task 7 Step 1（oracle） | 完成，`snmpwalk/ORACLE-phase3-task7.txt` |
+| DUT | 已還原成原廠 binary，device_io 7 筆與 oracle 逐字相同 |
+
+commit（都在 `snmp-plan-E2`，**未 push**）：
+
+- `lib_moxa_snmp_agentx` `0e85b01`
+- `lib_moxa_rust_snmp_agentx` `2058a15`
+- `app_moxa_framework` `a5bd7a3`、`6ef8974`
+
+## 為什麼改用 table_iterator（§4.2）
+
+原本 Task 2 的 `mx_agentx_register_arc()` 用 plain `netsnmp_register_handler`，
+net-snmp 對這種註冊**不提供 GETNEXT 支援**，`mx_agentx_dispatch()` 只好拒收
+非 MODE_GET。設計文件 §4.2 早就寫明「表用 `netsnmp_register_table_iterator2`」，
+所以偏離設計的是 Task 2 的 shim，不是這個決定。
+
+順帶解掉 index 欄的問題：註冊時給 `min_col..max_col` = 2..2，net-snmp 永遠不會問
+col 1，`mxDeviceIo.mib` 的 not-accessible 語意就結構性地成立，不需要
+`uri_index == "index"` 那種判別式。
+
+## 上機結果
+
+**成功的部分**（都有證據，不是推論）：
+
+- 四次 `register_iter_table` 全部回成功
+- framework log：`AgentX registered 4 mx_device_io tables, column 2 only, priority 100`
+- log 同時印 `ping 5s`（舊 image 是 15s）→ 確認跑的是新 binary
+- 服務 active、pid 1311、`NRestarts=0` → `run_subagent` 沒有回錯（回錯會 drop
+  Session 進而 `mx_agentx_shutdown`）
+- 同一個 process 的 status layer 正常：
+  `/api/v1/status/io/power/system` → `[{"status":"on"},{"status":"N/A"}]`
+
+**失敗的部分**：
+
+```
+snmpwalk .1.3.6.1.4.1.8691.602.8.6.2          -> No Such Object
+snmpget  .…602.8.6.2.1.1.2.1  (status 欄)     -> No Such Object
+snmpgetnext .…602.8.6.1                       -> .1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1
+```
+
+整段不見，不只是我刻意不服務的 index 欄，**連 7 筆 status 也不見**。
+還原後 7 筆立刻回來 → 因果確立。
+
+## 關鍵區別：noSuchObject 不是 noSuchInstance
+
+一張註冊成功但零列的 table，GET 會得到 **noSuchInstance**。
+我們拿到的是 **noSuchObject** —— 意思是請求根本沒有找到願意回答的 handler。
+所以「`count_rows` 回 0」這個直覺解釋**與證據不符**，不能當成主因。
+
+## 主要假設
+
+不是註冊被搶走，而是**轉發把整段吃掉**：
+
+in-master 是 per-column 註冊（namelen 14），framework 是 Entry 註冊（namelen 13）。
+排序鍵是 (namelen 由長到短, priority 由小到大)，所以 in-master 仍是 children 鏈的
+head，GET 和 GETNEXT 都先落在它身上。它底下現在有 AgentX 節點了，於是
+`mox_snmp_forward_get_to_subagent()`（`ies_auto_mibs.c:3151`）觸發 ——
+而**它不檢查 `reqinfo->mode`**，GETNEXT 也一起轉。轉出去之後 in-master 回
+`IES_GET_FORWARDED`，本來可以在本地產生的值就再也不會產生。我們這邊若答不出東西，
+兩種 mode 都變空 → 整段變黑。
+
+這裡要更正一個先前的判斷：我原本認為 §4.4 的 namelen 不變式成立（in-master 較長）
+就沒事。不變式確實成立、也確實保住了 SET，**但「in-master 是 head」正是問題所在**，
+因為只要有任何 subagent 覆蓋該 OID，它就無條件轉發。不變式保護 SET，不保證 GET 會通。
+
+## 下一步：先量測，不要再推論
+
+兩個假設可以一刀切開：
+
+- (a) 轉發互動把整段吃掉，我們的 handler 根本沒被呼叫
+- (b) 我們的 handler 有被呼叫，但回報零列 / 答不出值
+
+**在 `count_rows()` 與 `answer_get()` 進入點各加一行 log**，重跑一次熱抽換即可分辨。
+沒被呼叫 → (a)，往轉發那條路查；被呼叫但回空 → (b)，往 status 讀取那條路查。
+
+在分辨出來之前不要改 `mox_snmp_forward_get_to_subagent()`，那會同時影響已經在服務的
+1391 筆 ISS OID。
+
+## 環境備忘
+
+- 熱抽換免燒韌體：`~/.claude/skills/dut-console/dut_hotswap.sh <產物路徑…>`，
+  還原用 `--restore`。這次換的是 `usr/bin/app_moxa_framework` 與
+  `usr/lib/libmoxa_snmp_agentx.so`（Rust crate 是 static rlib，已編進 binary）。
+- host 的 `~/.local/bin/snmp*` 是 pysnmp、對這台 agent 會炸
+  （`ValueError: too many values to unpack`）。一律用 `/usr/bin/snmp*`。
+- build 指令結尾別接 `echo`，否則 `$?` 是 echo 的。這次就是這樣誤讀成功一次。

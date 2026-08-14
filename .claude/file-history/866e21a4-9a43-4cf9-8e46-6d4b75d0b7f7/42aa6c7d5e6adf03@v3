@@ -1,0 +1,145 @@
+# ADR-0031: `+getfwd` 的三種 probe 來源,與 `+nodelegate` 解開的委派耦合
+
+Status:
+  **Accepted(2026-08-12)** —— 三種 probe 來源**全部有實證**,原本擋住上線的
+  「列入即委派」耦合已由 `+nodelegate` 解開(見 Consequences)。
+  不取代 ADR-0030;`+getfwd` 對既有四個 prefix 的行為完全不變(已回歸驗證)。
+
+Date: 2026-08-12
+
+Context:
+  probe 候選**只**從「被委派的 RO entry」記錄(`ies_auto_mibs.c` 註冊迴圈)。
+  因此**所有欄位都是 RW 的前綴永遠拿不到 probe**,`+getfwd` 對它們是**結構上不可能**,
+  不是「還沒開」。`snmp-plan-E trace 2` 據此列出 11 個受影響的前綴
+  (`mxqosdb/` 29 RW、`stdlldp/` 8、`mxradiusdb/` 7 …),並提出兩條解法:
+  在 `agentx_owned.list` 明寫 probe,或改用 ISS 註冊的 MIB root。
+
+  使用者 2026-08-12 裁示:兩者都做,以推導為主、`probe=` 為輔。
+
+Decision:
+  **① 三種 probe 來源,優先序固定**
+
+  | 順序 | 來源 | 用途 |
+  |---|---|---|
+  | 1 | `probe=<oid>`(list 上明寫) | 操作者意圖優先,也是推導搆不到時的逃生門 |
+  | 2 | 既有候選池 | 同表命中 → 同前綴 fallback(**行為完全不變**) |
+  | 3 | 推導 | 從 entry 自己的 OID 逐層往上,取第一個「不是我們自己」的祖先,per-prefix 快取 |
+
+  **② 身分檢查 —— 這是讓整件事安全的關鍵**
+
+  `mox_snmp_reg_is_local()` 走 handler chain 比對 `mox_snmp_handle_entry`
+  (走整條 chain 是因為 scalar 與 `AUTO_NEXT` 註冊會包一層 helper)。
+  `forward_get_to_iss()` 解析到自己就 `return -1` 退回本地。
+
+  **→ probe 填錯或推導錯的最壞結果是「沒有加速」,不會是錯值或掉值。**
+  這正是先前只驗非 NULL 所缺的一環(ADR-0030 §③)。
+
+  **③ 驗證結果(image `2026_0812_1805`,DUT p1)**
+
+  **回歸 —— 既有四個 prefix 逐項不變:**
+  `ifmibdb/ifTable/` 與 `stdethdb/dot3PauseTable/` 同表命中、
+  `mxportdb/portConfigTable/` 與 `mxrstpdb/rstpConfigEnable` 走 fallback,
+  probe OID 與 `2026_0812_1532` 完全相同,全部 `FORWARDED`,**無任何 `T3 LOCAL`**。
+
+  **`probe=` 成功,而且達成原本的目標:**
+
+  ```
+  T4 GATE   uri=mxqosdb/qosConfigCoSMappingTable/ prefix_idx=4 getfwd=1
+  T2 LISTED probe_oid=.1.3.6.1.4.1.8691.603.2.9.1.5.1.2
+  T3 FIND   rootoid=.1.3.6.1.4.1.8691.603.2.9  access_method=0xb6f45688
+  T4 RESULT fwd_rc=0 -> FORWARDED
+  ```
+
+  `rootoid` 是 **mxQos 的 MIB root**,證實了「ISS 註冊整段 root 而非單一 OID」——
+  這正是讓全 RW 前綴有 probe 可用的原理。`mxrstpdb/` 加上 `probe=` 後
+  `T2 LISTED` 也正確覆蓋了原本的 `FALLBACK`,仍然 `FORWARDED`。
+
+  ⚠️ **在這一顆 image 上,推導路徑(來源 3)始終沒被觸發**(`T5 DERIVE` 恆為 0)——
+  兩次測試的前綴都有其他來源可用,`probe=` 又優先。
+  **它是在下一顆 `2026_0812_2057` 上、靠 `+nodelegate` 清空候選池才第一次走到的**
+  (見 Consequences)。
+
+Consequences:
+  **🔴 擋住上線的不是轉發,是「列入 list」的耦合。**
+
+  列入一個前綴會**同時**做兩件事:**RO 委派** + **GET 轉發**。而全 RW 型前綴只需要後者。
+
+  `mxqosdb/` 的實測後果 —— 逐表完整性比對(基線 vs 開啟後):
+
+  | 表 | varbind | 欄位 |
+  |---|---|---|
+  | `.1.5`(Meter) | 180 → **168** | 15 → **14** |
+  | `.1.2`(CoSMapping) | 10 → 9 | 2 → 1 |
+
+  少掉的正是 `.603.2.9.1.5.1.2`(`qosConfigMeterColorModeType`)——
+  **它被委派給 ISS,而 ISS 不服務它,於是整欄消失。** 撤掉 list 後欄位數回到 15,
+  因果雙向成立。這是 `trace 2` 所警告「靜默掉值」的**第一個可重現案例**。
+
+  → **下一步應該是讓「轉發」與「委派」可以分開**,而不是繼續找可用的 probe。
+
+  **✅ 已完成(2026-08-12,image `2026_0812_2057`):`+nodelegate`。**
+
+  加上這個旗標的行只做轉發,RO entry **維持本地註冊**
+  (`mox_snmp_entry_is_agentx_owned()` 對該行回 0)。
+  以 `mxqosdb/	+getfwd	+nodelegate` 實測,**刻意不寫 `probe=`** 以便讓候選池真的為空:
+
+  ```
+  T0 NODELEG  qosConfigMeterColorModeType 保留在本地
+  T5 DERIVE   probe=.1.3.6.1.4.1.8691.603.2.9.1.2.1   ← 往上一層即命中
+  T2 DERIVED  considered=0                            ← 候選池確實為空
+  T3 FIND     AgentX subagent, rootoid=.1.3.6.1.4.1.8691.603.2.9
+  T4 RESULT   fwd_rc=0 -> FORWARDED
+  ```
+
+  **完整性回復:`.1.5` 表 168 → 180 varbind、14 → 15 欄。** 七張表逐表比對,
+  實際值與改動前**完全相同**(唯一殘留差異是那個既有壞欄位的 NULL 落點,
+  8 個真實值一個不少)。
+
+  **線上證實**:`tcpdump` 抓到一次 AgentX Get (type 5, session 6),OID 解碼為
+  `.1.3.6.1.4.1.8691.603.2.9.1.2.1.2.0` —— **送的是原始請求的 OID,不是 probe**。
+  證據:`~/pcap/2026-08-12-getfwd-nodelegate-mxqos-2026_0812_2057.pcap`(+ sidecar)。
+
+  **同時解決了「推導從未被驗證」** —— 正是把候選池清空才第一次走到它。
+  三種 probe 來源現在都有實證:`probe=`、既有候選池、推導。
+
+  ⚠️ **`agentx_owned.list` 現在有兩種語意**:「這些前綴歸 subagent」與
+  「這些前綴只借 subagent 的路、東西還是本地的」。**加錯旗標的後果是靜默掉欄位**,
+  所以檔頭註解必須讓人一眼分辨。
+
+  **兩個影響面更廣的發現:**
+
+  1. **`net_*.h` 的 `.mode` 不是實際 mode。**
+     `ies_auto_mibs_setup_net_mxQosdb.c:134` 把 map 宣告為 `HANDLER_CAN_RWRITE` 的
+     `qosConfigMeterColorModeType` 執行期改成 `HANDLER_CAN_RONLY`。
+     **→ 任何只讀 `net_*.h` 做的 RO/RW 普查都不可靠**,包括那份「11 個全 RW 前綴」清單。
+     實際值只能從執行期(`T1 NOTE`)或連 `ies_auto_mibs_setup_net_*.c` 一起解析才算數。
+  2. **`stdlldp/` 型的前綴不適用 `+getfwd`** —— 封包顯示 GET 有送到 ISS,
+     但 trace 完全沒有 `T4 GATE`:**ISS 已直接服務,請求根本不到 in-master**。
+     判別法很乾淨:**`T4 GATE` 有沒有出現 = 這個前綴到底是誰在服務**。
+
+  **本輪自己犯的錯,已更正:**
+  一度結論「把 `mxqosdb/` 加進 list,GET 就不再進 handler」。**那是假象** ——
+  真正原因是 **snmpd 重啟會清掉 trace 旗標**,兩次測試的差別是「有沒有在重啟後
+  重新 `moxa_snmp_tools --enable`」,與 list 無關。
+  **→ 操作規則:每次重啟 snmpd 之後都要重新 enable,否則會看到「什麼都沒發生」的假象。**
+
+Alternatives considered:
+  - **只做 `probe=`,不做推導** —— 未採用,但事後看**這才是先跑通的那條**。
+    推導的價值在於不必人工查 ISS 註冊的 root;但在「列入即委派」解決之前,
+    兩者都上不了線。
+  - **拿 RW entry 自己的 OID 當 probe** —— 已捨棄。全 RW 前綴的每個 entry 都註冊在
+    in-master,`subtree_find` 會找到**自己**,然後呼叫自己的 reginfo。
+    這正是 ② 的身分檢查在防的東西。
+  - **`stdlldp/` 當第一個測試標的** —— 已捨棄,見 Consequences 2。
+
+方法論:
+  - **`T4 GATE` 是「誰在服務這個前綴」的直接讀數**,比任何靜態分析可靠。
+  - **完整性要逐表比對,不能只看整棵樹的總數**(使用者 2026-08-12 指定的方法:
+    walk 子樹 → 逐 node/table → 對照 `.mib`、`net_<feature>.h`、NOS7)。
+    本輪 `.1.5` 少一欄就是逐表比對才看得出來的。
+  - **既有缺陷(與本案無關,但會干擾判讀)**:`.603.2.9.1.2.1.3` 與 `.603.2.9.1.3`
+    的 GETNEXT 回 NULL 且不遞增,會讓 walk 提早中止,使後面的表看起來像不存在。
+
+相關:ADR-0025、**ADR-0030**、ADR-0014;
+`3rdparty_net_snmp` `5061248`(三種 probe 來源)、`6935e36`(`+nodelegate`)、`f46953b`(trace);
+`plugin_moxa_snmp` `8f626e1`。

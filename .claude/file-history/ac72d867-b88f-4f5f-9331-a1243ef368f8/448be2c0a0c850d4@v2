@@ -1,0 +1,132 @@
+# Handoff — session `snmp-plan-E-trace`(2026-08-11 ~ 08-12)
+
+接手者請先讀這份,再依需要跳到下面指的檔案。**本 session 全程唯讀分析,沒有 commit、
+沒有改動任何 `buildroot/dl/` 底下的原始碼。** 產出只有文件與 memory。
+
+---
+
+## 一、這個 session 做了什麼
+
+一連串針對 **in-master 讀取路徑**與 **ISS AgentX 機制**的查證,外加評估一份外部提案。
+起點是使用者拿 Vincent 的 Confluence 文件來對照我們的實作,途中衍生出四五個獨立發現。
+
+**全部結論都是原始碼閱讀所得。除 ADR-0018 引用的 fork+exec 15.0 ms 之外,本 session 沒有任何
+新的 DUT 實測。** 這一點在往下用任何數字之前務必記住。
+
+---
+
+## 二、結論落在哪裡(三個地方,不要重找)
+
+### 1. `~/mds4xgl3/.adr/ADR-0026-evaluate-vincent-3rdparty-net-snmp-quick-wins-1-and-3.md`
+
+決策性結論。Status: Accepted。兩件事:
+
+- **Quick Win #3(分級 TTL)否決** —— 照文件做是**靜默無效**。要改的
+  `moxa_snmp_const.h:23-24` 常數無人引用,生效的是 `entry_handle_check_value_file()` 內
+  重新 `#define` 的局部同名常數;800ms 分支是**不可達死碼**(實際 TTL 只有 200ms 的 LAST_ACCESS);
+  `gSnmpTblSnapShot` 是**單槽快照**不是多筆快取,scalar 從不快取。
+- **Quick Win #1(編譯旗標)方向採用,但內容要改寫** —— arch 四個旗標跨
+  PJ4B-MP / CN9130 / AM335X 三個 CPU 家族各壞一種,**一個都不要手寫**(交給 buildroot
+  `toolchain-wrapper`)。只加 `-O3 -flto`,設在 buildroot 層。文件漏掉兩個真正的熱區:
+  net-snmp/`ies-auto-mibs` 本體與 `rust_moxa_build`。
+
+### 2. `~/WORK/SNMP_50ms/in-master-read-path-findings-2026-08-11.md`
+
+機制與盤點(非決策),五節:
+
+1. **`LibFrameworkUri_GetUri()` 每請求重建 TCP 連線** —— `_isConnectionAlive()` 硬編回 0。
+   快取的 handle 只省 malloc 不省握手。含 AgentX 的對照組與三層修法建議。
+2. **`#4 fork/exec` 全樹 8 處盤點** —— Tier A/B/C/D 分級。**Tier A 只有一處**,可直接套用
+   既有的 `mox_snmp_iss_uri_read_inplace()`。附「與 fiber check 不同軸向」的澄清。
+3. **ISS AgentX 的兩段註冊與 `GetNextIndex`** —— 修正一個誤解,並可據此**排除「ISS 側有 bug」**,
+   把 ADR-0011/0017 的首欄消失調查面縮小到 master 一邊。
+4. **`moxa_snmp_tools` 涵蓋範圍靜默縮小** —— 已委派的 OID dump 出空的,跟「沒發生」長得一樣。
+5. **fiber check 的 SHM 優化** —— deck slide 27 的機制原封不動存活;只換了消費端身分。
+
+### 3. memory(`~/.claude/projects/-home-moxa-.../memory/`)
+
+四筆新增,已進 MEMORY.md 索引:
+`project_vincent_proposal_evaluation`、`project_frameworkuri_reconnects_per_request`、
+`project_moxa_snmp_tools_coverage_shrinks`、`project_iss_agentx_two_registrations_getnextindex`。
+
+---
+
+## 三、下一步(依建議優先序)
+
+### P0 — 量一組 baseline
+
+一組數字同時回答三件事:`LibFrameworkUri` 連線重建的份量、#4 fork/exec 的相對比重、
+Tier A 改動值不值得。**在拿到數字之前,不要對外給任何延遲數值。**
+
+依 `measure-snmp-walk` skill 的紀律:絕對路徑 `/usr/bin/snmpwalk`、交錯 A/B/A、取中位數、
+完整性以 MIB 欄位判定。連線次數用 `strace -c -e trace=socket,connect,close` 掛 snmpd,
+單次耗時配 `-T`。
+
+> 為什麼是 P0:**ADR-0008 已經因為「假設讀取路徑是瓶頸」而白做過一輪並 revert**
+> (真因是 GETNEXT 跨未註冊區間的 probe,ADR-0009)。P1/P2 全都建立在同一個假設上。
+
+### P1 — `FiberCheckShm_OutputShmInfo()` 到底讀什麼
+
+在 `libmoxa_fiber_check`(C)。函式名說 Shm,但 `status.rs:127-130` 緊鄰的註解是
+`config.read('/etc/moxa/app-moxa-fiber-check/fiberCheck.stat')` —— 兩者不一致。
+決定「deck 宣稱的 18–38ms → 8ms 是否仍成立」。**單點、可快速結案。**
+
+### P2 — #4 Tier A(`moxa_snmp_handle_entry_get_value.c:351`)
+
+把 `LibUtil_ExecShCmd(... --type read ...)` 換成現成的
+`mox_snmp_iss_uri_read_inplace(entry->uri, fileName)`。**兩項前置確認**:
+① 輸出檔格式是否一致(`read_inplace` 多做一層 `_remap`,而
+`getEntryValue_issScalarEntry()` 自己在解析 `#uptime=` 開頭的格式);
+② `MOXA_SNMP_URI_CTRL_CLIENT` 與 `AUTO_MIB_CMD_URI_CTRL_CLIENT` 是否指向同一支程式。
+
+改完適合當一次乾淨的量測:「一次 fork/exec 在真實 walk 裡值多少」。
+
+### P3 — `LibFrameworkUri` 修好 keep-alive
+
+只動 `_isConnectionAlive()` 與 `:253`,不需任何其他團隊配合,可單獨量測。
+(另兩個選項:改 UDS、直連 actix:9759,都需他人配合或風險較高。)
+
+### P4 — 死碼清理(bug 修正,非效能)
+
+`entry_handle_check_value_file()` 的不可達 `MAX_TABLE_TIMEOUT` 分支、
+`#undef MAX_ENTRY_TIMEOUT` 解除未定義名稱、`moxa_snmp_const.h:23-24` 兩個無人引用的常數。
+
+---
+
+## 四、接手時要知道的陷阱
+
+1. **`moxa_snmp_tools --dump` 空的 ≠ 沒有請求。** 已委派的 OID 不會出現。判斷歸屬要查
+   `agentx_owned.list` 前綴 + entry 的 `.mode`(RO 委派、RW 留下)。
+2. **改 `moxa_snmp_const.h` 的 TTL 常數不會有任何效果**(見 ADR-0026)。同類地雷還有
+   `ies_auto_mibs_setup.c` 無相依追蹤、`+getfwd` 對 mxportdb/stdethdb 靜默無效。
+3. **dlmod 的判別只能看 `.conf` 裡沒被註解掉的 `dlmod` 行。**
+   實例:`plugin_moxa_fiber_check/snmp/` 有 2 個 `.c`、Makefile 裝 2 個 `.so`,
+   但只有 `fiber_check_event`(`.8691.602.7.1.2.1`)還被載入;
+   `fiber_check`(`.8691.603.5.3.{1,2}`)那行已註解,**`.so` 是刻意保留的回退用途,不要當殘留物刪掉**。
+4. **Vincent 那份文件的路徑與術語都過時**:假設 net-snmp 5.8 且 ies-auto-mibs 在
+   `net-snmp-5.8/agent/mibgroup/`(實際 5.9.3 且已移出);把 `127.0.0.1:80` 後端叫
+   "ISS (Internal Settings Server)" 且說是 "Flask-based"(實際是 nginx → Rust actix,
+   **與我方語彙的 ISS 是完全不同的元件**)。引用前必須正名。
+5. **`snmp` 相關指令一律加 `/usr/bin`**,否則會撞到 `~/.local/bin` 的 pysnmp 版。
+
+---
+
+## 五、不需要重做的事
+
+- 那 8 處 `LibUtil_ExecShCmd` 已完整盤點並分級(先前口頭說「9 處」有誤,已更正)。
+- ISS 的 `GetNextIndex` **有在用**;`SNMPRegisterMibWithLock` 不跟 snmpd 說話,
+  真正對 master 註冊的是 `SnxMainRegisterMibs()`。這條不用再查。
+- fiber check 的 SHM 機制與 deck 一致,只換消費端;config 側走 URI。已確認。
+- `libmoxaiesautomibs.so` 1.1MB 的原因:`.data` 佔 98%,因為 `mapping_reuse.c` `#include` 了
+  20 個 `net_*db.h`,而 `struct ies_auto_mibs_entry` 是 ~1.8KB 的定長欄位
+  (`name/uri/mod_uri` 各 320B、兩個 index 各 128B、`oid_list[128]`×4B=512B),
+  約 605 筆 → ~1.07MB,實際內容約占 5%。**改 struct 是跨 package 的破壞性改動,投報比不高**,
+  低垂果實是多數 entry 空著的 `mod_uri`/`mod_uri_index`(佔 ~27%)。
+
+---
+
+## 六、git 狀態
+
+八個 `snmp-plan-E` repo 於 2026-08-11 被另一 session force-push 改寫(只改 commit message、
+內容未變)。本 session 已唯讀確認**本地皆已在新 HEAD、零已追蹤變更**,無需 reset。
+`snmp-plan-E.opus` 備份分支存在。ADR-0026 引用的行號因內容未變**仍然有效**。

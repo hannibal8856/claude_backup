@@ -1,0 +1,101 @@
+# Clippy Scan 改造的邏輯線(口頭報告用)
+
+> 用途:口頭報告的論述骨架。每節都是「因為 X,所以 Y」的因果推進,照順序講即可。
+> 與 `session-clippy-by-application-scan-2026-06-15.md`(完整 session 紀錄)分開;本檔只談「為什麼這樣做」的邏輯。
+
+---
+
+## 一句話總結
+
+因為 NOS_v6.0_develop 把 rustc 釘在 1.85,crate 進版導致 clippy scan 失敗;根治的方法是 pin 住 Cargo.lock,但 lock 只能釘在 application 層級,所以我們把 clippy scan 從「by package」改成「by application」——再因為要讓 application 真的掃得到它依賴的 library(且帶對 feature),把 `cargo clippy` 換成 `clippy-driver`。
+
+---
+
+## 1. 問題:rustc 釘 1.85,crate 進版 → clippy scan 不過
+
+- NOS_v6.0_develop 的 toolchain **把 rustc 固定在 1.85**(出貨穩定性考量)。
+- Rust 生態的 crate 會持續進版,**新版本常要求 rustc ≥ 1.86 / 1.88**(如 icu_* 2.2、bytestring 1.5)。
+- clippy scan 會跑 cargo 解析依賴;**只要重新解析,cargo 預設挑「最新相容版」**,就會挑到需要新 rustc 的版本 → 在 1.85 下直接報 `rustc 1.85.0 is not supported`。
+- **關鍵:image build 是過的,只有 clippy scan 失敗**——因為 build 有既存產物/lock 護著,而 clippy scan 在某些目錄(尤其沒有 lock 的)會從零重新解析。
+
+這一節的重點是讓聽眾理解:失敗的根因不是程式碼有錯,而是「**沒有 lock 時 cargo 會自作主張挑新版**」。出處見 `~/WORK/clippy-scan-binary-packages/Cargo Clippy 在沒有 Cargo.lock 下的問題.pdf`。
+
+## 2. 第一層解法:pin 住 Cargo.lock(build 一遍 → 從 output/build 同步回 dl)
+
+- cargo 只要看到 Cargo.lock 就**照 lock 用、跳過重新解析**,MSRV 失敗就不會發生。
+- 作法:先正常 build 一遍,讓 cargo 在 `output/build/<pkg>-custom/` 產生「已驗證可在 1.85 編譯」的 Cargo.lock,再**同步回 `dl/`** 並 commit,把版本永久定格。
+- 這比另一個候選(在 Cargo.toml 加 `rust-version` + `.cargo/config.toml` 設 `incompatible-rust-versions = "fallback"`)更可靠——後者「MSRV-aware 解析」**不保證解得出**完整的 1.85 相容組合(實測 firmware_update 的 framework 最多只能退到 icu 2.1 / bytestring 1.5,仍超標),最後還是得靠 pin lock。
+
+**但這個解法有個天生的邊界(承上啟下的關鍵):lock 是「每個 cargo 專案一份」的東西。**
+
+## 3. 邊界:lock 只能釘在 application 層級 → 這正是「要 by-application」的理由
+
+- 一個 application package 有自己的、會 commit 的 Cargo.lock;pin 它就解決它。
+- 但 **library(尤其各 plugin 的 `framework/`)沒有自己 committed 的 lock**(常被 gitignore)。如果照舊「每個 package 各自掃」,library 單獨掃時手上沒有 lock → 還是會從零重新解析 → 還是會 MSRV 爆。
+- 要替每一個 library 都生並維護一份 lock,既零散又難維護(framework 的 lock 還是 gitignore 的)。
+- **轉念:如果不再讓 library 單獨掃,而是讓「依賴它的 application」去掃——application 那份 pin 好的 lock 就涵蓋了整張依賴圖(含所有 library)**,library 完全不需要自己的 lock,MSRV 問題對 library「免費」消失。
+
+所以「lock 只對 application 有效」不是缺點,而是**把 scan 改成 by-application 的直接動機**:讓 application 的 lock 一次罩住它底下所有 library。
+
+## 4. 第二個動機:feature —— 只有 by-application 才掃到「真正會出貨的程式碼」
+
+- library 的程式碼大量被 `#[cfg(feature = "…")]` 包住;**它實際被編進產品時的 feature,是由使用它的 application 決定的**。
+- library 自己單獨掃,用的是它自己的 default feature → 掃到的程式碼路徑**和真正出貨的不一致**(有些被關掉、有些沒被打開)。
+- 由 application 帶著**實際啟用的 `--features`** 去掃,才會掃到與出貨一致的程式碼。
+- 這點我們後來用實驗坐實了(見第 6 節的 interface_vlan):**掃描覆蓋是隨 feature/config 改變的**。
+
+結論:by-application 不只是為了讓 lock 生效,**本質上也比 by-package 更正確**(feature 對得上、覆蓋更貼近實際)。
+
+## 5. 技術難點:要 by-application,`cargo clippy` 做不到 → 改用 `clippy-driver`
+
+問題變成:怎麼讓「application 的一次掃描」真的去 **lint 它依賴的 library**?
+
+- **`cargo clippy` 不行**:它只把 clippy 套在 **workspace member** 上;依賴(尤其 path 依賴)是用普通 rustc 編的,不會被 lint。
+- **`cargo clippy -p <library>` 也不行**:對「非 member 的 path 依賴」它只印 `Checking`、實際跑的是普通 check,**clippy lint 根本沒執行**(我們用故意埋的 lint「canary」證實:`-p` 抓不到)。
+- **MXNOS 的結構讓 workspace 路線也不可行**:library 是散在各自 `…-custom` 目錄的 path 依賴、**不是 application 的 workspace member**;硬做 workspace(把 `output/build` 當共同 root)會「毒化」整棵樹——root 檔一存在,該目錄下所有其他 package 的 cargo 指令都會壞,和 buildroot「每包獨立、平行建置」直接衝突。
+
+**解法:`RUSTC_WRAPPER=clippy-driver cargo check`。**
+
+- `clippy-driver` 是 clippy 的**引擎本體**(相容 rustc 介面、把 clippy lint 掛進編譯);`cargo clippy` 只是調度器(本質 ≈ `cargo check` + 只對 member 套 driver)。
+- 用 `RUSTC_WRAPPER` 把 `clippy-driver` 套到**每一個** crate(application + 所有本地 library),lint 引擎就作用到 library 身上了。
+- crates.io 第三方依賴會被 cargo 自動加的 `--cap-lints allow` 靜音,**只有本地 library 的 lint 會浮現**——輸出乾淨、剛好就是我們想看的。
+
+一句話:**`clippy-driver` 是把 clippy 引擎裝到「每一台車(crate)」上,而 `cargo clippy` 只裝在自己那台。** 這就是「從 cargo clippy 改成 clippy-driver」的真正理由。
+
+## 6. 驗證:確實掃得到 library,且隨 feature 變動
+
+- **Canary 測試**:在 16 個 library 各埋一個會觸發 `clippy::needless_return` 的小函式,跑 application scan → **16/16 全部被對應的 application 掃出來**,歸屬完全符合依賴關係。
+- **Feature 連動的活教材**:`plugin_moxa_export_cli_submode_interface_vlan` 在 **L2 機種是 dummy(未編譯)→ 掃不到**;在 **L3 機種被啟用 → 就現形**。同一份程式碼、同一條 branch,只因 config 不同而覆蓋不同——證明「掃描覆蓋 = feature/config 決定的編譯範圍」。
+- **CI 端到端**:在正式 GitLab pipeline(rks-g4000-l3)的 summary report 同樣 16/16 命中,並另外揪出 23 個 package 共 108 筆**真實**既有 lint(如 `Err` variant 過大、`unexpected cfg`、`useless format!`)——證明這套機制不只是 demo,真的在抓問題。
+
+## 7. 收尾:範圍、守門、落地
+
+- **範圍收斂**:全 codebase 約 175 個 Rust repo,真正會產出執行檔的 **application 只有 22 個 crate(19 個 repo)**;只有它們保留 scan(套 `clippy-driver`),其餘 ~156 個 library 的自掃全部移除——因為它們已被 application 的 closure 涵蓋。
+- **守門(post-build.sh)**:application 一定要產出掃描結果(硬性 gate);沒被任何 application 引用的 library 只印一行提示、不擋 build(精神:**library 依附 application,沒被用到就不掃,不是錯**)。
+- **落地**:Cargo.lock 同步、`.mk` 清理、175 個 repo 的 issue + branch + MR 已全數建立並 merge 至 `NOS_v6.0_develop`。
+
+---
+
+## 附錄:邏輯一頁圖(報告時可當講稿)
+
+```
+rustc 釘 1.85
+   └─ crate 進版、重新解析 → 挑到需要新 rustc 的版本 → clippy scan 爆
+        └─ 解法:pin Cargo.lock(build 一遍 → output/build 同步回 dl)
+             └─ 但 lock 只在 application 層;library(framework)沒 lock,單獨掃還是爆
+                  └─ 所以:改成 by-application —— 讓 app 的 lock 罩住所有 library
+                       └─ 附帶好處:帶 app 實際 --features,掃到的才是真正出貨的程式碼
+                            └─ 難點:cargo clippy 只 lint member,-p 不 lint path 依賴,
+                               workspace 會毒化整棵樹
+                                 └─ 解法:RUSTC_WRAPPER=clippy-driver cargo check
+                                    (把 clippy 引擎套到每個 crate;第三方被 cap-lints 靜音)
+                                      └─ 驗證:canary 16/16、feature 連動(interface_vlan L2無/L3有)、
+                                         CI 端到端 + 揪出 108 筆真實 lint
+```
+
+## 附錄:可能被問到的問題與回答
+
+- **Q：為什麼不乾脆升 rustc?** A：出貨穩定性把 rustc 釘在 1.85 是前提,不在這次變動範圍。
+- **Q：clippy-driver 和 cargo clippy 結果會不一樣嗎?** A：同一顆引擎,同 crate/feature 下結果相同;差別只在「套到誰」——cargo clippy 只套 member,wrapper 套全部本地 crate。
+- **Q：library 不掃了,覆蓋會不會掉?** A：被任何 application 用到的 library 都被 closure 涵蓋;唯一沒人用的孤兒(rust_moxa_profiling)本就不需掃,post-build 只提示不擋。
+- **Q：feature 不同會不會漏掃?** A：會——這是正確行為(沒被編進去的程式碼不該掃);要全面覆蓋就用涵蓋該 feature 的 config(如 L3)再掃一次。

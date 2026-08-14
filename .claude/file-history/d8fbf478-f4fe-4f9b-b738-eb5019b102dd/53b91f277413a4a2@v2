@@ -1,0 +1,149 @@
+# Handoff — session `snmp-plan-E trace 2`(2026-08-12 ~ 08-13)
+
+接手者先讀這份。**本 session 全程唯讀:沒有 commit、沒有改動 `buildroot/dl` 任何原始碼、
+沒有碰過 DUT。** 產出只有分析、memory、與兩份 oracle 檔。
+
+前一手是 `snmp-plan-E-trace`(已結束),它的交接是
+`session-handoff-read-path-2026-08-12.md`。本檔接續它。
+
+---
+
+## 一、⚠️ 今天被推翻/撤回的東西 —— 先看這節
+
+引用舊結論前務必確認,今天有三件事翻盤:
+
+### 1. ADR-0025 的核心主張已被 ADR-0030 推翻
+
+**「`+getfwd` 對 `mxportdb/` 與 `stdethdb/` 靜默無效」不成立。**
+2026-08-12 由 `reopen 6` 用帶 trace 的 debug image + `tcpdump -i lo tcp port 705` 證實
+**四個前綴全部都會轉發**:五個 AgentX Get PDU (type 5) 送往 `ISS.exe`,
+`access_method` 五個都是同一指標值。
+
+**為什麼與 08-10 的量測不同,至今未決**,而且**兩條還原路徑都斷了**:
+
+- 舊判準無法還原:`fwdcheck*.sh` 不在版控、mtime 已是 08-12 13:20、無備份
+- 舊 pcap 不存在:`~/pcap/` 有 08-07/08-08/08-12 的 getfwd 擷取,**沒有 08-10 的**
+
+我做的考古排除了兩個候選:
+- **code 沒變**(`ies_auto_mibs.c` 最後改動 `69c535a` 08-09;08-09 後三個 commit 都只加
+  `fiberCheckEvent/` / mxMms / mxFiberCheck 的 entry,沒有一行落在四個前綴)
+- **不是「當時單獨開啟」**(ADR-0025 `:23-25` 自述用 bind mount 四條同時生效、N=150)
+- **不是 bind mount 熱套用失效**(`reopen 7` 實測 `T1 NOTE` 59↔101,拿掉/加回都對得上)
+
+**把現行判準套回 ADR-0025 記錄的原始數字,結論仍是 NOT SERVED** ——
+所以問題不在判準門檻,而在**封包計數本身**(DUR 不隨 N 縮放 / `cnt()` 重讀整份 pcap)。
+決定性未知數是**視窗的執行順序**,只存在於當時的原始 log 裡。
+
+> 若要用「現行判準跑已知會轉發的案例」來證實,**那個實驗只能證實不能否證** ——
+> 判為 SERVED 不能反推 ADR-0025 當時是對的,因為當時那個版本已不存在。
+
+### 2. 我提的 runtime 安全網(①)已撤回 —— 不要重提
+
+原提案:「`netsnmp_call_handlers()` 之後檢查 varbind 是不是 `noSuchObject`,是就 `return -1`
+退回本地」。**不可行:**
+
+- **AgentX 轉發是非同步的**(`ies_auto_mibs.c` 註解自承 async),那一行讀到的 varbind 尚未填值,
+  檢查恆為「看起來沒問題」→ 會做出假的安全網
+- **回應階段沒有掛鉤點**:填值在 net-snmp 的
+  `agent/mibgroup/agentx/master.c` `agentx_got_response()`(`:375-425`)完成並清 `delegated`,
+  **原本的 handler 不會被重新進入**,無 per-request callback
+
+**結論:安全網留在驗收階段**(`walkdiff.py` 的 `missing` 本來就進 exit code),
+不加 runtime 機制。**ISS 涵蓋篩檢仍是硬性前置**,只是執行點在驗收不在程式裡。
+
+### 3.「mxPort 多出 12 個 MIB 外欄位」已不存在
+
+那是 `PortConfigTid` `.603.1.1.1.1.1.7`(來自 `#ifdef TRACKING_WANTED`)。
+現況 `net_mxPortdb.h` 的 portConfigTable 只到 col 6,`TRACKING_WANTED` 全樹已無。
+`snmp outline CIC 3` 的文件已據此修正。
+
+---
+
+## 二、今天確立的事實(可以直接用)
+
+### `.mode` 會被 setup 覆寫 —— 但範圍可界定
+
+**只有 6 個檔、18 處,全部 RWRITE → RONLY 單一方向**
+(查法 `grep -n -- "->mode" ies_auto_mibs_setup*.c`):
+
+```
+stdladb 9 / stdpnadb 4 / stdot1db 2 / stdllddb 1 / mxQosdb 1 / ifmibdb 1
+```
+
+→ **靜態普查在扣掉這 6 個檔之後可信,可以做事前篩選。**
+修正後的 RO 數:`ifmibdb/` 40→**41**、`mxqosdb/` 0→**1**、`stdladb/` 42→**51**、
+`stdllddb/` 39→**40**、`stdot1db/` 10→**12**、`stdpnadb/` 59→**63**。
+
+**這解掉了一個懸案**:`reopen 6` 實測 `ifmibdb/` probe = 41、靜態算 40,差 1 就是
+`setup_net_ifmibdb.c:162`。其餘三個(`stdethdb/` 33、`mxportdb/` 9、`mxrstpdb/` 18)
+靜態與實測完全相同 —— **靜態模型現在是可驗證正確,不只是大致可信。**
+
+### index 欄的 MAX-ACCESS **每支 MIB 不同,不可推論**
+
+| MIB | index 欄 | walk 裡出現代表 |
+|---|---|---|
+| `mxPort.mib` | `read-only` | 正確,缺了才是缺陷(ADR-0012 的說法正當)|
+| `mxQos.mib` | `not-accessible` | **surplus 且違規** |
+
+`GenerateTableIndexEntry()` 把合成的 col 1 一律註冊成 `HANDLER_CAN_RONLY`
+(`moxa_snmp_handle_util.c:166-168`)—— **同一條機制,對 read-only 的表是補漏,
+對 not-accessible 的表是違規洩漏。**
+
+### ISS 的 AgentX 註冊是「root 區段」不是單一 OID
+
+`snxmain.c:870` `SnxMainRegisterMibs()` 走訪 `gpMibReg`(由各模組
+`SNMPRegisterMibWithLock()` 填),逐 MIB 送 root 的 Register PDU,
+`~SNX_INSTANCE_REGISTRATION` = 整個 subtree。
+
+→ 「`SNMPRegisterMibWithLock` 跟 AgentX 無關」**只對一半**,正確講法是
+**「登記與註冊分離」**:前者建表,後者在 `snxmain.c:509` 啟動時整批送出。
+→ 所以 probe 不必是「被委派的 RO 欄」,ISS root 也可以。**而 probe 推導已進版控**
+(`3rdparty_net_snmp` `5061248` / `6935e36` `+nodelegate`),**不要寫 `probe=`**,
+推導會自己往上一層找到。
+
+---
+
+## 三、產出的檔案
+
+```
+~/mxqosdb-oracle-2026-08-13.txt            70 行  mxqosdb/ 參考 oracle
+~/mxqosdb-oracle-walkdiff-2026-08-13.txt   40 行  walkdiff 可解析(29 行資料)
+~/WORK/SNMP_50ms/iss_build_1.txt          1391 行  iss_build == 1
+~/WORK/SNMP_50ms/iss_build_0.txt           745 行  iss_build == 0(已重產,與 _1 同源)
+```
+
+oracle 的判準:**完整性一律用 OID 比,名字只當標籤** ——
+`qosConfigQueueWeight1..8` 對應 MIB 的 `qosConfigQueue1Weight..8Weight`,
+數字位置不同,**用名字比會誤判成 8 欄消失,而 mxQos 的真實故障也是欄位消失。**
+
+---
+
+## 四、未收尾的事
+
+1. **`stdrmodb/` 的 B/C 分類**(未委派裡最大,167 筆)。先前分類列 B「最推薦的下一批」,
+   我算出是 C(10 個表是「col 1 RO 委派 + col 2 RW」形狀)。**有了 `.mode` 覆寫模型後應重算**
+   —— `stdrmodb/` 不在那 6 個檔裡,所以我的數字應該仍成立,但值得覆核。
+2. **ADR-0030 的未決題**(見第一節)。很可能永遠停在未決。
+3. **11 個 0-RO 前綴**(扣掉 `mxqosdb/` 後剩 10 個)—— 它們連 RO 委派都沒東西可做,
+   加進 list 沒有意義,除非有其他理由。
+
+---
+
+## 五、跨 session 現況(2026-08-13)
+
+- **DUT 由 `snmp-plan-E reopen 7` 獨佔** —— 任何人要碰(含唯讀)都要先向它要。
+  現況 p1 = `2026_0812_2057`(含 trace),p2 = mainline `2026_0805_2335` 對照組不可覆蓋。
+- `snmp outline CIC 3` 持有 Confluence 文件,今天已修兩處(12 個欄位、37 秒 → 30.95 秒)。
+- ADR-0026 已 commit(`cfa8e25`),**維護權在本條線**(作者是已結束的 `snmp-plan-E-trace`)。
+
+## 六、陷阱(今天實地踩到或驗證的)
+
+1. **`rtk` hook 會截斷 `grep > file`** —— 產檔用 `python3` 或 `rtk proxy`,產完對帳行數。
+2. **`.swu` 有兩個位置**:`output/images/`(`make` 會刪)與 `~/swu/`(備份),查副本兩邊都要查。
+3. **建置順序**:用 `~/mds4xgl3/rebuild_snmp_plan_e.sh`,別手打。排序需求來自 cargo 的
+   `path` 依賴(25 條)不是 workspace member 身分。
+4. **`/etc/os-release` 的 `VERSION` 不能判斷機種或 image** —— MDS 樹帶著過時的
+   `EDS-G4100_...` 字串。DTS 才是機種證據。
+5. **moxash `snmp-ser acc en` 有 `[y/N]`**,用管線餵會卡住並把 SNMP 留在停用狀態。
+6. **產檔與 mount 不可同一條指令** —— 重導向失敗但 mount 照做,會掛上空檔案。
+7. **memory 要讀 body 不要只讀索引行** —— 今天有兩次因此多繞路。

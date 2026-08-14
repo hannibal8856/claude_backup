@@ -1,0 +1,116 @@
+# ADR-0020: 把 `mxMms` 從 dlmod 搬到 framework subagent —— dlmod 這條路的第一個案例
+
+Status:
+  **Accepted(2026-08-09)** —— 已建置、燒錄 `2026_0809_1751` 到 partition 1 並驗收通過。
+  建立 dlmod → framework 的搬遷樣板;下一個目標 `mxFiberCheck`(使用者指定)。
+
+Date: 2026-08-09
+
+Context:
+  ADR-0001~0019 只處理三條服務路徑:in-master、ISS AgentX 委派、framework subagent。
+  **dlmod 是第四條,而且從沒被碰過。**
+
+  盤點(以執行中 snmpd 的 `dlmod` 行為權威依據,`/moxa/run/snmp/snmpd.conf` 有 0 行,
+  所以 `/etc/moxa/netsnmp/config/` 的 **35 個**就是完整集合):
+
+  | 資料來源 | 數量 |
+  |---|---|
+  | 純 framework URI | **34** |
+  | 混合(framework + ISS) | 2(`ieee8021mstp`、`moxa_goose_check`) |
+  | 純 ISS | 1(`multicast_routing`) |
+
+  ⚠️ **判別依據只能看 `dlmod` 行。** 「repo 底下有沒有 `snmp/` 資料夾」會**雙向假陽性**:
+  `plugin_moxa_system_information` 用的是 `snmp_config/` + `snmp_status/`(會漏掉);
+  而 `plugin_moxa_email` / `plugin_moxa_trusted_access` / `plugin_moxa_arp_table`
+  **有** `snmp/` 卻不是 dlmod —— 前兩者早就在 `g_reuse_srcs[]` 裡(已搬到 framework),
+  列進待搬清單會重複工。
+
+  選 `mxMms` 當第一個,理由是**驗收無歧義**:4 個 scalar、0 個表、0 個 ISS 依賴,
+  而且 **walk 的欄位數與 `mxMms.mib` 定義的可存取物件數 1:1 完全吻合**(4 = 4)。
+  對照之下,其他候選不是表空著(`mxDhcpSnp` −19、`mxPoe` −15)就是欄位數對不上。
+
+Decision:
+  搬遷由**三個檔**構成,外加一個「退出機制」的新發現。
+
+  **① 新增 `3rdparty_net_snmp/ies-auto-mibs/net_mxMms.h`**
+
+  4 個 entry,從 `plugin_moxa_mms/snmp/plugin_snmp_mms_setting.c` 逐條抄出。
+  `.uri` 用**相對路徑**(`mxmms/globalEnable` 等),因為 framework 的 config 層會補上
+  `/api/v1/setting/data/`(`lib_moxa_ies_auto_mibs/src/config_set.c:89`)——
+  與 plugin 硬寫的 `/api/v1/setting/data/mxmms/<field>` 完全一致,
+  所以**不需要 `mod_uri` setup**。
+
+  **② `lib_moxa_ies_auto_mibs/src/mapping_reuse.c`**:加 include 與
+  `REUSE_SRC(mx_Mms_MibEntry, NULL)`。該檔帶 `-Wall -Werror`,編譯通過。
+
+  **③ `plugin_moxa_mms/snmp/document/mms_setting.conf`**:註解掉 `dlmod` 行。
+  `.so` 仍然照建照裝,只是不再被載入。
+
+  **④ dlmod 的「退出」機制 —— 本 ADR 最可複用的發現**
+
+  DUT 實測(bind mount 遮蓋該 `.conf`、重啟 snmpd):註解掉 dlmod 行之後,
+  `.1.3.6.1.4.1.8691.602.1.8` 的 walk 與 exact GET **都回 `No Such Object`**,
+  且其他 group 不受影響。
+
+  → **dlmod 移除後沒有任何競爭者,所以不存在優先權競賽。** 這與 in-master 那條路
+  截然不同(ADR-0003 的 trustAccess 靠 priority 127 vs 200 分流 GET/SET),
+  也**比 in-master 乾淨**:只改設定檔、不動 C 碼。
+
+Consequences:
+  **驗收結果(image `2026_0809_1751`,partition 1)**
+
+  搬遷後 walk 輸出與搬遷前**逐字元完全相同**:
+
+  ```
+  .1.3.6.1.4.1.8691.602.1.8.1.1.0 = INTEGER: 2
+  .1.3.6.1.4.1.8691.602.1.8.1.2.0 = STRING: "MDSG4012L34XGST"
+  .1.3.6.1.4.1.8691.602.1.8.1.3.0 = INTEGER: 2
+  .1.3.6.1.4.1.8691.602.1.8.1.4.0 = INTEGER: 2
+  ```
+
+  **確實改由 framework 服務的實據**(依既有教訓「回得到值 ≠ 走該路徑」):
+  `plugin_snmp_mms_setting.so` 在 snmpd 的 `/proc/<pid>/maps` 中是 **0 筆**,
+  而其他 dlmod plugin 仍在(poe 4、mxlp 8、fiber_check 8,全體 136 筆映射)。
+  值回得來但 .so 沒載入 → 只可能是 framework。
+
+  **零回歸**(對搬遷前基準):
+
+  | group | 前 | 後 | vb |
+  |---|---|---|---|
+  | mxMms | 0.056s | 0.039s | 4 = 4 |
+  | evtPort | 1.379s | 1.325s | 282 |
+  | stdvladb | 0.691s | 0.668s | 159 |
+  | mxRstp | 0.658s | 0.632s | 227 |
+  | mxLp | 0.954s | 0.909s | 82 |
+  | mxPoe | 1.956s | 1.896s | 236 |
+  | mxFiberCheck | 1.874s | 1.898s | 240 |
+
+  **效能不是這次的目的**:mxMms 只有 4 個 varbind,0.056→0.039s 落在雜訊內。
+  這一輪買到的是**樣板與退出機制的確認**。
+
+  **主動回報:MIB 與實作不一致(既有,非本次造成)**
+
+  `mxMms.mib` 4 個物件全宣告 `read-only`,但
+  `lib_moxa_snmp_plugin/src/handler/scalar.c:126` **無條件**用 `HANDLER_CAN_RWRITE`
+  註冊每一個 dlmod scalar,不看 MIB。**這影響全部 35 個 dlmod 模組,不是 mxMms 特例。**
+
+  本次**刻意沿用 `HANDLER_CAN_RWRITE`**,讓這一輪維持是單純搬遷、不夾帶行為變更。
+  依 ADR-0010(MIB 為權威)這應改成 RONLY,但那是獨立一輪、獨立決策。**尚未處理。**
+
+  **下一個目標:`mxFiberCheck`**(使用者 2026-08-09 指定)。
+  它比 mxMms 難一個級距:21 個 URI、**17 個帶 `%d` 的表列**,
+  且 walk 20 欄 vs MIB 22 個可存取物件(差 −2,推測是空表)。
+  → 會第一次踩到 dlmod 的**表**搬遷,scalar 樣板不夠用。
+
+Constraints / Assumptions:
+  - 盤點數字(35)**隨產品不同**;EDS 等其他產品線要重新盤點。
+  - 「純 framework / 純 ISS」的分類是 binary 層面做的:
+    `strings $so | grep -cE '^/api/v1/'` 與 `nm -D --undefined-only $so | grep -ciE 'IssTable|_iss_'`。
+    這比讀原始碼目錄可靠,因為目錄命名不一致。
+  - 欄位數比對用「砍掉 OID 最後一個數字段」求相異前綴,
+    **對多段 index 的表會高估欄位數** —— PTP 家族那幾個 `+4/+5` 很可能是這個方法的假象,
+    尚未逐一查證,不得當成「多註冊」的結論。
+
+Related ADRs:
+  ADR-0010(MIB 為權威)、ADR-0003(in-master 的 priority 分流,與本路徑對比)、
+  ADR-0017(完整性以 MIB 物件集合判定)、ADR-0019(gate 1 判準)。

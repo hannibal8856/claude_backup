@@ -1,0 +1,39 @@
+#!/usr/bin/expect -f
+# Restart the SNMP server the supported way, through the moxash CLI:
+#   configure / snmp-ser acc dis / snmp-ser acc en / exit / exit
+# ssh lands in a Linux shell, so moxash is started from there (it needs a tty,
+# which a pipe does not give it).
+set timeout 90
+log_user 1
+set host 192.168.127.253
+
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no admin@$host
+expect -re {[Pp]assword:} { send "moxa\r" }
+expect -re {\$ $}
+
+send "moxash\r"
+expect {
+    -re {moxa[^\r\n]*# $}  { }
+    -re {moxa[^\r\n]*> $}  { send "enable\r"; expect -re {moxa[^\r\n]*# $} }
+    timeout { puts "\n***TIMEOUT waiting for moxash prompt"; exit 1 }
+}
+
+send "configure\r"
+expect {
+    -re {\(config\)# $} { }
+    timeout { puts "\n***TIMEOUT entering config mode"; exit 1 }
+}
+
+send "snmp-ser acc dis\r"
+expect -re {\(config\)# $}
+send "snmp-ser acc en\r"
+expect -re {\(config\)# $}
+
+send "exit\r"
+expect -re {moxa[^\r\n]*# $}
+send "exit\r"
+expect -re {\$ $}
+send "exit\r"
+expect eof
+puts "\n***MOXASH_RESTART_DONE"

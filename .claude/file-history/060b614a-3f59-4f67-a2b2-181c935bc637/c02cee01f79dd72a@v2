@@ -1,0 +1,181 @@
+# SNMP GET 效能優化 —— 導入 AgentX
+
+> 狀態:草稿 v1 | 最後更新:2026-08-07
+
+---
+
+## 問題
+
+### 1. SNMP 讀取效能不足,最壞情況出現秒級延遲
+
+一般查詢已經超出驗收標準,而特定 MIB 的整表讀取會惡化到**秒**的等級,足以讓 NMS 逾時放棄。
+
+| 情境 | 實測 | 對照 |
+|---|---|---|
+| 一般 GET(13 個 mxPort OID) | p50 **264.4 ms**、p100 **301.1 ms** | 目標 50 ms,超標約 5～6 倍 |
+| mxTurboRingV2 整表 walk | **逾 10 秒** | SNMP client 反覆 1 秒逾時重送 |
+| 跨未註冊區間的 GETNEXT | **3.915 秒** | 同一批 OID 的 GET 僅 0.011–0.017 秒 |
+
+值得注意的是**最後一列**:讀值本身不慢(11–17 ms),慢的是 **GETNEXT 的定址**。單次 walk 逾 10 秒的成因,是 client 逾時重送導致三個 transaction 並發競爭,把原本約 2 秒的成本放大到 3.9 秒以上。
+
+> 這也是本案的一個教訓:早期曾把病因歸給讀值路徑,方向錯了兩輪,直到 2026-07-29 以實測區分 `snmpget` 與 `snmpgetnext` 才定位正確。
+
+### 2. 讀取路徑分歧,維護成本高於功能本身
+
+同一個 SNMP GET 目前可能走**四條完全不同的路徑**,由 MIB entry 上的旗標決定,而非由統一的架構決定。
+
+| 路徑 | 判定條件 | 實際做的事 |
+|---|---|---|
+| 1. in-process | 有 GET handler | ies-auto-mibs 直接計算 |
+| 2. ISS value file | `iss_build == 1` | 呼叫 `ies_uri_handle_client`,把 ISS 內部變數具象化成檔案再讀回 |
+| 3. framework URI | `iss_build == 0` | 經 nginx → actix-web → config/status layer |
+| 4. dlmod | 動態載入模組 | 另一份 `lib_moxa_framework_uri` 呼叫 |
+
+造成的具體負擔:
+
+- **行為不一致**:同一顆 OID 的延遲與正確性取決於它落在哪條路,問題無法用單一手段收斂。約 **2,134** 個 entry 走路徑 2、約 **646** 個走路徑 3。
+- **GETNEXT 是自行實作的**:table column 採裸註冊,沒有掛任何 net-snmp table helper,因此走訪邏輯、快取、跨表跳轉全部得自己維護。
+- **快取結構受限**:表格快照只有單一全域 slot,同時只能快取一張表,200 ms 未存取即失效,交錯查詢多張表時等於每次重讀。
+- **慢路徑被寫進註解當成已知現象**:RW 欄的 GET 走本地 value-file 路徑約 **600 ms**,並會連帶拖慢整張表的 walk。
+
+<!-- 候選的第三點(待你決定要不要放):
+     「效能問題的根因過去曾被誤判,缺乏可重複的量測方法」
+     —— 這點偏流程面,放進「問題」會稀釋前兩點的力道,
+        建議改放 Maintenance 或當作 Appendix D 的註腳。 -->
+
+---
+
+## 先講結果
+
+<!-- Before → After,一律附 %。這頁是主管唯一一定會看的一頁 -->
+
+| 指標 | Before | After | 改善 |
+|---|---|---|---|
+|  |  |  |  |
+|  |  |  |  |
+
+> **已有素材**:p50 264.4 → 13.4 ms(−94.9%)/ p95 −93.3% / p100 301.1 → 48.8 ms(−83.8%)/ GETNEXT −99.4%
+> **待討論**:要不要放無改善的案例(mx_device_io)?放哪裡?
+
+---
+
+## 目標與限制
+
+### 目標
+
+- 
+- 
+- 
+
+### 限制
+
+- 
+- 
+
+> **已有素材**:GET p100 < 50 ms(北交控)/ 統一架構 / 相容 framework / ISS 不可改 / wire 行為不可變
+
+---
+
+## 方案與取捨
+
+<!-- 一段話講「為什麼是這個」,比較表推到 Appendix A -->
+
+> **已有素材**:SNMP Proxy vs 專用 socket vs AgentX;AgentX 下再分 Plan C / D / E
+
+---
+
+## Original Architecture
+
+<!-- 主要用圖。關鍵點才貼程式碼(show muscle)。不強調過去缺點 -->
+
+### 四條路(圖)
+
+```
+[ 圖待放 —— 素材庫已有 ASCII 版 ]
+```
+
+### 關鍵點(程式碼)
+
+> **已有素材**:各路徑進入點 file:line 已查妥 / GETNEXT 裸註冊那段程式碼
+
+---
+
+## Enhanced Architecture
+
+### 架構圖
+
+```
+[ 圖待放 —— 素材庫已有 ASCII 版 ]
+```
+
+### 機制一:agentx_owned.list(零程式碼委派)
+
+### 機制二:framework 自建 subagent
+
+### Functional check
+
+> **已有素材**:`mox_snmp_entry_is_agentx_owned()` 程式碼 / missing=0 surplus=0 / ISS 1391 OID 未受干擾
+
+---
+
+## Comparison
+
+### Code Size
+
+### Performance
+
+### Maintenance
+
+> **已有素材**:既有 81,407 行 C vs 新增約 2,820 行 / 三個委派案例的 +228 / +26 / −12
+> **待補**:binary 尺寸(flash 佔用)
+
+---
+
+### FAQ
+
+#### Why not SNMP Proxy?
+
+> **已有素材**:net-snmp 5.9.3 `master.c:475-477` GETBULK 退化成 GETNEXT,round-trip 數與 proxy 相同;AgentX 的優勢在 transport(2–3x)不在 bulk
+
+---
+
+## Test
+
+### Functional Test
+
+### Stress Test
+
+> **已有素材**:Functional 的五步驟方法論、四個通過案例、兩個否決案例
+> **待補**:Stress Test 完全沒有資料
+
+---
+
+## Maintenance
+
+> **已有素材**:拆表→第 1 欄消失 / AgentX ping 同步阻塞(interval 30s)/ 快取單一 slot / 候選篩選改以 walk 耗時為首要條件
+
+---
+
+## Next
+
+- 
+- 
+- 
+
+> **已有素材**:未解的 10 秒 stall / 35 支候選重新排序 / Phase 4 試點需重選 / plugin_moxa_io 快取 / AgentX round-trip 107 ms
+
+---
+
+## Appendix
+
+### Appendix A —— 方案比較表
+
+### Appendix B —— OID 與四條路的對應
+
+> **待補**:目前只有總數(iss1 約 2,134 / iss0 約 646),缺逐 MIB 明細
+
+### Appendix C —— 量測方法
+
+### Appendix D —— ADR 索引
+
+### Appendix E —— 圖的 Mermaid 原始碼(可選)

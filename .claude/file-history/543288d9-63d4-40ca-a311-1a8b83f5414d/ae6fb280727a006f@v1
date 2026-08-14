@@ -1,0 +1,274 @@
+# mxQos 手動測試總結 — 2026-08-13
+
+量測者:`snmp-plan-E reopen 7`。DUT = MDS-G4012-L3-4XGS-T @ 192.168.127.253。
+封包分析(第 6 節)由 `snmp-plan-E trace 3` 提供。
+
+---
+
+## 0. 一頁結論
+
+| 問題 | 答案 | 強度 |
+|---|---|---|
+| `+getfwd +nodelegate` 會轉發嗎? | **會**,201 個 GetNext PDU | 封包證實 |
+| 轉發比較快嗎? | **不會,慢 14.0%** | 交錯 A/B/A,雙對照有效 |
+| 委派會掉欄位嗎? | **不會**,兩臂都是 434 varbinds | 逐表比對 |
+| 所以要搬嗎? | **不搬** | — |
+| mainline 有 mxQos 嗎? | **有**,`.1.4`–`.1.7` 正常,`.1.1`/`.1.2`/`.1.3` 回 badValue | 封包證實 |
+| Plan E 改善了什麼? | **修好 `.1.1` 與 `.1.2`**;`.1.3` 兩側都還壞 | 封包證實 |
+| 客戶 walk 得到完整資料嗎? | **不行,只拿得到 17%** | 實測 |
+
+**最重要的一項不是效能,是第 5 節的 GETNEXT 缺陷。**
+
+---
+
+## 1. 受測對象
+
+```
+image        FWR_MDS-G4000-L3-4XGS_v7.0_2026_0813_0905.swu   (p1)
+對照         mainline 2026_0805_2335                          (p2,全程未覆蓋)
+MIB          mxQos,.1.3.6.1.4.1.8691.603.2.9,七張表 29 個可存取欄位
+```
+
+這是**第一顆可用於計時的 image** —— `2026_0812_*` 那批都帶 GETFWD trace
+instrumentation(`LibUtil_CheckDbgFlgBits()` 每次呼叫都跑一輪 `ftok`+`shmget`+`shmat`,
+且 `T4 GATE` 在每個 RW GET 的路徑上),連把 runtime 旗標關掉都躲不掉。
+本輪先把 trace 收進編譯期開關(預設關),實查出貨 `.so` 內 `GETFWD` 字串為 **0** 後才開始量。
+
+## 2. A/B 的設計
+
+**同一顆 image,只切換 `/etc/moxa/netsnmp/agentx_owned.list` 的一行**(bind mount)
++ 依支援路徑(moxash `snmp-ser acc dis` / `en`)重啟 snmpd。兩臂之間除了那一行以外
+**位元組完全相同**。
+
+```
+A 臂   list 中沒有 mxqosdb/            → mxQos 全部由 in-master 服務
+B 臂   mxqosdb/  +getfwd  +nodelegate   → GET 轉發給 ISS AgentX subagent(出貨形態)
+```
+
+沒有採用「建兩顆 image」的做法:跨 image 比較會把中間所有無關的重編都算進差異。
+
+## 3. 效能:轉發慢 14.0%
+
+七張表**逐表** walk(不能用整棵 walk,見第 5 節),每表 7 次取中位數,交錯 B→A→B→A:
+
+```
+A1 1.4033s    A2 1.4117s     A↔A 重複性 0.008s
+B1 1.6144s    B2 1.5960s     B↔B 重複性 0.018s
+Δ = +0.197s (+14.0%)         雜訊的 11–25 倍
+```
+
+逐表(A → B):
+
+| 表 | varbinds | A(in-master) | B(轉發) | Δ |
+|---|---|---|---|---|
+| `.1.1` DscpMapping | 64 | 0.182 | 0.183 | +0.8% |
+| `.1.2` CoSMapping | 9/10 | 0.053 | 0.040 | 不可比(見下) |
+| `.1.3` DefaultPriority | 1 | 0.015 | 0.014 | ~0 |
+| `.1.4` PbitPreference | 24 | 0.178 | 0.186 | +4.6% |
+| `.1.5` Meter | 180 | **0.537** | **0.654** | **+21.8%** |
+| `.1.6` Scheduler | 120 | **0.356** | **0.424** | **+19.0%** |
+| `.1.7` Shaper | 36 | 0.087 | 0.102 | +18.0% |
+
+`.1.2` 兩臂的 varbind 數不同(A 10 / B 9)—— **委派狀態會改變 NULL 的落點**,
+只能比有實際值的行(兩臂都是 8 筆,CoS 0–7 完整)。
+
+### 反直覺之處
+
+in-master 走 `ies_uri_handle_client` → LibFrameworkUri,而後者 `_isConnectionAlive()`
+硬編回 0,**每個請求重建一次 TCP 連線**;AgentX 相反,開機建一次、之後常駐。
+**結構上 in-master 該比較慢,實測卻快 14%。**
+
+→ **ISS 端回答一個 varbind 的成本,超過「本地建連 + 讀取」的總和。**
+mxQos 的 in-master 單價是 **2.98 ms/varbind**,已經快到 ISS 蓋不過去。
+
+→ 通則:**委派的收益取決於本地讀取有多慢,不取決於 AgentX 有多快。**
+篩選候選群組應先量 in-master 的 ms/varbind 並排序,只對慢的做完整 A/B;
+「本地夠快」本身就是不委派的充分理由。
+
+## 4. 完整性:兩臂相同,委派沒有掉東西
+
+逐表 varbinds / 欄位數,對 `reopen 6` 的基線:
+
+```
+        基線(熱套用)   本輪(出貨 image)
+.1.1      64 / 1           64 / 1     ✓
+.1.2      10 / 2            9 / 1     ← NULL 落點差異,實際值 8 筆兩臂相同
+.1.3       1 / 1            1 / 1     ✓
+.1.4      24 / 2           24 / 2     ✓
+.1.5     180 / 15         180 / 15    ✓  ← +nodelegate 生效的關鍵指標
+.1.6     120 / 10         120 / 10    ✓
+.1.7      36 / 3           36 / 3     ✓
+```
+
+`.1.5` 回到 **180/15** 證明 `+nodelegate` 在出貨形態下保住了那個唯一實際 RO 的欄位
+(`qosConfigMeterColorModeType` `.1.5.1.2`);沒有它,該欄會被交給不服務它的 ISS,
+整欄消失(180→168 varbind、15→14 欄)。
+
+gate(`~/mxqos_check.py`,比 OID 不比名字)的兩個永久例外:
+
+- `missing .1.3.1.2` —— 被第 5 節的缺陷擋住,**欄位實際存在**(`snmpget .603.2.9.1.3.1.2.1` 回 `INTEGER: 3`)
+- `surplus` 4 個 not-accessible index 欄(`.1.4.1.1` `.1.5.1.1` `.1.6.1.1` `.1.7.1.1`)——
+  `GenerateTableIndexEntry()` 的既有 MIB 違規,基線也有
+
+⚠️ **完整性一律比 OID 不比名字**:8 欄在 MIB 與 ies-auto-mibs 的拼法不同
+(`qosConfigQueueWeight1` vs `qosConfigQueue1Weight`),用名字比會假報 8 欄消失 ——
+而那個假象與真故障長得一模一樣。
+
+## 5. 🔴 最重要的發現:整棵 mxQos 走不完,只回得出 17%
+
+GETNEXT 在兩個邊界回傳「請求的 OID 自己」:
+
+```
+GETNEXT .603.2.9.1.3        → .603.2.9.1.3 = NULL      (應為 .603.2.9.1.3.1.2.1)
+GETNEXT .603.2.9.1.2.1.2.7  → .603.2.9.1.2.1.2.7       (應跨到 .1.3)
+```
+
+任何標準 walk 在 `.1.2` 就以 `Error: OID not increasing` 中止,
+**只拿到 434 個 varbind 中的 73 個(17%)**。逐表 walk 才完整。
+
+**欄位本身存在** —— `snmpget .603.2.9.1.3.1.2.1` 回 `INTEGER: 3`,
+`snmpgetnext .603.2.9.1.3.1.2` 也正確回下一筆。是 walk 走不到,不是沒實作。
+
+`snmpwalk -Cc`(忽略不遞增)**不能繞** —— 會無限重送同一個 OID,實測 180 秒未停。
+
+**客戶用一般網管軟體對 `.603.2.9` 做標準 walk,看到的就是 17%。**
+修這個的價值(17% → 100%)大於整輪效能討論。
+
+### 根因分析(`trace 3`,靜態 + 封包)
+
+整個 mxQos **沒有使用 net-snmp 的 table helper / table_iterator**,每個欄位各自以欄層 OID
+註冊,所以**所有跨欄跨表的邊界都落在 `ies_auto_mibs.c:1834-1879` 的
+`entry_handle_exception()` 這一個手寫函式上**。三個可證缺陷:
+
+- **(a) 錨點不一致**(最可能的直接成因):`netsnmp_subtree_find_prev()` 用 `req_oid` 定位,
+  但後續 skip 迴圈用 `reginfo->rootoid` 當門檻。當 req_oid 小於當前 registration 的 root,
+  迴圈會把自己這個 registration 的 instance 整段跳過。**修法是把門檻改成 `req_oid`。**
+  這解釋了 GET 查得到、walk 走不到的不對稱(`snmpget` 走 CURR 分支不經過此函式)。
+- **(b) `name_a` vs `start_a`**(已由封包證實):`:1868` 把 `next_subtree->name_a` 直接回傳,
+  而 `find_prev()` 是照 `start_a` 排序走訪的。實例:`GETNEXT .1.1.1.1 → .1.2.1.3`,
+  而 `.603.2.9.1.2.1.3` **在 `net_mxQosdb.h` 裡不存在** —— 那是 net-snmp 的 range 結束哨兵,
+  被當成真 OID 交了出去。
+- **(c) `MIB_HANDLER_AUTO_NEXT_OVERRIDE_ONCE` 是黏的**(`:1869`,**未證實**):
+  旗標設在別人的 handler 上,若未被消費會永久殘留、污染後續每個請求。
+  這解釋得了「walk 一旦壞掉就整段壞下去」的形狀。
+
+**已排除**:不是 net-snmp 放棄。`tp == NULL` 的 GETNEXT 會回 `SNMP_ENDOFMIBVIEW`
+(`snmp_agent.c:2361-2371`),不是「OID 回自己 + NULL」。
+
+## 6. mainline 對照 — ⚠️ 初稿結論已更正
+
+**初稿寫「mainline 完全沒有 mxQos」,那是錯的,已更正。**
+
+誤讀的來源:
+
+```
+mainline p2   snmpwalk .1.3.6.1.4.1.8691.603.2.9
+  Error in packet. Reason: (badValue) ...              ← 這行才是 agent 的回應
+  .603.2.9 = No Such Object available on this agent    ← snmpwalk 請求失敗後自己補印的
+```
+
+沒有註冊的話 net-snmp 會回 `endOfMibView`,**不會回 `badValue`**;`badValue` 是
+`ies_auto_mibs.c:1822` 的 fall-through,代表**有註冊、請求進到了 handler、handler 自己回錯**。
+我沒看到 `.1.4`–`.1.7`,是因為 **walk 在第一個請求就中止,根本沒走到那裡**。
+
+`trace 3` 以 MIB browser table view 的封包給出正確狀態:
+
+```
+mainline    .1.1 .1.2 .1.3  全部 badValue(OID 原樣退回)     .1.4–.1.7  正常
+Plan E      .1.1 .1.2 已修好                .1.3 仍 badValue  .1.4–.1.7  正常
+                                            (0.014s 立即失敗,非逾時)
+```
+
+**→ 正確敘述:mxQos 不是 Plan E 新增的覆蓋,而是 Plan E 修好了 mainline 上壞掉的兩張表。**
+仍是正面事實,但性質不同(修復 > 新增),而且兩側都有封包、更容易被查證。
+
+### table view 的另一個形狀(待進一步分析)
+
+`trace 3` 量到 table view 操作 mainline → Plan E 快 31%,**但差異 94% 集中在頭尾兩個請求**,
+中段 57 個請求兩邊相同(322ms vs 301ms,雜訊):
+
+```
+Scheduler  mainline: 130.9  7.6 7.6 7.7 7.7 7.6 7.6 8.0 8.5 8.7 8.7 8.1   86.5
+           Plan E  :  72.1  7.4 7.3 7.3 7.2 7.2 7.7 7.3 8.3 8.2 8.1 8.4   48.4
+```
+
+⚠️ 那個 −31% 是**單次量測、未交錯**,`trace 3` 自己聲明不可引用。
+但「差異只在頭尾、中段相同」是單一 capture 內部的形狀,不受跨 capture 漂移影響,結論是穩的。
+
+**已指派 `trace 3` 追查**:這個頭尾成本是不是 `ies_uri_handle_client` 把整張表
+**具象化到 tmpfs**(與 ifTable 相同的機制)。若成立且成本是 per-table、會失效,
+**真實使用者的體感將由它主導,而不是由本文第 3 節那 14%**。
+
+## 7. 證據
+
+```
+~/pcap/2026-08-13-mxqos-armA-not-listed-2026_0813_0905.pcap          1.6 KB   2 GetNext(邊界)
+~/pcap/2026-08-13-mxqos-armB-getfwd-nodelegate-2026_0813_0905.pcap   70  KB   201 GetNext / 608 次 OID 位元組
+                                        (各附 .tcpdump.log,含有效性中繼資料)
+~/mxqos-walk-B-pertable-2026_0813_0905.txt      逐表 walk 原始輸出(434 varbinds)
+~/mxqos_check.py  +  ~/mxqosdb-oracle-*-2026-08-13.txt               完整性 gate 與 oracle
+~/mds4xgl3/.adr/ADR-0032-*.md                                        決策紀錄
+```
+
+**兩張 pcap 差 44 倍**,排除了「兩臂其實一樣」與「B 臂沒轉發」兩種解釋。
+
+## 8. ⚠️ 本輪踩到的量測陷阱(共同形狀:工具給出一個由工具自己決定、看起來卻很合理的數字)
+
+1. **`tcpdump -G 25 -W 1`**(`measure-snmp-walk/walkpcap.sh` 的寫法)讓 tcpdump 在 walk
+   **之前**就結束,stderr 照樣印 `19 packets captured / 0 dropped`,pcap 1.7 KB。
+   連續兩次重現。→ **該 skill 產出的舊 pcap 全部有嫌疑**,1–2 KB 的幾乎一定是空的。
+2. **DUT 上沒有 `timeout` 指令**(`exit 127`),不能用 `timeout N tcpdump` 限時。
+3. **`/etc/os-release` 的 `VERSION` 是死標籤**(寫著 `EDS-G4100_...`,連機種都錯)。
+   image 身分讀 `/etc/moxa/version/BUILD_TIME`,機種讀 `/proc/device-tree/model`。
+4. **整棵 walk 的 0.241s 是「中止時間」不是 walk 時間。**
+5. **walk 在第一個請求中止,使 `.1.4`–`.1.7` 從未被看見** → 被讀成「mainline 沒有 mxQos」。
+
+**第 5 條與前四條性質不同**:前四條產生「錯的數字」,第 5 條產生「不存在的印象」。
+錯的數字還會被下一個人對帳而露出矛盾;**缺席不會 —— 沒有任何一行輸出會說「你沒走到那裡」**,
+而缺席正好是許多假說的預期結果。
+
+→ **判準:凡是結論的形式為「X 不存在 / 沒有發生」,都必須另外證明觀測管道走到了
+X 應該在的位置。** 本輪同一天內,「零 Get PDU」「No Such Object」「62 欄而非 73 欄」
+三個結論都是這個形狀。
+
+### 有效擷取的三道自我檢查(缺任何一道,空擷取就會看起來像結論)
+
+```
+kill -0 $TP              確認 walk 開始時 tcpdump 還活著
+回報 walk 的 varbind 數    確認 walk 真的跑了、落在擷取視窗內
+ps | grep -c tcpdump     結束後確認沒有殘留(殘留會污染下一次判定)
+```
+
+收尾用同一 session 內已知 PID 的 `kill -INT`,**不用 `pkill`** —— 那個寫法 2026-08-12
+造成兩個行程掛 11 小時,並各佔一條 DUT ssh session。
+
+## 9. 未決 / 待辦
+
+| # | 項目 | 需要 DUT |
+|---|---|---|
+| 1 | `.1.3.1.1` 是否註冊 —— `snmpget .603.2.9.1.3.1.1.1` 一條指令即可釘死 | 是 |
+| 2 | GETNEXT 缺陷 (a) 的修法驗證(門檻改 `req_oid`) | 是 |
+| 3 | tmpfs 具象化假說(已指派 `trace 3`) | 否 |
+| 4 | 移除 `agentx_owned.list` 的 `mxqosdb/` 行(新 commit,非 revert) | 否 |
+| 5 | `walkpcap.sh` 的 `-G` 缺陷修正 | 否 |
+
+### 與本 MIB 無關但同時發現的重大疑慮
+
+`walk.sh` 寫死 `-t 5` 且未指定 `-r`(net-snmp 預設 retries 5),總等待 = **5 × 6 = 30 秒**。
+語料庫中所有「慢」的量測都是 `30 + 小數` 的形狀,且 1–29 秒之間完全空白:
+
+```
+31.900 = 30 + 1.900   mxrstpdb .603.3.2 整棵      ADR-0015 / 0016 / agentx_owned.list
+31.700 = 30 + 1.700   mxrstpdb status 子樹         ADR-0016 / agentx_owned.list
+31.000 = 30 + 1.000   mainline .603.3.2            ADR-0016
+30.994 = 30 + 0.994   mxrstpdb(ADR-0018 引用)    ADR-0018
+30.953 = 30 + 0.953   簡報頭條 mainline            
+37.355 = 30 + 7.355   evtPort in-master            ADR-0018
+```
+
+**ADR-0016 的「48×」、ADR-0018 的「27×」、簡報頭條的「48 倍」可能都建立在逾時常數上。**
+若成立,正確詮釋不是「讀取變快 48 倍」,而是「**修好了一個會讓 walk 卡死的缺陷**」——
+那是比效能數字更硬的賣點,而且完整性那欄(62 vs 73)可能同源(walk 提早中止而非欄位不存在)。
+
+⚠️ **這目前是推論不是結論**,真值未知,**不要用任何替代數字**。
+判定方法:`-r 0` + 交錯 A/B/A + 兩側都量 + **逐輪記錄 varbind 數**(唯一能分辨「慢」與「沒走完」的辦法)。

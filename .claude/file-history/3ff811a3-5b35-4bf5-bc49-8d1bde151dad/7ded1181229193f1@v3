@@ -1,0 +1,64 @@
+---
+name: dut-swu-firmware-update-procedure
+description: 燒 Plan E swu 前務必確認方向：swupdate 寫的是「沒在跑的那顆」，partition 2 是 mainline 對照組不可覆蓋；用 examinate-plan-e-swu skill
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 3ff811a3-5b35-4bf5-bc49-8d1bde151dad
+  modified: 2026-08-05T16:23:53.642Z
+---
+
+**2026-08-06 上 DUT 逐條查證 + 使用者更正後的定案。**
+
+## Partition 分工（關鍵）
+
+| partition | 內容 | 政策 |
+|---|---|---|
+| 1（`/dev/sda7` rootfs） | **Plan E 開發 image**，現為 `2026_0805_2322` | 可覆蓋 |
+| 2（`/dev/sda8` rootfs） | **mainline 對照組** `2026_0805_2335` | **必須保留** |
+
+partition 2 是所有 before/after 比較的基準（見
+[[snmpwalk-diff-confounded-by-dut-config]]），弄丟就沒有對照組了。
+
+## swupdate 寫哪一顆 —— 反直覺，別搞錯
+
+swu 內的 `preinstall.sh` 從 `/proc/cmdline` 的 `root=` 判斷目前 partition，
+然後**一律寫「沒在跑的那一顆」**，`postinstall.sh` 驗完 sha256 才把 `fwrbootpart` 翻過去：
+
+- 跑在 1（sda7）→ 寫 sda3 + **sda8** → fwrbootpart=2
+- 跑在 2（sda8）→ 寫 sda2 + **sda7** → fwrbootpart=1
+
+推論：**開著你想留的那顆去燒，被毀的就是它。**
+所以要把新 Plan E 燒進 partition 1，必須**先切到 partition 2（mainline）再燒** ——
+使用者一開始講的流程是對的，我曾據機制誤判成「就地燒即可」，那會毀掉對照組。
+
+## 用 skill，不要手打
+
+`~/.claude/skills/examinate-plan-e-swu/`（2026-08-06 建）。三段式，預設唯讀：
+
+- `bash swu_examine.sh <swu>` — 只檢查，印出 running / will WRITE / will KEEP
+- `--upload` — scp 到 DUT `/tmp` 並自動比對 local vs remote md5
+- `--flash` — 再加 `swupdate -i` + sync + reboot
+
+預設 `--protect 2`：只要 victim 是 partition 2 就拒跑並提示先切 partition。
+
+**不需要工作機密碼**：本機 eth3 就是 `192.168.127.209`，`/tftpboot` →
+`/home/moxa/sda2/tftpboot`。DUT 的 `/moxa/upload_my_file.sh` 是從這台 pull（所以才會
+要密碼），改成從這台 push 就只用得到 DUT 的 `admin`/`moxa`。
+
+## 其他查證結果
+
+- `/moxa/fwr_update.sh` **不存在**。`/moxa/` 下只有 `fwr_change.sh` 與 `upload_my_file.sh`
+- `upload_my_file.sh` 只 `md5sum` **印出來**，不做比對
+- 切 partition 是 `/moxa/fwr_change.sh`，兩個 `Y` 是互動 stdin 答案不是參數：
+  `printf 'Y\nY\n' | /moxa/fwr_change.sh`（見 [[dut-partition-switch-is-scriptable]]）
+- `/usr/bin/swupdate` 在 image 內；`/tmp` overlay 474M free，65M swu 放得下
+
+## 尚未解決
+
+從 mainline partition 燒的那一步**還沒自動化**：mainline 的 ssh 落在 `moxash` 不是
+Linux shell（見 [[dut-console-is-linux-shell-not-moxa-cli]]），skill 偵測到會 exit 7
+不會卡死。使用者是用 `~/mmtech` 從 moxash 進 Linux，該檔內容還沒問到。
+
+**How to apply:** 預設優先走 [[dut-hotswap-binary-without-firmware-update]]；真的要燒
+整包才用這條，且燒前一定先跑 stage 1 把 will WRITE / will KEEP 給使用者看。

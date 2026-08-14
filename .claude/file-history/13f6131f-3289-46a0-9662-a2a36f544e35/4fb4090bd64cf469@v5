@@ -1,0 +1,17 @@
+- [Build order](feedback_build_order.md) — plugin_moxa_snmp before rust_moxa_build, then final make
+- [Docs only on explicit request](feedback_docs_only_on_explicit_request.md) — during plan Q&A, treat as clarification; don't auto-offer docx/pptx updates
+- [Context 60% reminder](feedback_context_60_reminder.md) — proactively warn near ~60% context, every session; offer handoff
+- [ISS AgentX subagent vs snmpd 161 conflict](project_iss_agentx_subagent_161_conflict.md) — ISS standalone agent binds 161 & crashes snmpd; fix = disable snmpagent + enable snmpsubagent master 127.0.0.1:705
+- [Plan C AgentX SET path & framing bug](project_plan_c_agentx_set_path_and_framing.md) — ifAdminStatus SET→config via existing PortSetAdminStatus2MxCfgAsync; AgentX drops under load = TCP framing desync (single recv + partial send)
+- [Plan D two-subagent OID reachability](project_plan_d_two_subagent_oid_reachability.md) — verified only ISS + framework subagents needed; no daemon serves OIDs directly; new OIDs must go via config/status layer
+- [mod_uri correlates with ISS-owned](project_moduri_correlates_iss_owned.md) — mod_uri groups are almost all iss_build==1; ISS shadows GET, so they can't migrate to framework without an ISS-side change
+- [agentx_owned two-axis design](project_agentx_owned_two_axis_design.md) — list=WHICH OIDs go AgentX (index table); iss_build=WHO serves (1→ISS, 0→reserved)
+- [Plan E iss0 GET-forward](project_plan_e_iss0_get_forward.md) — iss_build==0 GET→framework AgentX, SET stays in-master; ADR-0003 Proposed, PoC-gated
+- [SNMP framework-subagent migration](project_snmp_framework_subagent_migration.md) — roadmap A→B→C→mxDot1xdb, table_col/index-table mechanics, current state (A+syslog pending build), gotchas (generalInfo=system-info reverted)
+- [mxIpIf col2 in-master deferred](project_mxipif_col2_inmaster_deferred.md) — ifVlanId walks 0/0 = in-master shadowing (atoi vlanN); user deferred, not a framework bug
+- [SNMP walk 慢的診斷手法](project_snmp_walk_slow_diagnosis.md) — 先 snmpget vs snmpgetnext 分辨讀值慢 or GETNEXT 慢,再抓 :705 pcap;曾為此修錯兩輪
+- [framework vs mainline SNMP 差異](project_framework_vs_mainline_snmp_diffs.md) — mxTurboRingV2 三處:多回 index 欄、缺 interface 欄、coupling port 少 1(flags 未搬移)
+- [AgentX priority 方向搞反](project_agentx_priority_direction_inverted.md) — framework 200 輸給 in-master 127(小的贏);dual-reg GET 從未進 framework,Plan E 的 GET/SET 分流無法靠 priority 實作
+- [ISS AgentX 註冊範圍怎麼查](project_iss_agentx_registration_scope.md) — 看 *db.h 的分支涵蓋,不是 root 長度;master 連續遍歷會跳過「空 ISS 區段後的 in-master 孤島」(ADR-0011)
+- [DUT dual image A/B 配對](project_dut_dual_image_ab_pair.md) — p1=Plan E 0730_1302(覆蓋)、p2=mainline 0805_2335(對照組);燒錄一定從 0805 那側跑
+- [DUT 操作授權 A/B/C 級](feedback_dut_operation_authorization.md) — 可直接操作含 swupdate,執行前講明等級;護欄不放寬;優先走網路不走序列

@@ -1,0 +1,74 @@
+# Plan E — Handoff (2026-07-27) → 下一個 session
+
+## TL;DR
+
+Plan E 目的：**iss_build==0 的 SNMP GET 走 framework AgentX（快、live）、SET 留 in-master（SET 留本地）。**
+本 session 把 **trustAccess** 這張表用 **net-snmp `table_iterator`** 做到並在 DUT 驗證通過（GET framework live + SET in-master，config 改動免 reboot 即時反映），清掉死碼，並把 ADR 收斂。
+**下一個 session 的主任務：依 ADR-0006 實作 mxTrap 遷移（host table GET→framework iterator、SET(rowStatus createAndGo)→in-master）。** 這是最早那個 hostname/mode/community/rowStatus 表。
+
+## 現況（未 commit 的本地改動，相對 mainline）
+
+已完成並**驗證**（BUILD 2026_0727_0927 及之前）：
+- **trustAccess `.602.1.4.1.2` = Plan E table_iterator**：framework 唯讀 iterator live 服務 GET/GETNEXT/GETBULK；SET 留 in-master（INIT_ENTRY 保留）。DUT 全綠：CLI 改/ snmpset 免 reboot 即時反映、空表乾淨、型別正確（IpAddress）。
+- **死碼清理**：移除 Plan E 早期的 forward（`mox_snmp_forward_get_to_framework` 等）、table_data_set demo + 通用 builder wrappers、PlanE-DBG trace。**Plan C 的 `mox_snmp_forward_get_to_iss`（iss1/ISS）保留不動。**
+- **email 已 revert 回 Plan D**（scalar 不能拆，見下）。
+
+改到的檔（本地）：`lib_moxa_snmp_agentx/src/agentx.c`(+.h)（新 `MoxaAgentX_RegisterIterTable`/`MoxaAgentX_SetIpAddress`）、`lib_moxa_rust_snmp_agentx/src/lib.rs`（`register_iter_table`/`set_ipaddress`）、`app_moxa_framework/src/snmp_subagent.rs`（`register_trustedip_table`=iterator）、`3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`（清死碼）。**尚未 commit。**
+
+## 核心原理（務必先懂再動 mxTrap）
+
+1. **Plan E = GET framework / SET in-master**。trustAccess 用 table_iterator 達成（framework RONLY 表贏 GET 的 wire、in-master per-column RWRITE 收 SET），net-snmp **依能力/粒度分流**，**不需 forward 碼**（forward 已證死路、已移除）。
+2. **Plan C 其實有兩個獨立機制**（寫在 ADR-0004 Design Principle）：
+   - `agentx_owned.list + skip`（is_agentx_owned, ies_auto_mibs.c:3414）：**RO 欄** → in-master 不註冊 → subagent 全拿（RO 無 SET）。
+   - `mox_iss_get_forward_rules + forward`（ies_auto_mibs.c:3062/3297）：**RW 欄** → in-master 留 SET + GET 給 subagent = 真正分流,**能動是因為目標是 table**。
+   - is_agentx_owned：RW→回 0（不認領）；只有「RO 且 prefix 命中」→回 1→skip。**RW 進 in-master 是「沒被 skip」的自然結果。**
+3. **table vs scalar（關鍵限制，email PoC 實測）**：
+   - **table** 可拆 GET/SET（framework 表 RONLY 在 `.N`、in-master 在 `.N.1.c` = 不同粒度節點）。
+   - **scalar 不能拆**：同一 leaf 單節點,framework RONLY 會贏節點 → **SET notWritable**（in-master 收不到）。所以 all-RW scalar 群組維持 Plan D（framework GET+SET）。
+4. **型別 render 缺口**：framework 的通用 `moxa_config_handler`（snmp_subagent.rs:238-264）只 render INTEGER / OCTET_STR，**無 IpAddress/MAC**。所以特殊型別欄要嘛走 table_iterator 的 typed node handler（自控型別,如 trustAccess 的 `set_ipaddress`），要嘛就會被當 STRING。
+
+## ADR 地圖（~/mds4xgl3/.adr/）
+
+- **ADR-0001**（mxTrap Plan-D framework-SET/Rust rowStatus）→ **Superseded by ADR-0006**（本 session 標的）。
+- **ADR-0002**（ies-auto-mibs 資料/引擎分層）→ Accepted,保留。
+- **ADR-0003**（Plan E forward 機制）→ Superseded by ADR-0004（forward 實測是死路）。
+- **ADR-0004**（native dual-reg + table_iterator；trustAccess 已驗證）→ **Accepted**。含 agentx_owned.list Design Principle。
+- **ADR-0005**（end-state：全 iss0 GET-framework/SET-in-master）→ **Proposed**。PoC 結論：**split 是 table-only；scalar 不能拆**。
+- **ADR-0006**（mxTrap 遷移到 Plan E）→ **Accepted（決定）,實作待下一個 session**。
+
+## ★ 下一個 session 主任務：實作 mxTrap 遷移（依 ADR-0006）
+
+可行性已確認：**in-master 的 `ies_auto_mibs_handle_read_create_v2_mxTrap_host.c`（14.4K）現成**（rowStatus createAndGo 原子 C 引擎,不需新造）。
+
+mxTrap 結構（snmpTrap `.602.7.2`）：
+- scalar：informRetries `.2.1.1`、informTimeout `.2.1.2`（INT RW）→ **維持 Plan D 不動**（scalar 不能拆）。
+- host table `snmpTrap/host` `.602.7.2.1.3`（maxItems 2）：cols 1=index(INT,RO) 2=hostName(OCTET) 3=mode(INT) 4=v1v2cCommunity(OCTET) 5=rowStatus(INT)。無特殊型別。
+
+實作步驟（照 trustAccess 範式）：
+1. `snmp_subagent.rs`：通用迴圈 **skip** host-table OID（`.602.7.2.1.3` 前綴,仿 `under_trustedip`）；新增 `register_snmptrap_host_table()` 用 `register_iter_table`（RONLY，index INT，min_col 1 max_col 5），加 `trap_row_count()`（live 讀 `snmpTrap/host` 陣列長度,注意 maxItems 2）與 `trap_iter_handler()`（依 col 填值：1=row INT、2=hostName OCTET via set_octet_string、3=mode INT、4=community OCTET、5=rowStatus INT valid→1/2）。
+2. `ies_auto_mibs_setup.c:357`：**還原** `MOX_SNMP_INIT_ENTRY(mxTrap_MibEntry);`（in-master 收 SET,用既有 readCreate_v2_mxTrap_host.c）。
+3. framework 的既有 trap SET 路徑（`handle_rowstatus_set` / `default_trap_host`，snmp_subagent.rs:~448/459）對 host table 會失效（表變 RONLY）——確認不再被觸發;是否移除視情況（可能仍被別處/別表用,先確認再刪）。
+4. **注意**：host table cols 目前也在通用迴圈被 register_instance（因 mxTrap 在 g_reuse_srcs）。要像 trustAccess 一樣 skip 掉這些 OID,改由 iterator 註冊,否則會 double register。
+
+Build：`3rdparty_net_snmp` + `app_moxa_framework`（+ rust 鏈）+ 打包。
+DUT 驗證：
+- `snmpwalk .1.3.6.1.4.1.8691.602.7.2.1.3` → host table GET 走 framework（live）。
+- `snmpset ...rowStatus createAndGo(4)/destroy(6)` → in-master 建/刪列 → `cat` config `snmpTrap/host[]` 有變 + walk 立即反映(免 reboot)。
+- informRetries/Timeout scalar 仍正常（framework Plan D）。
+
+## iss0 推廣盤點（供 mxTrap 之後繼續）
+
+- **RO-skip 候選（agentx_owned.list → framework 加速）**：mxGeneralInfo（5 RO scalar，但 memory 記曾 reverted）、mxDot1xdb（3 RO table）、mxSnmp（9 RO）。**前提：要 skip 給 framework，得同時把該群組加進 g_reuse_srcs（否則 skip 了沒人服務=silent noSuchObject）。**
+- **table_iterator 候選（RW table）**：mxTrap（做中）；之後 **mxIpIfdb（7 RW，IP_ADDR，in-master 慢 GET）**、dhcpSrv（34 RW，IP+MAC，最大）、portmirror（12 RW）。判準：framework 獨佔的 per-instance RW table 已正常,除非 (a) 有特殊型別（turboring MAC / email IP）或 (b) 需 rowStatus SET-in-master（mxTrap）。
+
+## 其他 open items
+- scalar `.602.1.4.1.1.0`(enableTrustedAccess) / email serverAddress 型別（STRING vs IpAddress）：scalar 無法用 iterator 修型別;若要,得在 moxa_config_handler 加 IPADDRESS 分支（獨立小案）。
+- `agentx.c` 的 `netsnmp_init_table_dataset()` + table_data(set).h include 為 inert dead,暫留,可後續清。
+- ADR-0005 轉 Accepted 的前提已滿足（scalar 問題已釐清=table-only）,可視情況定稿。
+- 尚未 commit：全部改動仍在 working tree。
+
+## 關鍵指標 / 指引
+- 詳細持久記錄在 memory：`project_plan_e_iss0_get_forward.md`（已完整更新,新 session 會自動載入 MEMORY.md 索引）。
+- 建置環境無本機 toolchain,build/DUT 由使用者跑。
+- net-snmp table_iterator 範本：`net-snmp-5.9.3/agent/mibgroup/mibII/vacm_context.c`（最小唯讀 iterator）。
+- 使用者偏好：context 近 ~60% 要主動提醒並提議 handoff;文件只在明確要求時做。

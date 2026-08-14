@@ -1,0 +1,445 @@
+# Plan C — AgentX GET/SET 分流 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement task-by-task. Steps use checkbox (`- [ ]`).
+
+**Goal:** RO ifTable/ifXTable GET 由 ISS AgentX subagent 回答(快);SET 仍走 framework;ISS 漏出的非支援 MIB 用 VACM 白名單藏掉。
+
+**Architecture:** `ies-auto-mibs` 讀 `agentx_owned.list`,對「RO + URI prefix 命中」的 entry 跳過本地 `netsnmp_register_*`,讓 master longest-prefix-match 路由到 ISS subagent;RW entry 留本地 → SET 走 framework URI。master VACM view 改白名單,只露 framework 支援子樹。
+
+**Tech Stack:** net-snmp 5.9.3 (master agentx + ies-auto-mibs dlmod)、ISS Aricent subagent、buildroot、C。
+
+## Global Constraints
+- Codebase root: `/home/moxa/mds4xgl3/buildroot/dl`(= `${moxa}/dl`)。
+- 無 unit-test 框架:每個 task 的「測試」= **(a) build 過 + (b) grep/結構檢查 + (c) 上 DUT snmpwalk/snmpset 行為**。
+- Build order(既有慣例):`plugin_moxa_snmp` → rust → final `make`。本計畫只動 C/設定,不動 rust。
+- 設定檔路徑:`/etc/moxa/netsnmp/agentx_owned.list`。
+- 保留既有 AgentX 基礎(ISS subagent + snmpd master agentx:705 + reconnect timer)不動。
+- net-snmp 這顆**沒編** ip/tcp/udp/icmp module;標準 MIB-2 全由 ISS subagent + ies_auto_mibs 提供。
+- commit 訊息結尾照 repo 慣例(本計畫示意用 `Plan C:` 前綴)。
+
+## File Structure
+- `plugin_moxa_snmp/app/script/agentx_owned.list` — **新增**,委派白名單(預設 `ifmibdb/`)。
+- `plugin_moxa_snmp/app/<Makefile or install rule>` — **修改**,安裝 list 到 `/etc/moxa/netsnmp/`。
+- `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` — **修改**,reader + skip 邏輯(~85 行)。
+- `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c` — **修改**,還原 `ifmibdb_MibEntry` 註冊(undo change A)。
+- `plugin_moxa_snmp/app/config_moxa_snmp_control.c` — **修改**,VACM view 改白名單。
+- `app_moxa_iss_10_1_0/code/future/cfa2/src/ifmibwr.c` — **修改**,revert Q2。
+
+---
+
+### Task 1: 決定 VACM 黑名單(對齊 mainline)— DONE
+
+> **修正(2026-06-30):** 白名單前提錯誤。實測 framework(ies_auto_mibs)註冊 66 個 DB,
+> 幾乎蓋滿標準+企業面、完整 shadow ISS;只有少數 framework 沒註冊的標準群組由 ISS 漏出。
+> 故改用**黑名單**(只擋漏出 + framework 自己的 VRRP bug),不需白名單。
+> 推導法:逐一比對「post-fix agentx walk 出現的 mib-2 群組」vs「framework 是否註冊」,
+> framework 檔=0 者即洩漏。結果如下(Task 4 直接套用):
+
+```
+view all excluded .1.3.6.1.2.1.6     # tcp        (framework 0)
+view all excluded .1.3.6.1.2.1.23    # rip2       (framework 0)
+view all excluded .1.3.6.1.2.1.26    # mau        (framework 0)
+view all excluded .1.3.6.1.2.1.47    # entity     (framework 0)
+view all excluded .1.3.6.1.2.1.67    # radius-std (framework 0)
+view all excluded .1.3.6.1.2.1.83    # ISS native (framework 0)
+view all excluded .1.3.6.1.2.1.85    # ISS native (framework 0)
+view all excluded .1.3.6.1.2.1.97    # ISS native (framework 0)
+view all excluded .1.3.6.1.2.1.185   # ISS native (framework 0)
+view all excluded .1.3.6.1.2.1.241   # ISS native (framework 0)
+view all excluded .1.3.6.1.2.1.5.29  # icmpStatsTable    (framework 蓋 5.1-5.26)
+view all excluded .1.3.6.1.2.1.5.30  # icmpMsgStatsTable
+view all excluded .1.3.6.1.2.1.7.7   # udpEndpointTable  (framework 蓋 7.1-7.5)
+view all excluded .1.3.6.1.2.1.7.8   # udpHCInDatagrams
+view all excluded .1.3.6.1.2.1.7.9   # udpHCOutDatagrams
+view all excluded .1.3.6.1.2.1.68    # vrrp — framework 自己的 handler bug(截斷 walk)→ 先遮,另記待修(spec 第5節)
+```
+
+> 註:`8691`(企業,framework)、`1.3.6.1.6.3`(SNMPv3)、其餘 framework 有註冊的群組(1/2/4/5舊/7舊/10/11/14/17/31/207)維持可見。base 仍是 `view all included .1 80`。
+
+<details><summary>(原白名單步驟,已作廢,保留供參)</summary>
+
+**Files:**
+- Read: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c`(`MOX_SNMP_INIT_ENTRY` 清單)
+- Read: `3rdparty_net_snmp/ies-auto-mibs/net_*.h`(各 DB 的 `.oid_list` root)
+- Produce: 一段 `view all included <oid>` 文字,供 Task 4 貼入。
+
+**Interfaces:**
+- Produces: `gWhitelistViewLines`(純文字,Task 4 consume)。
+
+- [ ] **Step 1: 列出 framework 註冊的 DB**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs
+grep -oE "MOX_SNMP_INIT_ENTRY\([a-zA-Z0-9_]+\)" ies_auto_mibs_setup.c | sed 's/MOX_SNMP_INIT_ENTRY(//;s/)//' | sort -u
+```
+Expected: `stdsnmdb_MibEntry`, `stdllddb_MibEntry`, `stdot1db_MibEntry`, `stdethdb_MibEntry`, `stdvladb_MibEntry`, `stdbrgdb_MibEntry`, `mx_vlan_MibEntry`, `mxRSTPdb_MibEntry`, `mxSnmp_MibEntry`, `mxTrap_MibEntry`, `mxPortdb_MibEntry`, … （注意:`ifmibdb_MibEntry` 此時是註解掉的 change A,Task 3 會還原)
+
+- [ ] **Step 2: 抽每個 DB 的 OID root**
+
+對每個 `<x>_MibEntry`,取其 `net_<x>.h` 第一個 entry 的 `.oid_list` 前 N 碼當 subtree root。Run（範例,對全部 DB 跑）:
+```bash
+for h in net_stdsnmdb net_stdllddb net_stdot1db net_stdethdb net_stdvladb \
+         net_stdbrgdb net_mx_vlan net_mxRSTPdb net_mx_snmp net_mx_trap_notification \
+         net_mxPortdb net_std1d1db net_std1w1db net_stdladb net_mxLadb net_mxPsmsdb \
+         net_mxPsspdb net_mx_trustAccess net_mx_dhcpSrv net_stdrmodb net_mx_RMON \
+         net_mxIgmpdb net_mx_turboring_v2 net_mxDot1xdb net_mxRadiusdb net_stdpnadb \
+         net_mxTcdb net_mxTcstdb net_stdcipdb net_stdpnodb net_mx_lldp net_mx_portmirror \
+         net_mx_event_general net_mx_event_switching net_mx_event_poe; do
+  printf "%-28s " "$h"; grep -oE "\.oid_list *= *\{[0-9, ]+\}" $h.h 2>/dev/null | head -1
+done
+```
+（將每筆 `{1,3,6,1,...}` 收斂到「能涵蓋該 DB 但不過寬」的 root,例如 `stdbrgdb` → `.1.3.6.1.2.1.17`、`mxXXX` → `.1.3.6.1.4.1.8691.x`。）
+
+- [ ] **Step 3: 組成 whitelist view 行(含固定項)**
+
+固定加入(不在上面 DB 清單、但必須露):
+```
+view all included .1.3.6.1.2.1.1       # system (net-snmp master)
+view all included .1.3.6.1.2.1.2        # ifTable  (委派給 ISS)
+view all included .1.3.6.1.2.1.11       # snmp stats (master)
+view all included .1.3.6.1.2.1.31       # ifXTable (委派給 ISS)
+view all included .1.3.6.1.4.1.8691     # Moxa enterprise (framework + 602)
+view all included .1.3.6.1.6.3          # SNMPv3 framework (usm/vacm/...)
+```
+把 Step 2 收斂出的各標準子樹(`.1.3.6.1.2.1.<n>`)併入。**驗證不含** `.1.3.6.1.2.1.68`(VRRP)、`.26`(MAU)等 ISS 漏出項。
+
+- [ ] **Step 4: 暫存清單**
+
+把完整 `view all included ...` 多行存到 `/tmp/plan_c_whitelist.txt`,Task 4 用。
+（本 task 無 code commit;產出是資料。）
+
+</details>
+
+---
+
+### Task 2: agentx_owned.list 檔 + buildroot 安裝
+
+**Files:**
+- Create: `plugin_moxa_snmp/app/script/agentx_owned.list`
+- Modify: `plugin_moxa_snmp/app/` 的安裝規則(Makefile / install script)
+
+- [ ] **Step 1: 建立 list 檔**
+
+Create `plugin_moxa_snmp/app/script/agentx_owned.list`:
+```
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are never skipped (SET stays on framework). Add a MIB = add a prefix here.
+ifmibdb/
+```
+
+- [ ] **Step 2: 找安裝點**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl/plugin_moxa_snmp
+grep -rn "install .*init_snmpd.sh\|/etc/moxa/config-moxa-snmp\|APP_SCRIPT_PATH\|install -m" app/ | head
+```
+Expected: 找到既有把 `app/script/*` 安裝到 rootfs 的 `install` 行(同一個目標目錄模式)。
+
+- [ ] **Step 3: 加安裝規則**
+
+在 Step 2 找到的 install 區塊旁加(路徑依實際 Makefile 變數):
+```make
+	$(SILENCE)mkdir -p $(DESTDIR)/etc/moxa/netsnmp
+	$(SILENCE)install -m 644 $(APP_SCRIPT_PATH)/agentx_owned.list $(DESTDIR)/etc/moxa/netsnmp/agentx_owned.list
+```
+
+- [ ] **Step 4: 驗證**
+
+Run:
+```bash
+ls plugin_moxa_snmp/app/script/agentx_owned.list && grep -n "agentx_owned.list" plugin_moxa_snmp/app/*ake* plugin_moxa_snmp/app/*/*ake* 2>/dev/null
+```
+Expected: 檔存在 + install 行被 grep 到。
+
+- [ ] **Step 5: Commit**
+```bash
+git add plugin_moxa_snmp/app/script/agentx_owned.list plugin_moxa_snmp/app/Makefile
+git commit -m "Plan C: add agentx_owned.list (delegation whitelist) + install"
+```
+
+---
+
+### Task 3: ies_auto_mibs.c reader + skip;還原 change A
+
+**Files:**
+- Modify: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`(reader/skip)
+- Modify: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c`(還原 ifmibdb)
+
+**Interfaces:**
+- Consumes: `struct ies_auto_mibs_entry`(`.uri` char[]、`.mode` flags)。`HANDLER_CAN_SET`(net-snmp,RW 有此 bit;RO=`HANDLER_CAN_RONLY` 無)。
+- Produces: `mox_snmp_entry_is_agentx_owned(entry)`、`mox_snmp_load_agentx_owned_list()`。
+
+- [ ] **Step 1: 加 reader + 判斷函式**
+
+在 `ies_auto_mibs.c`,於 `mox_snmp_init_entry` 函式**定義之前**(例如 line ~3232,函式上方)插入:
+```c
+#define AGENTX_OWNED_LIST_FILE   "/etc/moxa/netsnmp/agentx_owned.list"
+#define AGENTX_OWNED_MAX         (32)
+#define AGENTX_OWNED_PREFIX_LEN  (64)
+static char gAgentXOwnedPrefix[AGENTX_OWNED_MAX][AGENTX_OWNED_PREFIX_LEN];
+static int  gAgentXOwnedCount  = 0;
+static int  gAgentXOwnedLoaded = 0;
+
+static void mox_snmp_load_agentx_owned_list(void)
+{
+    FILE *fp;
+    char  line[AGENTX_OWNED_PREFIX_LEN];
+
+    gAgentXOwnedCount = 0;
+    fp = fopen(AGENTX_OWNED_LIST_FILE, "r");
+    if (fp == NULL) {
+        return;                         /* legacy: no file → register everything locally */
+    }
+    while (fgets(line, sizeof(line), fp) != NULL &&
+           gAgentXOwnedCount < AGENTX_OWNED_MAX) {
+        char  *p = line;
+        size_t n;
+        while (*p == ' ' || *p == '\t') p++;          /* skip leading ws */
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        n = strlen(p);
+        while (n > 0 && (p[n-1]=='\n'||p[n-1]=='\r'||p[n-1]==' '||p[n-1]=='\t'))
+            p[--n] = '\0';                            /* strip trailing ws */
+        if (n == 0) continue;
+        strncpy(gAgentXOwnedPrefix[gAgentXOwnedCount], p, AGENTX_OWNED_PREFIX_LEN-1);
+        gAgentXOwnedPrefix[gAgentXOwnedCount][AGENTX_OWNED_PREFIX_LEN-1] = '\0';
+        gAgentXOwnedCount++;
+    }
+    fclose(fp);
+}
+
+static int mox_snmp_entry_is_agentx_owned(struct ies_auto_mibs_entry *entry)
+{
+    int i;
+    if (entry->mode & HANDLER_CAN_SET) {
+        return 0;                       /* RW → keep local; SET goes via framework */
+    }
+    for (i = 0; i < gAgentXOwnedCount; i++) {
+        if (strncmp(entry->uri, gAgentXOwnedPrefix[i],
+                    strlen(gAgentXOwnedPrefix[i])) == 0) {
+            return 1;                   /* RO + prefix match → skip → ISS owns it */
+        }
+    }
+    return 0;
+}
+```
+
+- [ ] **Step 2: 在 register loop 插 skip**
+
+在 `mox_snmp_init_entry`(ies_auto_mibs.c:3245 的 loop 內),於 `ies_auto_mibs_setup_entry_flags(entry)` 成功之後、`moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry(entry)` 之前插入:
+```c
+        if (!gAgentXOwnedLoaded) {
+            mox_snmp_load_agentx_owned_list();
+            gAgentXOwnedLoaded = 1;
+        }
+        if (mox_snmp_entry_is_agentx_owned(entry)) {
+            free(entry);                /* malloc'd above; skip local register, let master route to ISS */
+            continue;
+        }
+```
+
+- [ ] **Step 3: 還原 change A(ifmibdb 註冊)**
+
+在 `ies_auto_mibs_setup.c:292`,把
+```c
+    /* MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry); */
+```
+改回
+```c
+    MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry);
+```
+（現在由 list+RO 判斷逐 column skip,不再整段 skip。）
+
+- [ ] **Step 4: 結構驗證(compile-sanity via grep)**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs
+grep -n "mox_snmp_entry_is_agentx_owned\|mox_snmp_load_agentx_owned_list\|HANDLER_CAN_SET" ies_auto_mibs.c
+grep -n "MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry)" ies_auto_mibs_setup.c   # 應無 /* */ 包住
+```
+Expected: 三個符號都在;ifmibdb 註冊行已解除註解。
+
+- [ ] **Step 5: Commit**
+```bash
+git -C 3rdparty_net_snmp add ies-auto-mibs/ies_auto_mibs.c ies-auto-mibs/ies_auto_mibs_setup.c
+git -C 3rdparty_net_snmp commit -m "Plan C: agentx_owned.list reader + RO-skip; restore ifmibdb registration"
+```
+
+---
+
+### Task 4: VACM view 加黑名單 exclude(對齊 mainline)
+
+**Files:**
+- Modify: `plugin_moxa_snmp/app/config_moxa_snmp_control.c`(兩個 view 區塊)
+
+**Interfaces:**
+- Consumes: Task 1 的黑名單清單。
+- 維持 `view all included .1 80`(base 全開),再用 exclude 逐段挖掉 ISS 漏出 + framework VRRP bug。
+
+- [ ] **Step 1: 把現有「included .1 + excluded .68」擴成完整黑名單**
+
+把兩處現有(source 已有 .68 那條)
+```c
+            fprintf(fp, "view all    included  .1   80       \n");
+            /* Plan C: the ISS AgentX subagent exposes ... Exclude it from the view ... */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.68\n");
+```
+改成(base 不變,exclude 補齊;兩個 access-mode 區塊都改):
+```c
+            fprintf(fp, "view all    included  .1   80       \n");
+            /* Plan C: hide MIBs the framework does NOT register (ISS-leaked) so the
+               exposed surface matches mainline; .68 (VRRP) is a framework vrrpdb
+               handler bug that truncates walks — masked here, fix tracked separately. */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.6\n");     /* tcp */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.23\n");    /* rip2 */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.26\n");    /* mau */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.47\n");    /* entity */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.67\n");    /* radius-std */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.83\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.85\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.97\n");    /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.185\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.241\n");   /* ISS native */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.29\n");  /* icmpStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.5.30\n");  /* icmpMsgStatsTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.7\n");   /* udpEndpointTable */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.8\n");   /* udpHCInDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.7.9\n");   /* udpHCOutDatagrams */
+            fprintf(fp, "view all    excluded  .1.3.6.1.2.1.68\n");    /* vrrp (framework bug) */
+```
+
+- [ ] **Step 2: 驗證**
+
+Run:
+```bash
+grep -c "view all    excluded" plugin_moxa_snmp/app/config_moxa_snmp_control.c
+grep -n "view all    included  .1   80" plugin_moxa_snmp/app/config_moxa_snmp_control.c
+```
+Expected: excluded 行 = 16 × 2 區塊 = 32;`included .1 80` 仍在(兩處)。
+
+- [ ] **Step 3: Commit**
+```bash
+git add plugin_moxa_snmp/app/config_moxa_snmp_control.c
+git commit -m "Plan C: VACM view blacklist (hide ISS-leaked std MIBs + mask framework VRRP bug)"
+```
+
+---
+
+### Task 5: revert Q2(ifmibwr.c ISS 上呼叫)
+
+**Files:**
+- Modify: `app_moxa_iss_10_1_0/code/future/cfa2/src/ifmibwr.c`
+
+- [ ] **Step 1: 移除 extern 宣告**
+
+刪掉檔頭那段:
+```c
+/* Plan C: with AgentX, SNMP ifAdminStatus SET lands here ... */
+extern INT4 PortSetAdminStatus2MxCfgAsync (UINT4 u4IfIndex, UINT4 u4AdminStatus);
+```
+
+- [ ] **Step 2: 還原 IfAdminStatusSet**
+
+把
+```c
+INT4
+IfAdminStatusSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+    INT4 i4RetVal;
+
+    i4RetVal = nmhSetIfAdminStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiData->i4_SLongValue);
+    /* Plan C: push ... PortSetAdminStatus2MxCfgAsync ... */
+    if (i4RetVal == SNMP_SUCCESS)
+    {
+        PortSetAdminStatus2MxCfgAsync (pMultiIndex->pIndex[0].i4_SLongValue,
+                                       pMultiData->i4_SLongValue);
+    }
+    return i4RetVal;
+}
+```
+還原成:
+```c
+INT4
+IfAdminStatusSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfAdminStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 pMultiData->i4_SLongValue));
+}
+```
+
+- [ ] **Step 3: 驗證**
+
+Run:
+```bash
+grep -n "PortSetAdminStatus2MxCfgAsync" app_moxa_iss_10_1_0/code/future/cfa2/src/ifmibwr.c || echo "clean (reverted)"
+```
+Expected: `clean (reverted)`。
+
+- [ ] **Step 4: Commit**
+```bash
+git -C app_moxa_iss_10_1_0 add code/future/cfa2/src/ifmibwr.c
+git -C app_moxa_iss_10_1_0 commit -m "Plan C: revert Q2 ISS-side SET up-call (SET now stays on framework)"
+```
+
+---
+
+### Task 6: Build + DUT 驗證
+
+**Files:** 無(build + 行為驗證)
+
+- [ ] **Step 1: Build**
+
+Run（依 build order):
+```bash
+cd /home/moxa/mds4xgl3/buildroot
+make plugin_moxa_snmp-rebuild 3rdparty_net_snmp-rebuild app_moxa_iss_10_1_0-rebuild 2>&1 | tail -20
+make 2>&1 | tail -20
+```
+Expected: 三個 package + final image build 過(無 link error)。
+
+- [ ] **Step 2: 燒錄 / 開機,確認 agentx 仍連**
+
+DUT(telnet 6023):`show snmp agentx statistics` → Register>0、Ping 遞增、Rx Response 增加(subagent 已連)。
+
+- [ ] **Step 3: RO ifTable 走 ISS(快)**
+
+管理機:
+```bash
+snmpwalk -v2c -c public <dut> ifTable
+snmpwalk -v2c -c public <dut> ifXTable
+```
+Expected: 正常回值;DUT `show snmp agentx statistics` 的 Rx Get/GetNext 隨之增加(代表 RO 由 ISS 回答)。
+
+- [ ] **Step 4: top-walk 完整、面=白名單**
+```bash
+snmpwalk -v2c -c public <dut>                       # 走完 mib-2,不報 badValue
+snmpwalk -v2c -c public <dut> .1.3.6.1.4.1.8691     # 企業 MIB 可達
+snmpwalk -v2c -c public <dut> .1.3.6.1.2.1.68       # VRRP → 空/no-such(被白名單擋)
+```
+Expected: 前兩個完整;第三個無輸出(VRRP 不在 view)。
+
+- [ ] **Step 5: SET 走 framework、ISS 不上呼叫**
+```bash
+snmpset -v2c -c private <dut> ifAdminStatus.<port> i 2   # down
+```
+Expected: 成功;config layer 反映(`/api/v1/setting/data/ifmib/portTable/<port-1>/enable` = false)。確認此 SET 由 ies-auto-mibs 處理(ifAdminStatus 是 RW、未 skip)。
+
+- [ ] **Step 6: 延遲對照(可選)**
+```bash
+for i in $(seq 1 100); do /usr/bin/time -f "%e" \
+  snmpget -v2c -c public <dut> ifInOctets.1 >/dev/null 2>>/tmp/lat.txt; done
+sort -n /tmp/lat.txt | awk '{a[NR]=$1} END{print "P50",a[int(NR*.5)]; print "P99",a[int(NR*.99)]}'
+```
+Expected: RO GET ~3 ms 量級(對照改前 ~7 ms)。
+
+---
+
+## Self-Review notes
+- Spec coverage:委派白名單(Task 2,3)、revert Q2(Task 5)、曝露白名單(Task 1,4)、未根治項(VRRP handler)記於 spec 第 5 節、驗證(Task 6)全覆蓋。
+- VACM 確切 OID 清單刻意由 Task 1 產出(有明確抽取方法,非 placeholder)。
+- 型別一致:`mox_snmp_entry_is_agentx_owned` / `mox_snmp_load_agentx_owned_list` 在 Task 3 定義且只在該檔使用;`HANDLER_CAN_SET` 為 net-snmp 既有 macro。

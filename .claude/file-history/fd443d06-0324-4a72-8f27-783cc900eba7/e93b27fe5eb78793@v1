@@ -1,0 +1,32 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+
+#ifndef	 _IES_COMMON_H_
+#define  _IES_COMMON_H_
+
+/*-------------------------------------------------------------------+
+    
+    define type
+    TODO: define 32/64 
++-------------------------------------------------------------------*/
+typedef int             s32;
+typedef unsigned int    u32;
+typedef short           s16;
+typedef unsigned short  u16;
+typedef char            s8;
+typedef unsigned char   u8;
+
+typedef enum {
+    IES_NOERR              =    0,
+    IES_ERR                =  (-1),
+    IES_ERR_NO_ENTRY       =   (2),
+    IES_ERR_NOT_FOUND      =   (3),
+    IES_ERR_NULL_ENTRY     =   (4),
+} ies_handle_t;
+
+
+#endif //_IES_COMMON_H_

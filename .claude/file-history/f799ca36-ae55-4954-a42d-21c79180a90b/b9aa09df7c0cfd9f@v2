@@ -1,0 +1,175 @@
+# Plan C — AgentX PoC 執行設計
+
+- **日期**:2026-06-12
+- **Code base**:mds4xg(buildroot `2023.02.11_develop`)
+- **性質**:PoC — 驗證 AgentX 架構(GET 直讀 + SET 繞 URI)端到端可行,並量測 ifTable/ifXTable GET latency 改善
+- **狀態**:設計已 review(§1–§4 經逐段確認;§5 風險為文件新增段落)
+
+---
+
+## 1. 背景與目標
+
+### 1.1 問題
+
+現況 SNMP GET ifTable/ifXTable 走 framework `ies_uri_handle_client` 做 table 具象化,整段 walk ~600ms,不符 50ms 目標。
+
+### 1.2 PoC 要回答的問題
+
+1. **GET latency**:ifTable/ifXTable walk 經 AgentX + ISS `nmh_` 直讀,是否 < 50ms?(核心命題)
+2. **SET 可行性**:AgentX SET phase → ISS handler → URI PATCH → framework config_layer,端到端打通一次、無 drift
+3. **AgentX 通道穩定性**:GETBULK 大表、重啟重連行為
+4. (附帶)給 Plan D 的實機行為記錄:AgentX 4-phase、URI PATCH 在 SET phase 內的 latency
+
+### 1.3 明確不做(留給 Plan D)
+
+- UNDO / snapshot rollback(PoC 的 UNDOSET 直接回 `undoFailed`)
+- Multi-varbind atomic SET
+- Circular sync 防護(PoC 期間人工紀律:量測時不從 web UI 改同一值)
+- ifAdminStatus 以外的 writable column
+- HTTP client 工程品質(connection pool、timeout 策略)
+
+---
+
+## 2. 決策紀錄(2026-06-12 brainstorm 確認)
+
+| # | 決策點 | 結論 |
+|---|---|---|
+| 1 | 起手式 | **全部重新實作**,不 cherry-pick 舊 Plan C commits(`4f9ead5` / `4951001`),但可參考其內容 |
+| 2 | framework 讓位機制 | **ies-auto-mibs 直接不註冊 ifTable/ifXTable**(`mox_snmp_init_entry` hardcode skip `ifmibdb/` 字首,註解標 PoC) |
+| 3 | AgentX transport | **`tcp:127.0.0.1:705`**(Wireshark 可直接抓 loopback 看 AgentX PDU) |
+| 4 | ISS SET → framework | **lib_moxa_utility 的 URI patch function**(確切 API 名稱在 implementation 階段 survey) |
+| 5 | 量測 baseline | **同一台 DUT 先量 baseline(現行 image)再刷 Plan C image 對照** |
+| 6 | 執行策略 | **選項 1:Baseline-first + 增量打通**(M0–M4,每 milestone 獨立驗證點) |
+
+---
+
+## 3. 架構
+
+```
+                       NMS (PC, 跑 snmpwalk + Wireshark)
+                          │ UDP 161
+                          ▼
+              ┌─ snmpd (3rdparty_net_snmp) ────────────────┐
+              │   master agentx @ tcp:127.0.0.1:705         │
+              │                                              │
+              │   ies-auto-mibs: skip ifmibdb/ 註冊  ←改動A │
+              │   其他 OID 照舊走 framework URI 路徑          │
+              └──────────────┬───────────────────────────────┘
+                             │ AgentX PDU (TCP 705, Wireshark 可見)
+                             ▼
+              ┌─ ISS (app_moxa_iss_10_1_0) ─────────────────┐
+              │   Aricent AgentX subagent                    │
+              │   REGISTER ifTable + ifXTable        ←改動C │
+              │   GET/GETNEXT/GETBULK → nmhGetIfXxx() ←改動D │
+              │   SET ifAdminStatus → lib_moxa_utility       │
+              │                       URI patch       ←改動E │
+              └──────────────────────┬───────────────────────┘
+                                     │ (僅 SET) URI PATCH
+                                     ▼
+                          framework config_layer(不改)
+```
+
+### 3.1 變更清單
+
+| # | Repo | 內容 | 預估規模 |
+|---|---|---|---|
+| A | `3rdparty_net_snmp` | ies-auto-mibs `mox_snmp_init_entry` skip `ifmibdb/` 字首 entry(hardcode + PoC 註解) | ~10 行 |
+| B | `plugin_moxa_snmp` | snmpd.conf 生成加 `master agentx` + `agentXSocket tcp:127.0.0.1:705` + `agentXTimeout` / `agentXRetries` | ~10 行 |
+| C | `app_moxa_iss_10_1_0` | ISS AgentX subagent attach master + REGISTER ifTable/ifXTable subtree | 待 survey |
+| D | `app_moxa_iss_10_1_0` | AgentX GET/GETNEXT/GETBULK handler 接 `nmhGetIfXxx()`,printf 驗證 | 待 survey |
+| E | `app_moxa_iss_10_1_0` | SET ifAdminStatus handler 呼 lib_moxa_utility URI patch | ~50 行 |
+
+### 3.2 不變的東西
+
+- framework(Rust 端)零改動;config_layer 零改動
+- ISS 其他 MIB(rstp/vlan/lldp/lacp)註冊行為不動
+
+### 3.3 前置狀態
+
+- ISS branch `snmp-trace-time_diff-2`:`SNMP_LNXIP_WANTED` 已 enable(`8bcca814` + `5e8b0da33`),`nmh_` 層讀 `/proc/net/dev` + netlink 的資料底層 ready
+- **AgentX socket attach 做到一半,705 尚未打通** — M1 的主要工作
+- framework 兩 repo(`3rdparty_net_snmp` / `plugin_moxa_snmp`)目前 detached HEAD,實作前需開 PoC branch
+
+---
+
+## 4. Milestones
+
+### M0 — Baseline 量測(現行 image,零 code 改動)
+
+| 項目 | 內容 |
+|---|---|
+| 動作 | NMS PC 跑 `snmpbulkwalk -v2c -c <community> <DUT> ifTable` / `ifXTable`,Wireshark 同步抓包 |
+| 量測定義 | **RTT = 第一個 GetBulk request → 最後一個 response**(整段 walk);另記錄單 PDU request→response 間隔分佈 |
+| 重複 | 每組 10 次,取 median + p95 |
+| 變因控制 | 記錄 port 數、link up 數、DUT CPU idle(`top`)、NMS 與 DUT 直連 |
+| 產出 | `baseline.pcapng` + 數字表 |
+| 驗證點 | 數字與認知的 ~600ms 同量級;若差很多,先釐清再往下 |
+
+### M1 — Transport 打通
+
+| 項目 | 內容 |
+|---|---|
+| 改動 | B → C → A(此順序) |
+| C 的 survey | Aricent AgentX 模組現成程度:`snxmain.c` / agentx source、`make.ent` AGENTX flag;確認是「enable + 設 IP/port」還是要補 code |
+| 驗證點 1 | `netstat -tnp`:ISS → 127.0.0.1:705 ESTABLISHED |
+| 驗證點 2 | snmpd `-Dagentx` debug log:ifTable/ifXTable REGISTER 成功 |
+| 驗證點 3 | Wireshark loopback:AgentX Open-PDU / Register-PDU |
+| 驗證點 4 | `snmpget ifDescr.1`:handler 未接,拿到錯誤/timeout 可接受;重點是 Wireshark 看到 Get-PDU 進 705(master 有 dispatch) |
+
+### M2 — GET 接線
+
+| 項目 | 內容 |
+|---|---|
+| 改動 | D:AgentX handler GET/GETNEXT/GETBULK dispatch 到 `nmhGetIfXxx()` |
+| printf | handler 進入點、nmh 回傳值、encode 前 (oid, value) 各一行 |
+| 驗證點 1 | `snmpget ifDescr.1 ifInOctets.1` 值正確(對照 `cat /proc/net/dev`) |
+| 驗證點 2 | `snmpbulkwalk ifTable` 完整:不漏 column、不重複、正確 END(GETNEXT 邊界) |
+| 驗證點 3 | walk varbind 數與 baseline 一致(資料完整性) |
+
+### M3 — GET 量測(PoC 核心命題)
+
+| 項目 | 內容 |
+|---|---|
+| 動作 | 同 M0 方法、同 DUT、同拓撲,量 Plan C image |
+| 注意 | **M2 的 printf 關掉**或包進 debug flag — console printf 會污染 latency |
+| 產出 | `planc.pcapng` + 對照表:baseline vs Plan C,median/p95,ifTable / ifXTable 分列 |
+| 成功標準 | **整段 walk < 50ms**;或至少數量級改善 + 瓶頸分析 |
+
+### M4 — SET 接線
+
+| 項目 | 內容 |
+|---|---|
+| 改動 | E:SET handler(只接 ifAdminStatus)→ 組 URI → lib_moxa_utility patch |
+| Phase 對應(PoC 簡化) | TESTSET:檢查值域(1=up / 2=down)回 noError;COMMITSET:呼 URI patch;UNDOSET:回 `undoFailed`(不做 rollback);CLEANUPSET:no-op |
+| 驗證點 1 | `snmpset ifAdminStatus.X = down` → DUT `ip link` 顯示 down |
+| 驗證點 2 | **無 drift**:web UI / CLI / `GET /api/v1/interfaces/...` 看到 admin-state = down |
+| 驗證點 3 | `snmpset = up` 還原,雙向確認 |
+| 驗證點 4(加分) | 非法值(99)→ TESTSET 擋下,framework 完全沒收到 PATCH |
+
+---
+
+## 5. 風險與未知
+
+| # | 風險 | 影響 | 緩解 |
+|---|---|---|---|
+| 1 | **Aricent AgentX 模組現成程度未知**(改動 C/D 的「待 survey」) | M1/M2 工時可能膨脹 | implementation plan 第一步先 survey;若 Aricent AgentX 殘缺,評估改用 net-snmp subagent lib 掛在 ISS process 內 |
+| 2 | ISS attach 半成品的卡點不明(「705 還沒通」的根因未診斷) | M1 可能踩到 build flag / thread 啟動順序 / bind 位址問題 | M1 驗證點 1–3 逐層收斂;Wireshark + strace 雙工具 |
+| 3 | M3 數字不達標(ISS 直讀也 > 50ms) | PoC 核心命題失敗 | 屬有效結果:profile 瓶頸(snmpd 解碼 / AgentX 通道 / nmh 層),產出給 Plan D 校準;預留 1–2 天 profile buffer |
+| 4 | lib_moxa_utility URI patch API 在 ISS process 內的可用性(link 依賴、執行緒安全) | M4 接線受阻 | survey 時一併確認;備案 `system("curl ...")`(PoC 等級可接受) |
+| 5 | printf 殘留污染 M3 量測 | 數字失真 | M3 前 checklist:grep 確認 printf 全關 |
+| 6 | ies-auto-mibs skip 影響其他 OID(誤殺) | framework 其他 SNMP 功能壞 | skip 條件限定 `ifmibdb/` 字首;M1 後 snmpwalk 一輪非 ifTable 的 OID 確認照常 |
+| 7 | ISS crash/restart 期間 ifTable GET 無人應答(framework 已讓位,無 fallback) | 暫態 GET timeout | PoC 接受;記錄行為供 Plan D 設計參考 |
+
+## 6. PoC 收尾
+
+- 產出:measurement report(baseline vs Plan C 對照表 + pcap)、AgentX 行為記錄(給 Plan D)
+- 程式碼處置:PoC branch 保留不 merge mainline;改動 A(skip ifmibdb)若 M3 達標,後續去留另議(可能直接成為 Plan C 部署形態的一部分)
+- DUT 還原:刷回正式 image
+
+## 7. Open questions(進 implementation plan 前要解)
+
+1. Aricent AgentX 模組檔案位置與現成程度(survey 第一項)
+2. lib_moxa_utility URI patch function 的確切 symbol 與 header
+3. ifAdminStatus 對應的 framework URI 路徑(`/api/v1/interfaces/{port}/...` 確切格式)
+4. snmpd `-Dagentx` debug 輸出在 DUT 上怎麼開(plugin_moxa_snmp 起 snmpd 的方式)
+5. DUT / NMS PC 的拓撲與 Wireshark 抓包環境(NMS 端抓 UDP 161;DUT 端抓 loopback 705 需要 tcpdump 上 DUT)

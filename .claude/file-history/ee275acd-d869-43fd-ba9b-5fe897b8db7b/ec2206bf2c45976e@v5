@@ -1,0 +1,119 @@
+#!/bin/sh
+# fwdcheck_remote.sh <TARGET_OID> <POSITIVE_OID> <NEGATIVE_OID> [N] [IDLE] [PEER]
+#
+# Runs ON THE DUT. Decides whether TARGET_OID's GET is answered by a given
+# AgentX subagent, by counting packets on that subagent's own AgentX TCP stream.
+#
+# PEER selects which subagent to watch, matched against the process name in
+# `ss -tnp` (default ISS):
+#   ISS             -> the ISS AgentX subagent   (agentx_owned.list delegation)
+#   app_moxa_framew -> the framework subagent    (g_reuse_srcs[] groups)
+#
+# Why it is built this way:
+#   - the DUT has no `timeout`, so the capture self-terminates via -G/-W
+#   - :705 carries BOTH subagents, so we filter on the chosen peer's ephemeral
+#     port, re-read here because it changes on every snmpd restart
+#   - the port filter is applied at capture time, so the file stays small and
+#     re-counting it between windows is cheap
+#   - a positive and a negative control are mandatory; without them a broken
+#     capture is indistinguishable from "not forwarded"
+set -u
+
+TARGET=${1:?usage: fwdcheck_remote.sh <target> <positive> <negative> [N] [IDLE] [PEER]}
+POS=${2:?missing POSITIVE control OID}
+NEG=${3:?missing NEGATIVE control OID}
+N=${4:-150}
+IDLE=${5:-15}
+PEER=${6:-ISS}
+
+PCAP=/tmp/fwdcheck.pcap
+COMM=${COMMUNITY:-public}
+SNMPGET=/usr/bin/snmpget
+
+[ -x "$SNMPGET" ] || { echo "FATAL: $SNMPGET missing"; exit 1; }
+
+PEERPORT=$(ss -tnp 2>/dev/null | grep ':705 ' | grep "$PEER" | \
+           sed -n 's/.*127\.0\.0\.1:\([0-9]*\) *127\.0\.0\.1:705.*/\1/p' | head -1)
+if [ -z "$PEERPORT" ]; then
+    echo "INVALID: no ESTABLISHED '$PEER' connection to 127.0.0.1:705."
+    echo "         That subagent is not connected -- nothing it owns can be"
+    echo "         answered over AgentX, and the measurement is meaningless."
+    echo "         Current peers on :705:"
+    ss -tnp 2>/dev/null | grep ':705 ' | sed 's/^/           /'
+    exit 2
+fi
+echo "watching peer '$PEER', AgentX ephemeral port: $PEERPORT"
+
+# Self-terminating capture: exits after one -G period, no kill needed.
+# Duration scales with N -- three bursts of N GETs at ~0.1 s each, plus the two
+# idle windows, plus margin. A fixed duration silently truncates large runs.
+DUR=$(( IDLE * 2 + (N * 3) / 4 + 60 ))
+rm -f "$PCAP"
+tcpdump -i lo -n -U -w "$PCAP" -G "$DUR" -W 1 port "$PEERPORT" >/dev/null 2>/tmp/fwdcheck.err &
+sleep 3
+[ -f "$PCAP" ] || { echo "INVALID: tcpdump did not start (no $PCAP)."; exit 2; }
+
+cnt() { tcpdump -r "$PCAP" 2>/dev/null | wc -l; }
+burst() { i=0; while [ $i -lt "$N" ]; do
+              "$SNMPGET" -v2c -c "$COMM" -On 127.0.0.1 "$1" >/dev/null 2>&1
+              i=$((i + 1)); done; }
+
+sleep "$IDLE";            W0=$(cnt)
+burst "$TARGET";          W1=$(cnt)
+sleep "$IDLE";            W2=$(cnt)
+burst "$POS";             W3=$(cnt)
+burst "$NEG";             W4=$(cnt)
+
+D_TARGET=$((W1 - W0))
+D_IDLE=$((W2 - W1))
+D_POS=$((W3 - W2))
+D_NEG=$((W4 - W3))
+
+echo
+echo "window                                   cumulative   delta"
+printf "idle %ss                                  %-12s -\n"      "$IDLE" "$W0"
+printf "%-4s x TARGET   %-24s %-12s %s\n" "$N" "$TARGET" "$W1" "$D_TARGET"
+printf "idle %ss                                  %-12s %s\n"     "$IDLE" "$W2" "$D_IDLE"
+printf "%-4s x POSITIVE %-24s %-12s %s\n" "$N" "$POS" "$W3" "$D_POS"
+printf "%-4s x NEGATIVE %-24s %-12s %s\n" "$N" "$NEG" "$W4" "$D_NEG"
+echo
+
+# The NEGATIVE control is the background estimate: it is a burst of the same N
+# GETs, over a window of the same length, against an OID this peer does not
+# serve -- so whatever it counted is background. Subtract it from both bursts
+# and compare TARGET against POSITIVE.
+#
+# Do NOT compare TARGET against NEGATIVE directly. Background accrues with TIME
+# and a burst's duration grows with N, so that ratio does not improve as N
+# grows -- a busy subagent inflates the denominator and a served OID is reported
+# INCONCLUSIVE no matter how large N gets. Measured 2026-08-12: TARGET 239,
+# POSITIVE 257, NEGATIVE 51 -- 93% of the positive control, yet the old
+# TARGET/NEGATIVE rule called it 4x and inconclusive.
+NET_TARGET=$((D_TARGET - D_NEG))
+NET_POS=$((D_POS - D_NEG))
+[ "$NET_TARGET" -lt 0 ] && NET_TARGET=0
+echo "background (= NEGATIVE burst) : $D_NEG"
+echo "net POSITIVE : $NET_POS   net TARGET : $NET_TARGET"
+
+if [ "$NET_POS" -lt "$((N / 4))" ]; then
+    echo
+    echo "INVALID: the positive control moved $NET_POS packets net over $N GETs"
+    echo "         (needs >= $((N / 4))). The harness is wrong, not the target."
+    echo "         Check: did tcpdump run? is $PEERPORT still '$PEER's port"
+    echo "         (snmpd restarted mid-run)? is POSITIVE really served by '$PEER'?"
+    exit 2
+fi
+
+echo "TARGET / POSITIVE = $((NET_TARGET * 100 / NET_POS))%"
+if [ $((NET_TARGET * 2)) -ge "$NET_POS" ]; then
+    echo "VERDICT: SERVED BY '$PEER' -- $TARGET is answered over AgentX by that subagent."
+elif [ $((NET_TARGET * 10)) -le "$NET_POS" ]; then
+    echo "VERDICT: NOT SERVED BY '$PEER' -- $TARGET is answered elsewhere (in-master or another subagent)."
+else
+    echo "VERDICT: INCONCLUSIVE -- net TARGET is between 10% and 50% of the positive"
+    echo "         control. Increasing N will NOT help (see comment above); look for"
+    echo "         a partially-served group or a wrong POSITIVE control instead."
+fi
+
+echo
+echo "capture left at $PCAP (delete it when done)"

@@ -1,0 +1,116 @@
+################################################################################
+#
+# lib_moxa_ies_auto_mibs
+#
+################################################################################
+
+LIB_MOXA_IES_AUTO_MIBS_SITE="$(TOPDIR)/dl/lib_moxa_ies_auto_mibs"
+LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING=YES
+# 3rdparty_net_snmp: mapping_reuse.c #includes its net_*.h + snmp_tools headers.
+LIB_MOXA_IES_AUTO_MIBS_DEPENDENCIES=lib_moxa_framework_uri 3rdparty_parson 3rdparty_net_snmp lib_moxa_system
+
+# ---------------------------------------------------------------------------
+# Product -D flags for mapping_reuse.c. These MUST match the derivation in
+# 3rdparty_net_snmp.mk so that lib_moxa_ies_auto_mibs compiles the SAME net_*.h
+# entry set as ies-auto-mibs (else migrated OIDs guarded by #if would silently
+# vanish). KEEP IN SYNC with 3rdparty_net_snmp.mk.
+# ---------------------------------------------------------------------------
+LIB_MOXA_IES_L3_BASE=no
+ifeq ($(BR2_MOXA_PRODUCT_NAME),"65M-5000M")
+LIB_MOXA_IES_PRODUCT_NAME := $(subst -,_,M$(BR2_MOXA_PRODUCT_NAME))
+else
+LIB_MOXA_IES_PRODUCT_NAME := $(subst -,_,$(BR2_MOXA_PRODUCT_NAME))
+endif
+ifeq ($(BR2_MOXA_PRODUCT_NAME),"MDS-G4000-L3")
+LIB_MOXA_IES_L3_BASE=yes
+else ifeq ($(BR2_MOXA_PRODUCT_NAME),"MRX-Q4000-L3")
+LIB_MOXA_IES_L3_BASE=yes
+endif
+ifeq ($(BR2_MOXA_SW_PACKAGE), "L3_BASE")
+LIB_MOXA_IES_L3_BASE=yes
+endif
+
+LIB_MOXA_IES_REUSE_CFLAGS = -D$(subst ",,$(LIB_MOXA_IES_PRODUCT_NAME))
+ifneq ($(BR2_MOXA_HW_MAC), "")
+LIB_MOXA_IES_REUSE_CFLAGS += -D$(BR2_MOXA_HW_MAC)
+endif
+ifneq ($(BR2_MOXA_PRODUCT_LINE), "")
+LIB_MOXA_IES_REUSE_CFLAGS += -D$(BR2_MOXA_PRODUCT_LINE)
+endif
+ifneq ($(BR2_MOXA_MAC_SDK), "")
+LIB_MOXA_IES_REUSE_CFLAGS += -D$(BR2_MOXA_MAC_SDK)
+endif
+ifeq ($(LIB_MOXA_IES_L3_BASE), yes)
+LIB_MOXA_IES_REUSE_CFLAGS += -DINCLUDE_MOXA_L3
+endif
+LIB_MOXA_IES_REUSE_CFLAGS += -D$(BR2_MOXA_PRODUCT_MODEL)
+ifeq (${BR2_MOXA_DHCP_CLIENT_OPTION_66_67}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DHCP_CLIENT_OPTION_66_67
+endif
+ifeq (${BR2_MOXA_DHCP_SERVER_OPTION_66_67}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DHCP_SERVER_OPTION_66_67
+endif
+ifeq (${BR2_MOXA_DHCP_SERVER_OPTION_121}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DHCP_SERVER_OPTION_121
+endif
+ifeq (${BR2_MOXA_MULTICOUPLING}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_MULTICOUPLING
+endif
+ifeq (${BR2_MOXA_PHR}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_PHR
+endif
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_INTEL_TEMP_CTRL}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_INTEL_TEMP_CTRL
+endif
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_TRACKING}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_TRACKING
+endif
+ifeq (${BR2_MOXA_DI}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DI
+endif
+ifeq (${BR2_MOXA_DO_RELAY}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DO_RELAY
+endif
+ifeq (${BR2_MOXA_MACSEC}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_MACSEC
+endif
+ifeq (${BR2_MOXA_DUAL_HOMING_HIDE_UI}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DUAL_HOMING_HIDE_UI
+endif
+ifeq (${BR2_MOXA_TURBO_CHAIN_HIDE_UI}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_TURBO_CHAIN_HIDE_UI
+endif
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_GOOSE_CHECK}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_GOOSE_CHECK
+endif
+ifeq (${BR2_MOXA_DRC}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_DRC
+endif
+ifeq (${BR2_MOXA_RSTP_SWIFT}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_RSTP_SWIFT
+endif
+ifeq (${BR2_MOXA_MIRROR_VLAN_MIRROR}, y)
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_MIRROR_VLAN_MIRROR
+endif
+LIB_MOXA_IES_REUSE_CFLAGS += -DMOXA_CUST
+
+# Canonical ies-auto-mibs headers + net_*.h (from the 3rdparty source tree).
+LIB_MOXA_IES_REUSE_CFLAGS += \
+	-I$(TOPDIR)/dl/3rdparty_net_snmp/snmp_tools/inc \
+	-I$(TOPDIR)/dl/3rdparty_net_snmp/ies-auto-mibs \
+	-I$(TOPDIR)/dl/lib_moxa_system/include
+
+define LIB_MOXA_IES_AUTO_MIBS_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) CC=$(TARGET_CC) \
+		EXTRA_CFLAGS="$(LIB_MOXA_IES_REUSE_CFLAGS)"
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(STAGING_DIR) install CC=$(TARGET_CC)
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_TARGET_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install CC=$(TARGET_CC)
+endef
+
+$(eval $(generic-package))

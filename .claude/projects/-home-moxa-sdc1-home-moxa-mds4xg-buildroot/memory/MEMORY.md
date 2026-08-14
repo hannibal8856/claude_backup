@@ -1,0 +1,3 @@
+- [Build order](feedback_build_order.md) — plugin_moxa_snmp before rust_moxa_build, then final make
+- [Docs only on explicit request](feedback_docs_only_on_explicit_request.md) — during plan Q&A, treat as clarification; don't auto-offer docx/pptx updates
+- [ISS AgentX subagent vs snmpd 161 conflict](project_iss_agentx_subagent_161_conflict.md) — ISS standalone agent binds 161 & crashes snmpd; fix = disable snmpagent + enable snmpsubagent master 127.0.0.1:705

@@ -1,0 +1,32 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 11:22 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.605.1.1.1.1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.2.1 = INTEGER: 0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.2.2 = INTEGER: 0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.3.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.3.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.4.1 = INTEGER: 1500
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.4.2 = INTEGER: 1500
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.5.1 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.5.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.6.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.6.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.7.1 = IpAddress: 192.168.127.253
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.7.2 = IpAddress: 192.168.222.253
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.8.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.8.2 = IpAddress: 255.255.255.0
+
+$ cat -n /moxa/run/flask-moxa-config-layer/RunningConfig/ipInterface.json 2>/dev/null | head
+    1  {"l3VlanIfTable":[{"adminStatusUpEnable":true,"ifName":"vlan1","alias":"","ipv4":{"ipAddress":"192.168.127.253","netmask":"255.255.255.0"},"mtu":1500,"
+proxyArpEnable":false},{"adminStatusUpEnable":true,"ifName":"vlan222","ipv4":{"ipAddress":"192.168.222.253","netmask":"255.255.255.0"},"alias":"","mtu":1500,"p
+roxyArpEnable":false}],"loopbackIfTable":[]}
+
+(change to NOS v7.0 Build 2026_0713_1621 )
+
+
+
+$ 
+$ cat -n /moxa/run/flask-moxa-config-layer/RunningConfig/ipInterface.json 2>/dev/null | head
+     1  {"l3VlanIfTable":[{"adminStatusUpEnable":true,"ifName":"vlan1","alias":"","ipv4":{"ipAddress":"192.168.127.253","netmask":"255.255.255.0"},"mtu":1500,"
+proxyArpEnable":true,"valid":true},{"adminStatusUpEnable":true,"ifName":"vlan222","ipv4":{"ipAddress":"192.168.222.253","netmask":"255.255.255.0"},"alias":"","
+mtu":1515,"proxyArpEnable":false,"valid":true}],"loopbackIfTable":[]}

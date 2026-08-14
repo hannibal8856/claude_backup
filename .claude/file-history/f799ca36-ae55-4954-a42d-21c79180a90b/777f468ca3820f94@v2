@@ -1,0 +1,128 @@
+#!/usr/bin/expect -f
+#
+# Drive the Moxa DUT serial console.
+#   Args:  $argv = list of commands to run
+#   Log :  ~/console_<YYYYMMDD>_<HHMMSS>.log (full session)
+#
+# Exit codes mirror SKILL.md:
+#   0 ok, 2 login failed, 3 no prompt, 4 su failed, 5 timeout
+#
+
+set timeout       15
+set device        [expr {[info exists env(DUT_CONSOLE_DEV)]  ? $env(DUT_CONSOLE_DEV)  : "/dev/ttyS0"}]
+set baud          [expr {[info exists env(DUT_CONSOLE_BAUD)] ? $env(DUT_CONSOLE_BAUD) : "115200"}]
+set username      "admin"
+set login_pw      "moxa"
+set root_pw       "moxa"
+
+# ---- logging ------------------------------------------------------
+set log_path [exec sh -c {echo $HOME/console_$(date +%Y%m%d_%H%M%S).log}]
+log_file -a $log_path
+log_user 1
+# Header in the log
+send_user "=== dut-console session $log_path ===\n"
+send_user "=== device $device @ $baud ===\n"
+
+# ---- spawn picocom ------------------------------------------------
+spawn picocom -b $baud --noinit --noreset --quiet $device
+set pico_id $spawn_id
+
+# ---- helper: send carriage return to wake the console -------------
+proc wake {} {
+    global pico_id
+    send -i $pico_id "\r"
+}
+
+# ---- state machine: login / su / unknown --------------------------
+# State after this block: at a usable prompt on the DUT.
+set state "unknown"
+set tries 0
+set max_tries 6
+
+while {$state eq "unknown" && $tries < $max_tries} {
+    incr tries
+    wake
+    expect {
+        -re "(L|l)ogin: ?$" {
+            send "$username\r"
+            expect {
+                -re "(P|p)assword: ?$" {
+                    send "$login_pw\r"
+                    exp_continue
+                }
+                -re "Login incorrect|Authentication failure" {
+                    send_user "\n*** Login failed ***\n"
+                    exit 2
+                }
+                -re "\\\$ ?$"  { set state "linux_user" }
+                -re "# ?$"     { set state "linux_root" }
+                -re ">\\s*$"   { set state "iss"        }
+                timeout        { ; # loop again }
+            }
+        }
+        -re "\\\$ ?$"  { set state "linux_user" }
+        -re "# ?$"     { set state "linux_root" }
+        -re ">\\s*$"   { set state "iss"        }
+        timeout        { ; # loop again }
+    }
+}
+
+if {$state eq "unknown"} {
+    send_user "\n*** Could not detect a prompt after $max_tries attempts ***\n"
+    catch {send "\x01\x18"}
+    exit 3
+}
+
+# ---- su to root if we landed on a Linux non-root shell ------------
+if {$state eq "linux_user"} {
+    send "su\r"
+    expect {
+        -re "(P|p)assword: ?$" {
+            send "$root_pw\r"
+            expect {
+                -re "# ?$" { set state "linux_root" }
+                -re "su: |Authentication failure" {
+                    send_user "\n*** su failed ***\n"
+                    catch {send "\x01\x18"}
+                    exit 4
+                }
+                timeout {
+                    send_user "\n*** Timeout waiting for root prompt ***\n"
+                    catch {send "\x01\x18"}
+                    exit 5
+                }
+            }
+        }
+        -re "# ?$" { set state "linux_root" }
+        timeout {
+            send_user "\n*** Timeout sending su ***\n"
+            catch {send "\x01\x18"}
+            exit 5
+        }
+    }
+}
+
+send_user "\n=== reached state: $state ===\n"
+
+# ---- run user commands --------------------------------------------
+foreach cmd $argv {
+    send_user "\n--- CMD: $cmd ---\n"
+    send -- "$cmd\r"
+    expect {
+        -re "(\\\$|#|>) ?$" { ; # got a prompt, next command }
+        timeout {
+            send_user "\n*** Timeout waiting for prompt after: $cmd ***\n"
+            catch {send "\x01\x18"}
+            exit 5
+        }
+    }
+}
+
+# ---- exit picocom cleanly: C-a C-x --------------------------------
+send "\x01\x18"
+expect eof
+catch {wait}
+
+send_user "\n=== session saved: $log_path ===\n"
+puts $log_path
+exit 0

@@ -1,0 +1,199 @@
+//! Rust surface over `lib_moxa_ies_auto_mibs`: OID -> URI lookup.
+//!
+//! The C API was reduced to scalars and C strings precisely so this layer stays
+//! thin (design D6). There is one wrapper per call and no `unsafe` beyond the
+//! `extern "C"` block plus the pointer-to-value conversions immediately after a
+//! successful lookup.
+//!
+//! Nothing here decides what the table contains - see `lib_moxa_ies_auto_mibs`,
+//! which compiles it from the same ies-auto-mibs source snmpd builds from.
+
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_uchar, c_ulong};
+
+/// Mirrors `struct iesmap_result`. Never constructed by Rust except as an
+/// out-parameter, and never held across a call: the string pointers refer to
+/// the C library's table.
+#[repr(C)]
+struct IesmapResult {
+    uri: *const c_char,
+    mod_uri: *const c_char,
+    uri_index: *const c_char,
+    iss_build: c_int,
+    val_type: c_int,
+    oid_index: c_int,
+    mode: c_int,
+    flags: *const c_uchar,
+}
+
+#[link(name = "moxa_ies_auto_mibs")]
+extern "C" {
+    fn iesmap_lookup(oid: *const c_ulong, oid_len: usize, out: *mut IesmapResult) -> c_int;
+    fn iesmap_entry_count() -> usize;
+    fn iesmap_flag_bytes() -> usize;
+}
+
+/// The `IES_FLAG_SNMP_*` bits this crate exposes.
+///
+/// The numbers match `IESMAP_FLAG_*` in `iesmap.h`, which the C library asserts
+/// against the upstream enum at compile time. That covers C against
+/// ies-auto-mibs; what covers Rust against C is `test_known_flag_is_set`, which
+/// checks a real entry rather than the constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Flag {
+    UriStatus = 3,
+    UriConfigChain = 10,
+    ReplaceTruthValue = 16,
+}
+
+/// One MIB entry, owned. The C table lives for the life of the process, but
+/// copying keeps `Entry` free of raw pointers so it can be held across an
+/// `await` and moved between tasks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// e.g. `"io/power/system/"`.
+    pub uri: String,
+    /// MIB-name to config-key bridge; `None` when the entry has none.
+    pub mod_uri: Option<String>,
+    pub uri_index: String,
+    /// 1 = served by ISS, 0 = served by the framework.
+    pub iss_build: i32,
+    /// `SNMP_DATA_TYPE_*`.
+    pub val_type: i32,
+    pub oid_index: i32,
+    /// `HANDLER_CAN_RONLY` / `HANDLER_CAN_RWRITE`.
+    pub mode: i32,
+    flags: Vec<u8>,
+}
+
+impl Entry {
+    /// Whether `flag` is set on this entry.
+    ///
+    /// The bit layout mirrors `IES_FLAG_BITS_CHK` (ies_flag_bits.h:15) rather
+    /// than calling back into C, because the flags are copied into `Entry`.
+    /// `test_known_flag_is_set` checks a real entry, which is what would catch
+    /// the layout or the numbering drifting.
+    pub fn flag_is_set(&self, flag: Flag) -> bool {
+        let bit = flag as i32;
+        if bit < 0 {
+            return false;
+        }
+        let byte = (bit / 8) as usize;
+        match self.flags.get(byte) {
+            Some(b) => (b & (1u8 << (bit % 8))) != 0,
+            None => false,
+        }
+    }
+}
+
+/// Look an OID up. Returns `None` when no entry covers it.
+///
+/// The match is longest-prefix: a GET carries the full instance OID while an
+/// entry names only its column, so passing either the column OID or the same
+/// OID with an index appended finds the same entry.
+pub fn lookup(oid: &[u64]) -> Option<Entry> {
+    if oid.is_empty() {
+        return None;
+    }
+
+    // c_ulong is 32-bit on this target and 64-bit on the host, so the caller's
+    // u64 subidentifiers are narrowed here rather than at every call site.
+    let subids: Vec<c_ulong> = oid.iter().map(|&v| v as c_ulong).collect();
+
+    // SAFETY: subids is a valid slice of subids.len() elements, and raw is
+    // fully written by the C side before it reports success.
+    let raw = unsafe {
+        let mut raw = std::mem::MaybeUninit::<IesmapResult>::uninit();
+        if iesmap_lookup(subids.as_ptr(), subids.len(), raw.as_mut_ptr()) != 0 {
+            return None;
+        }
+        raw.assume_init()
+    };
+
+    // SAFETY: on success the C library guarantees uri and uri_index are
+    // non-NULL, NUL-terminated and point into a table that is never freed.
+    // mod_uri is NULL when absent. flags points at iesmap_flag_bytes() bytes.
+    unsafe {
+        let flag_len = iesmap_flag_bytes();
+        Some(Entry {
+            uri: cstr_to_string(raw.uri)?,
+            mod_uri: if raw.mod_uri.is_null() {
+                None
+            } else {
+                cstr_to_string(raw.mod_uri)
+            },
+            uri_index: cstr_to_string(raw.uri_index).unwrap_or_default(),
+            iss_build: raw.iss_build,
+            val_type: raw.val_type,
+            oid_index: raw.oid_index,
+            mode: raw.mode,
+            flags: if raw.flags.is_null() || flag_len == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(raw.flags, flag_len).to_vec()
+            },
+        })
+    }
+}
+
+/// How many entries the table holds. Recorded per build so a change is visible.
+pub fn entry_count() -> usize {
+    // SAFETY: no arguments, no shared state the caller can invalidate.
+    unsafe { iesmap_entry_count() }
+}
+
+/// # Safety
+/// `p` must be NULL or a valid NUL-terminated C string.
+unsafe fn cstr_to_string(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    CStr::from_ptr(p).to_str().ok().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The same anchor Task 3 uses: mx_device_io's first entry, read from
+    /// net_mx_device_io.h rather than from the MIB document.
+    #[test]
+    fn test_lookup_device_io() {
+        let e = lookup(&[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 1, 1, 1])
+            .expect("mx_device_io entry must be present");
+        assert_eq!(e.uri, "io/power/system/");
+        assert_eq!(e.iss_build, 0);
+    }
+
+    /// A GET carries the instance OID, not the column OID.
+    #[test]
+    fn test_lookup_is_longest_prefix() {
+        let column = lookup(&[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 1, 1, 2]).unwrap();
+        let instance = lookup(&[1, 3, 6, 1, 4, 1, 8691, 602, 8, 6, 2, 1, 1, 2, 1]).unwrap();
+        assert_eq!(column, instance);
+    }
+
+    /// This is what checks Rust's Flag numbers against the C header: if they
+    /// drift, a flag that is set reads as clear, which is silent everywhere
+    /// else.
+    #[test]
+    fn test_known_flag_is_set() {
+        let e = lookup(&[1, 3, 6, 1, 4, 1, 8691, 603, 5, 5, 1, 1])
+            .expect("portMirror/enable must be present");
+        assert_eq!(e.uri, "portMirror/enable");
+        assert!(e.flag_is_set(Flag::ReplaceTruthValue));
+        assert!(!e.flag_is_set(Flag::UriStatus));
+    }
+
+    #[test]
+    fn test_unknown_oid() {
+        assert!(lookup(&[1, 3, 6, 1, 4, 1, 99999, 1]).is_none());
+        assert!(lookup(&[]).is_none());
+    }
+
+    #[test]
+    fn test_entry_count_is_not_empty() {
+        assert!(entry_count() > 0);
+    }
+}

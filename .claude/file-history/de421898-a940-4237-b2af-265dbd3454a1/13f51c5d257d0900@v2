@@ -1,0 +1,39 @@
+#!/usr/bin/expect -f
+# Run one shell command on the DUT over SSH (Plan E partition lands in a Linux
+# shell). SSH rather than the serial console: the serial wrapper deadlocks
+# against moxash, and a stuck SSH session costs nothing.
+# usage: dut_cmd.exp "<command>"
+set cmd [lindex $argv 0]
+set timeout 30
+log_user 1
+
+spawn ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+    admin@192.168.127.253
+
+expect {
+    -re {[Pp]assword:} { send "moxa\r" }
+    timeout { puts "\n@@FAIL: no password prompt"; exit 2 }
+}
+
+expect {
+    -re {moxa#\s*$} { puts "\n@@FAIL: landed in moxash - wrong partition"; send "exit\r"; expect eof; exit 3 }
+    -re {[#$]\s*$}  { }
+    timeout         { puts "\n@@FAIL: no shell prompt"; exit 2 }
+}
+
+# Become root; /var/log/messages is not world-readable.
+send "su\r"
+expect {
+    -re {[Pp]assword:} { send "moxa\r"; expect -re {[#$]\s*$} }
+    -re {[#$]\s*$}     { }
+    timeout            { puts "\n@@FAIL: su hung"; exit 2 }
+}
+
+send "$cmd\r"
+expect -re {[#$]\s*$}
+send "echo @@RC=\$?\r"
+expect -re {[#$]\s*$}
+send "exit\r"
+send "exit\r"
+expect eof

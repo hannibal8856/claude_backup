@@ -1,0 +1,20 @@
+#!/bin/sh
+echo "### /run/util_debug 現況"
+ls -la /run/util_debug/ 2>/dev/null || echo "(目錄不存在)"
+echo "### 三個 debug writer 的檔案是否存在"
+for f in ggggggg sssssss exec_sh_cmd_time; do
+    if [ -f /run/util_debug/$f ]; then
+        printf '  %-18s 存在,%s bytes  <-- 還在寫!\n' "$f" "$(stat -c%s /run/util_debug/$f)"
+    else
+        printf '  %-18s 不存在 ✓\n' "$f"
+    fi
+done
+echo "### binary 裡還有沒有那些字串"
+for pair in "libnetsnmpmibs.so.40.2.0 util_debug/ggggggg" "libnetsnmp.so.40.2.0 util_debug/sssssss" "libmoxa_util.so util_debug/exec_sh_cmd_time"; do
+    set -- $pair
+    n=$(strings /usr/lib/$1 2>/dev/null | grep -c "$2")
+    printf '  %-28s %s -> %s 筆\n' "$1" "$2" "$n"
+done
+echo "### /run 用量"
+df -h /run | tail -1
+echo "### DONE"

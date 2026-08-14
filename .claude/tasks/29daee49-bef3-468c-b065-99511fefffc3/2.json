@@ -1,0 +1,9 @@
+{
+  "id": "2",
+  "subject": "Decide whether to rebuild .swu before the soak (3 debug writers still on the DUT)",
+  "description": "已解決 —— 走了選項 (a)。\n\n2026-08-09 因為 mxMms 的 dlmod 搬遷需要出一顆新 image,順帶把三個 debug writer 的移除\n一併帶進去了,不必為 soak 單獨建置。\n\nDUT 現在跑 partition 1 = 2026_0809_1751,實測確認:\n  /run/util_debug/ggggggg           不存在 ✓\n  /run/util_debug/sssssss           不存在 ✓\n  /run/util_debug/exec_sh_cmd_time  不存在 ✓\n  libnetsnmpmibs.so.40.2.0  含 \"util_debug/ggggggg\"          -> 0 筆\n  libnetsnmp.so.40.2.0      含 \"util_debug/sssssss\"          -> 0 筆\n  libmoxa_util.so           含 \"util_debug/exec_sh_cmd_time\" -> 0 筆\n  /run 用量 940 KB / 202 MB(先前會持續成長)\n剩下的 debug_ctrl_block 與 debug_log_5 是正規的 gated trace,不是無條件寫入。\n\n=> soak 可以直接在現有 p1 上跑,記憶體相關的結論有效。\np2 對照組 2026_0805_2335 完好未動。",
+  "activeForm": "Deciding the soak test image",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

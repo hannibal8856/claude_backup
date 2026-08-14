@@ -1,0 +1,127 @@
+# Handoff — SNMP Plan E(2026-08-12,session "snmp-plan-E reopen 6")
+
+接續 `~/handoff-snmp-plan-E-2026-08-12.md`(reopen 5)。
+**本輪主軸:推翻 ADR-0025,並讓 `+getfwd` 能用在沒有 RO entry 的前綴。**
+
+---
+
+## 🔴 接手第一件事:DUT 狀態與燒錄方向
+
+```
+fwrbootpart = 1     BUILD_TIME = 2026_0812_1805   ← 本輪成果(含 trace instrumentation)
+p2          = mainline 2026_0805_2335            ← 對照組,全程未動
+bind mount  = 無     trace 旗標 = 關閉     /tmp = 已清
+```
+
+**⚠️ 停在 p1,所以直接燒會蓋掉 p2 的 mainline。要燒必須先切 p2**(`printf 'Y\nY\n' | /moxa/fwr_change.sh`),
+再確認 stage 1 顯示 `will WRITE: partition 1` 與 `control: running the expected control group`。
+
+**⚠️ `2026_0812_1805` 與 `2026_0812_1532` 都含 trace instrumentation,任何時間數字都不可用**
+—— 連把旗標關掉都不行,`LibUtil_CheckDbgFlgBits()` 每次呼叫都跑一輪
+`ftok`+`shmget`+`shmat`(無快取),而 `T4 GATE` 在每個 RW GET 的路徑上。
+
+`~/swu/` 現有:`0811_1349`、`0812_1136`(fiber_check_event 驗收)、`0812_1532`、`0812_1805`。
+
+---
+
+## 本輪完成
+
+### 1. ADR-0030:推翻 ADR-0025 的核心主張
+
+`+getfwd` 對 `stdethdb/` 與 `mxportdb/` **不是**靜默無效 —— **四個 prefix 全部都會轉發**,
+有封包證據(五個 AgentX Get PDU 送到 `ISS.exe`,OID 逐一解碼比對)。
+ADR-0025 記載的「未根因缺陷」不存在。
+
+差異成因的三個候選:兩個被 git 考古排除、一個(bind mount 熱套用)被實測排除,
+**只剩「舊 `fwdcheck.sh` 判準」存活 —— 但唯一存活 ≠ 已證實**,而且舊腳本與舊 pcap 都已不存在,
+無法直接還原。
+
+### 2. ADR-0031:`+getfwd` 的三種 probe 來源
+
+`probe=<oid>`(list 明寫)→ 既有候選池 → 推導(往上找第一個非本地祖先)。
+加上**身分檢查**:解析到自己的 registration 就退回本地,所以 probe 錯的最壞結果是
+「沒有加速」,不會掉值。
+
+**`probe=` 已驗證可用,`mxqosdb/` 真的轉發了**(`T3 FIND` 的 `rootoid=.603.2.9`,
+即 ISS 註冊的整個 MIB root)。既有四個 prefix 回歸通過、逐項不變。
+
+**⚠️ 推導路徑(`T5 DERIVE`)至今從未被觸發**,編進去了但未經驗證。
+
+---
+
+## 🔴 下一步:真正的阻礙是「列入即委派」的耦合
+
+列入一個前綴會**同時**做 RO 委派 + GET 轉發,而全 RW 型前綴只需要後者。
+`mxqosdb/` 實測:唯一那個實際 RO 的欄位被委派給 ISS,**ISS 不服務它,整欄消失**
+(`.1.5` 表 180→168 varbind、15→14 欄;撤掉後回到 15)。
+
+**所以下一步不是繼續找 probe,而是讓「轉發」與「委派」可以分開。**
+
+---
+
+## 會讓你踩坑的五件事
+
+1. **snmpd 重啟會清掉 trace 旗標。** 每次重啟後都要重新 `moxa_snmp_tools --enable`,
+   否則會看到「什麼都沒發生」的假象 —— 我為此得到過一個完全錯誤的結論。
+2. **重啟 snmpd 的支援路徑是 moxash**,`con t` → `snmp-ser acc dis` → `snmp-ser acc en`。
+   **`acc en` 有 `[y/N]` 確認**,非互動管道會執行完 `dis`(服務停掉)就卡住。
+   可用的 expect 腳本:`~/…/scratchpad/moxash_snmp_restart.exp`(已處理 y/N)。
+   `systemctl restart app_moxa_snmp_server.service` 也會重跑註冊,但不是支援路徑。
+3. **`net_*.h` 的 `.mode` 不是實際 mode** —— `ies_auto_mibs_setup_net_*.c` 會覆寫
+   (實例:`net_mxQosdb.c:134` 把宣告 RWRITE 的欄位改成 RONLY)。
+   **靜態普查不可靠**,實際值看執行期 `T1 NOTE`。
+4. **`T4 GATE` 有沒有出現 = 這個前綴到底是誰在服務。** 沒有 → ISS 已直接接走
+   (`stdlldp/` 就是),`+getfwd` 對它沒有意義。
+5. **背景指令不要接管線。** `cmd | tail` 會讓 exit code 變成 `tail` 的 0,
+   我因此把一次**編譯失敗**回報成成功;`expect | sed` 則會讓輸出被緩衝住,看起來像機器掛了。
+
+## 建置
+
+**用 `~/mds4xgl3/rebuild_snmp_plan_e.sh`,不要手打指令串。** 順序寫死在裡面
+(所有 cargo 透過 `path=` 讀到的 crate 都必須在 `rust_moxa_build` 之前),
+build 前後各做一次 `cp -n` 備份 `.swu` 到 `~/swu/`。
+
+---
+
+## Commit(全部未 push)
+
+| repo | commit | 內容 |
+|---|---|---|
+| `moxabuild` | `673b27d` `f15d31a` `af80334` `8d691c1` `3b458c7` `7eefb85` | ADR-0027 ④ 修訂、ADR-0029 證據路徑、ADR-0030 |
+| | `cfa8e25` | ADR-0026 代為納入版控(作者 `snmp-plan-E-trace`,已不可達) |
+| | `9f0e4ae` | `rebuild_snmp_plan_e.sh` |
+| | `6ac6ce5` | ADR-0031 |
+| `3rdparty_net_snmp` | `f46953b` | trace instrumentation(**DEBUG ONLY**) |
+| | `5061248` | 三種 probe 來源 + 身分檢查 |
+| `plugin_moxa_snmp` | `8f626e1` | `stdethdb/` `mxportdb/` 兩行 `+getfwd` |
+
+**trace 的編譯期開關尚未做** —— 使用者裁示與 `trace 2` 的改法一起做,
+而他的 ① 已撤回(`agentx_got_response()` 沒有 per-request callback,無掛鉤點),
+所以現在沒有相依,隨時可做。
+
+## 證據(`~/pcap/`,檔名 = 測試日期 + feature + firmware)
+
+```
+2026-08-12-getfwd-optin-4prefix-2026_0812_1532.pcap[.tcpdump.log][.trace.txt]   366 pkt / 0 dropped
+2026-08-12-getfwd-optin-verify-2026_0812_1532.pcap(+ sidecar)                   88 pkt
+2026-08-12-getfwd-stdlldp-hotswap-2026_0812_1805.pcap(+ sidecar)                74 pkt
+2026-08-12-agentx-sessions-2026_0812_1532.txt
+2026-08-12-getfwd-trace-debug_log_5-2026_0812_1532.txt
+```
+
+## 未解 / 待辦
+
+- **讓轉發與委派分開**(上面那條,最重要)
+- **推導路徑從未被驗證** —— 需要一個「in-master 在服務、且候選池為空」的前綴
+- **證實舊 `fwdcheck.sh` 判準是 ADR-0025 的差異來源** —— 用現行判準跑一個已知會轉發的
+  案例;⚠️ **這個實驗只能證實、不能否證**(測的是已修正的版本)
+- **`LibUtil_CheckDbgFlgBits` 熱路徑成本** —— 出貨版 `:3270` 每個 GET 都付一次 SHM attach,
+  量級未測,**是候選不是發現**
+- **既有缺陷**:`.603.2.9.1.2.1.3` 與 `.603.2.9.1.3` 的 GETNEXT 回 NULL 且不遞增
+- **ADR-0025 要不要破例加回指標**(本專案慣例是單向的,但單獨讀它會看到已被推翻的主張)
+
+## 跨 session
+
+- `snmp outline CIC 3` —— 文件已依 ADR-0030 改正四處,**DUT 不碰**
+- `snmp-plan-E trace 2` —— 全程唯讀,提供了 git 考古與多次設計指正,**DUT 不碰**
+- **DUT 操作權 2026-08-12 由使用者收回給本 session**,五個 peer 都已廣播並確認

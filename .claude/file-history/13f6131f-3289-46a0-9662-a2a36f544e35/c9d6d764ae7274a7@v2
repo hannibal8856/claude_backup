@@ -1,0 +1,139 @@
+# ADR-0011: Plan C mod.1 —— 以 agentx_owned.list 將 stdethdb/（EtherLike-MIB dot3）委派給 ISS AgentX subagent
+
+Status:
+  Proposed（DUT 實測完成 2026-08-06，BUILD_TIME 2026_0730_1302，結果為淨正向；
+  尚未寫入 repo 的 `plugin_moxa_snmp/app/script/agentx_owned.list`。
+  轉 Accepted 的前提見 Consequences 的「待決項」—— `dot3PauseAdminMode` 是否補一條
+  GET-forward rule。）
+
+Date: 2026-08-06
+
+Context:
+  Plan C 的 `agentx_owned.list` 機制自導入以來只委派了一個群組（`ifmibdb/`）。
+  為了驗證此機制可否推廣，需要挑一個 `iss_build == 1`（ISS 領域）的 MIB group
+  作為第二個案例實測。
+
+  候選評估（依 `ies-auto-mibs/net_*.h` 的 RO/RW 分佈與 URI 前綴統計）後選定
+  `net_stdethdb.h` / 前綴 `stdethdb/`（EtherLike-MIB dot3，`.1.3.6.1.2.1.10.7`），
+  理由：
+  1. 與已驗證的先例 `ifmibdb/` 同型 —— 同為 ISS 掌握的 switching 層標準 per-port MIB，
+     且 `RegisterSTDETH()` 就在 `RegisterIFMIB()` 下一行、同一個 `#ifdef SNMP_2_WANTED`、
+     同一個 CFA task（`code/future/cfa2/src/cfamain.c:872`）。
+  2. 比先例單純：34 欄中只有 1 欄 RW（`Dot3PauseAdminMode`），先例 ifmibdb 有 7 欄 RW。
+     但仍會實際走到 `is_agentx_owned()` 的 RO/RW 分流，不會退化成「全 RO」的假測試。
+  3. 標準 MIB（RFC 3635），語意由 RFC 定死，不存在「我們對還是 mainline 對」的判斷問題；
+     且 dot3StatsTable 每個 port 一定有值，before/after 比對才有意義。
+  4. 五張表（dot3Coll/Control/HCStats/Pause/StatsTable）共用 `stdethdb/` 前綴，list 只加一行。
+
+  委派前的 in-master 基線（DUT 192.168.127.253，12 ports）：
+  `snmpwalk .1.3.6.1.2.1.10.7` = **348 varbinds**，`net_stdethdb.h` 宣告 34 欄只回 29 欄。
+  缺的 5 欄依 MIB 全部是 `MAX-ACCESS read-only` + `STATUS current`（即依 MIB 都應該出現）：
+  `.2.1.1` Dot3StatsIndex、`.2.1.13` Dot3StatsFrameTooLongs、
+  `.2.1.16` Dot3StatsInternalMacReceiveErrors、`.5.1.3` Dot3CollFrequencies（整張表空）、
+  `.9.1.1` Dot3ControlFunctionsSupported。
+
+Decision:
+  在 `agentx_owned.list` 加入前綴 `stdethdb/`，將該群組的 RO 欄委派給 ISS AgentX subagent。
+
+  依據與實測結果（BUILD_TIME 2026_0730_1302，`/etc/moxa/netsnmp/agentx_owned.list`
+  手動加行 + 重啟 snmpd）：
+
+  | 項目 | 委派前 | 委派後 |
+  |---|---|---|
+  | `.1.3.6.1.2.1.10.7` walk | 348 varbinds | **576 varbinds** |
+  | 宣告 34 欄的涵蓋率 | 29/34 | **33/34** |
+
+  ISS 的實作比 in-master 完整，5 個缺口全部補上：
+  - `.2.1.1` / `.2.1.13` / `.2.1.16` 各 +12 筆
+  - `.5.1.3` dot3CollTable 整張出現 +192 筆（12 port × 16 collision bucket）
+  - `.9.1.1` Dot3ControlFunctionsSupported +12 筆，回 `Hex-STRING: 00`（1-byte BITS，編碼正確）
+
+  唯一負向：`.10.7.10.1.1` `Dot3PauseAdminMode`（唯一的 RW 欄）**從 walk 消失（-12 筆）**，
+  但**直接 GET 仍正常**（`snmpget .1.3.6.1.2.1.10.7.10.1.1.1` = `INTEGER: 1`）。
+  即：這是 GETNEXT 遍歷的可見性問題，不是該物件不可讀。
+
+  SET 不受本決策影響：`snmpset ... i 2` 在 Plan E（2026_0730_1302）與 NOS 7 mainline
+  對照組（2026_0805_2335）**回完全相同的 `badValue`** —— SET 本來就被 config layer 擋掉，
+  是既有狀態，與委派無關。
+
+Alternatives Considered:
+  - **改用更精確的前綴 `stdethdb/dot3StatsTable/`**：一度因誤讀 ISS 註冊範圍而提出。
+    推論依據是 `stdethOID = {9, {1,3,6,1,2,1,10,7,2}}` 只到 `.10.7.2`，故其餘子樹不會被 ISS 接。
+    **此推論已被否決** —— 見 Constraints 第 1 條。ISS `stdethdb.h` 實際涵蓋
+    `.10.7.{2,5,9,10,11}` 全部五個分支，與 `net_stdethdb.h` 一對一吻合，用整個
+    `stdethdb/` 前綴才正確。
+  - **改挑 100% RO 的群組**（`net_mxUnicastRoutingTabledb.h` / `mxunicastroutingtabledb/`，
+    6 RO / 0 RW）：更純，但屬 MOXA private OID，ISS 是否服務沒有 ifmibdb 那種現成佐證；
+    且全 RO 會繞過 `is_agentx_owned()` 的 RW 早退分支，測不到分流邏輯。
+  - **挑 `stdcipdb/` / `mxmacsecdb/` / `mxdhcpsnpdb/` / `mxtrackingdb/`**（皆 100% RO）：
+    對應功能預設未啟用、表是空的，before/after 比對沒有鑑別力。
+  - **挑大的群組**（`stdrmodb/` 167 筆 62% RO、`stdospdb/` 115 筆 59% RO）：
+    RO/RW 交錯過多，不適合作為機制的第二個驗證案例。
+  - **維持現狀不推廣**：則 Plan C 永遠只有 `ifmibdb/` 一個樣本，無法判斷該機制是否具備通則性。
+
+Consequences:
+  - **正向**：淨增 228 varbinds，補齊 5 個 in-master 未實作的欄位（其中 dot3CollTable 整張）。
+    證實 `agentx_owned.list` 機制可推廣到第二個群組，且委派後由 ISS 服務的資料**更完整**。
+  - **限制（本 ADR 的主要貢獻）**：`agentx_owned.list` 的 RW 保護只保證「不被 skip、
+    仍在 in-master 註冊」，**不保證該 RW 欄在 wire 上仍可被 GETNEXT 走到**。
+    一旦 ISS 註冊了外層子樹，walk 會由 ISS 回答該區段，ISS 不枚舉的欄位就會從 walk 消失
+    （直接 GET 仍會落到 in-master 較specific的註冊）。
+    → 這補上了 ADR-0004 「Design Principle —— agentx_owned.list 與 Plan C 的兩個獨立機制」
+      未涵蓋的一面：該段正確描述了**註冊歸屬**，但未描述**GETNEXT 可見性**。
+  - **待決項（轉 Accepted 的前提）**：是否為 `dot3PauseAdminMode` 補一條
+    `mox_iss_get_forward_rules[]`。強相關證據：ifmibdb 的三個 RW 欄
+    （`ifLinkUpDownTrapEnable` / `ifPromiscuousMode` / `ifAlias`）都有 forward rule，
+    且在 `.31` walk 中**都看得到**；`dot3PauseAdminMode` 沒有 rule，walk 就看不到。
+    該表的註解本身也載明動機為「MIB walk 把 RW 欄與 RO 欄綁進同一個多 varbind GETNEXT」。
+    候選規則：col_oid = `.1.3.6.1.2.1.10.7.10.1.1`，
+    probe_oid = `.1.3.6.1.2.1.10.7.10.1.2.1`（`dot3PauseOperMode.1`，RO、委派後由 ISS 擁有、
+    與該欄位於同一個 ISS AgentX registration）。
+    **此為假說，尚未實測**；「forward rule 是 RW 欄 walk 可見性的成因」目前只有相關性證據。
+  - **落地責任**：DUT 上的 `/etc/moxa/netsnmp/agentx_owned.list` 是由
+    `plugin_moxa_snmp/Makefile:61` 安裝的，手改會在下次燒 firmware 時被覆蓋。
+    決定採用後必須回頭改 repo 內的 `plugin_moxa_snmp/app/script/agentx_owned.list` 並 commit。
+  - **新的迴歸基線**：`.1.3.6.1.2.1.10.7` 委派前 348 / 委派後 576 varbinds，
+    兩組數字都應保留供日後比對。
+
+Constraints / Assumptions:
+  1. **ISS 的 AgentX 註冊範圍看該模組 `*db.h` 涵蓋的 OID 子分支，不是看
+     `tSNMP_OID_TYPE ...OID` 的 root 長度。** root 只是 SysORTable 的標籤。
+     實證：`ifmibOID = {7, {1,3,6,1,2,1,2}}` 只到 `.1.3.6.1.2.1.2`，
+     但 ISS `ifmibdb.h` 涵蓋 `.1.3.6.1.2.1.31`，而 `.31` 的 walk 完整健康
+     （ifName、ifHCInOctets、ifRcvAddressTable 全在，且資料為交換器語意 `Slot1/1`、
+     vlan 位於 ifIndex 130/131，非 snmpd 內建 Linux 介面模組所能產生）。
+     → 評估任何新前綴前，應查 ISS 對應 `*db.h` 的分支涵蓋，不可用 root 長度推論。
+  2. `agentx_owned.list` 只在 `mox_snmp_init_entry()` 內經 `gAgentXOwnedLoaded` 載入一次，
+     skip 決定發生於 `netsnmp_register_*` 當下 → **改檔後必須重啟 snmpd**，執行中改檔無效。
+  3. 委派的前提是 ISS 確實實作該群組的 get-routine。有 OID 定義與註冊呼叫不等於有回值；
+     本案是以實測確認，不是靜態推導。
+  4. `iss_build == 1` = ISS 擁有、`iss_build == 0` = framework/config 擁有（沿用 ADR-0004，不變）。
+  5. 本 ADR 的所有數字取自 12-port MDS-G4000-L3-4XGS，port 數改變時基線需重取。
+
+Related Files / Modules:
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list` —— 前綴清單本體
+    （commit `f5555f6` 才納入版控）；`plugin_moxa_snmp/Makefile:61` 安裝到
+    `/etc/moxa/netsnmp/agentx_owned.list`
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`
+    - `:3366-3417` `mox_snmp_load_agentx_owned_list()` / `mox_snmp_entry_is_agentx_owned()`
+    - `:3457-3468` `mox_snmp_init_entry()` 內的 skip 迴圈
+    - `:3062-3110` `mox_iss_get_forward_rules[]`（RW 欄的 GET-forward 規則表 + 新增方式註解）
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_stdethdb.h` —— 34 筆 entry（33 RO / 1 RW）
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup_net_stdethdb.c`
+    —— 兩處 `IES_FLAG_BITS_SET`：`dot3PauseAdminMode` 的 `URI_MOD_ON_SET`（RW，不受委派影響）、
+    `dot3ControlFunctionsSupported` 的 `REPLACE_BIT_VALUE`（RO，委派後由 ISS 編碼；
+    註：該 entry 另有 `oct_type = IES_URI_SNMP_OCT_STRING_HEX`，
+    `ies_auto_mibs.c:1713` 的條件是 OR，故該 flag 對此欄實為冗餘）
+  - `buildroot/dl/snmp_moxa_mib/standard/EtherLike-MIB.mib` —— 權威 MIB（RFC 3635）
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/cfa2/inc/stdethdb.h` —— ISS 端物件定義，
+    涵蓋 `.10.7.{2,5,9,10,11}`
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/cfa2/src/stdethwr.c:34` `RegisterSTDETH()`
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/cfa2/src/cfamain.c:872` —— 呼叫點，
+    位於 `RegisterIFMIB()` 下一行，同在 `#ifdef SNMP_2_WANTED`
+
+Related ADRs:
+  - ADR-0004（Accepted）—— 其「Design Principle：agentx_owned.list 與 Plan C 的兩個獨立機制」
+    仍成立；本 ADR **補充**其未涵蓋的 GETNEXT 可見性面向，**不推翻、不變更其狀態**。
+  - ADR-0003（Superseded by ADR-0004）—— Plan C GET-forward 的歷史脈絡。
+  - ADR-0010（Accepted）—— 「MIB 為權威」；本案沿用該原則，以 EtherLike-MIB 的
+    MAX-ACCESS/STATUS 判定「缺的 5 欄依 MIB 本來就該出現」，而非靠 walk 比對猜測。

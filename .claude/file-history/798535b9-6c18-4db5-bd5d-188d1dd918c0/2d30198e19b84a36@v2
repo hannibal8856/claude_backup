@@ -1,0 +1,1010 @@
+/********************************************************************
+ *  Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file LICENSE for details.
+ *******************************************************************/
+
+#include "fiber_check_api.h"
+#include "libmoxaio/lib_moxa_io.h"
+#include "fiber_check_main.h"
+#include "fiber_check_monitor.h"
+#include "fiber_check_config.h"
+#include "fiber_check_debug.h"
+#include "fiber_check_api.h"
+#include "fiber_check_defines.h"
+#include "libmoxa_fiber_check/lib_moxa_fiber_ddm_sff8472.h"
+#include "libmoxa_fiber_check/lib_moxa_fiber_ddm.h"
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_system/lib_moxa_system_port_info_api.h"
+#include "libmoxa_system/lib_moxa_system_port_type_def.h"
+#include "libmoxa_system/lib_moxa_system_module_port_info_api.h"
+#include "libmoxa_system/lib_moxa_system_module_info_api.h"
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+#include "lib_moxa_framework_uri/lib_moxa_framework_uri.h"
+#include "libmoxa_util/util_msgq.h"
+#include "libmoxa_util/util_sem.h"
+#include "libmoxa_util/util_shell_cmd.h"
+#include "libmoxa_util/util_shm.h"
+#include "libmoxa_util/util_tskevt.h"
+#include "libmoxa_util/util_debug.h"
+#include "libmoxa_intr_srv/lib_moxa_intr_srv.h"
+#include "lib_moxa_debug_log_ng/plugin_debuglogng_fiber_check.h"
+#include "libmoxa_data_buffer/lib_moxa_data_buffer_api.h"
+#include "libmoxa_data_buffer/lib_moxa_data_buffer_event_api.h"
+
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <signal.h>
+#include <unistd.h>
+#include <string.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include "libmoxa_system/lib_moxa_system_product_id_def.h"
+
+#define FLASK_SERVER_IP                  "127.0.0.1"
+#define FIBER_CHECKL_TOKEN_FILE          "/moxa/run/fiber_check/s_token"
+#define FIBER_CHECK_TOKEN_PATH_LEN       64
+
+#define MAX_EVENT_ID_LEN            (12)    // 12 is enough for "0xXXXXXXXX"
+#define MAX_ARGS                    (6)
+#define MAX_ARG_LEN                 (16)
+
+static struct FiberCheckModelParameter gFiberCheckModelParameter;
+
+static uint8_t MAX_PORT_NUM = 0;
+static uint8_t MAX_MODULE_NUM = 0;
+static uint8_t MAX_POWER_MODULE_NUM = 0;
+
+static bool gFirstTimeExec = false;
+static bool gFirstPortStatusInit = false;
+static char sUriToken[340] = {0};
+
+/**
+ * @brief Convert virutal port to user port
+ * @param[in]  vport            virtual port (0 based)
+ * @param[in]  interface_str    user port string
+ * @returns                     void
+ */
+static int32_t _ConvertVport2Interface(const int32_t vport, unsigned char* interface_str)
+{
+    uint32_t module_index = 0;
+    uint32_t module_port_index = 0;
+    int32_t ret = -1;
+
+    if (interface_str == NULL) {
+        return ret;
+    }
+
+    ret = LibSystem_GetCliModuleIdxByPortIdx(vport, &module_index);
+    if (ret != LIB_SYSTEM_RET_SUCCESS) {
+        return ret;
+    }
+    ret = LibSystem_GetCliModulePortIdxByPortIdx(vport, &module_port_index);
+    if (ret != LIB_SYSTEM_RET_SUCCESS) {
+        return ret;
+    }
+
+	uint32_t moduleId = 0;
+			
+    LibSystem_GetEthModuleId(module_index, &moduleId);
+			
+    if (moduleId == kLm7000HPhr) {
+        sprintf(interface_str, "%u/%c", module_index+1, module_port_index+'A');
+    }
+    else {
+        sprintf(interface_str, "%u/%u", module_index+1, module_port_index+1);
+    }
+
+    return ret;
+}
+
+/**
+ * @brief Init token for uri
+ *
+ * @returns                     void
+ */
+static void _InitToken(void)
+{
+    char security_token_file[FIBER_CHECK_TOKEN_PATH_LEN]  = {0};
+
+    snprintf(security_token_file, sizeof(security_token_file),
+             "%s", FIBER_CHECKL_TOKEN_FILE);
+
+    unlink(FIBER_CHECKL_TOKEN_FILE);
+
+    if (LibUtil_CreateToken("system", "fiber_check", security_token_file) != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Token init fail\n");
+        return;
+    }
+
+    return;
+}
+
+/**
+ * @brief Get token for uri
+ *
+ * @returns                     void
+ */
+static void _GetToken(void)
+{
+    FILE *fp  = NULL;
+    char security_token_file[FIBER_CHECK_TOKEN_PATH_LEN]  = {0};
+
+    snprintf(security_token_file, sizeof(security_token_file),
+             "%s", FIBER_CHECKL_TOKEN_FILE);
+
+    fp = fopen(security_token_file, "r");
+    if (fp == NULL) {
+        FIBER_CHECK_APP_ERR_MSG("Cannot open token fail\n");
+        return;
+    }
+
+    if (fgets(sUriToken, sizeof(sUriToken), fp) == NULL) {
+        fclose(fp);
+        FIBER_CHECK_APP_ERR_MSG("Cannot get token content\n");
+        return;
+    }
+
+    fclose(fp);
+    return;
+}
+
+
+/**
+ * @brief Delete token
+ *
+ * @returns void
+ */
+static void _DeleteToken(void)
+{
+    FIBER_CHECK_APP_DEBUG_MSG("/usr/sbin/app_moxa_token_module -d -t %s", sUriToken);
+
+    if (LibUtil_ExecShCmd(NULL, NULL, 0, "/usr/sbin/app_moxa_token_module -d -t %s",
+                                          sUriToken) != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Delete token error\n");
+        return;
+    }
+
+    FIBER_CHECK_APP_DEBUG_MSG("Delete token ok\n");
+
+    return;
+}
+
+/**
+ * @brief Get Uri
+ *
+ * @param[in]  aPortNo          0 based virtual port
+ * @returns                     0 means success, other means fail
+ */
+static int _GetUri(const char *aUri, char *aData, uint32_t aDataLen)
+{
+    JSON_Value *return_data = NULL;
+    char *json_str = NULL;
+    int32_t result = FIBER_CHECK_ERR_DEFAULT;
+    struct LibFrameworkUri_Handle *handle = NULL;
+    uint32_t str_len = 0;
+
+    handle = LibFrameworkUri_CreateHandle("127.0.0.1", 80);
+    if (handle == NULL) {
+        FIBER_CHECK_APP_ERR_MSG("Create handle error\n");
+        return FIBER_CHECK_ERR_DEFAULT;
+    }
+    result = LibFrameworkUri_GetUri(handle, aUri, sUriToken, &return_data);
+
+    if (result != 0 || !return_data) {
+        FIBER_CHECK_APP_ERR_MSG("Get %s error\n", aUri);
+        json_value_free(return_data);
+        return_data = NULL;
+        LibFrameworkUri_ReleaseHandle(handle);
+        return FIBER_CHECK_ERR_DEFAULT;
+    }
+
+    json_str = json_serialize_to_string(return_data);
+
+    str_len = strlen(json_str);
+
+    strncpy(aData, json_str, str_len > aDataLen ? aDataLen : str_len);
+
+    json_free_serialized_string(json_str);
+
+    json_value_free(return_data);
+    return_data = NULL;
+
+    LibFrameworkUri_ReleaseHandle(handle);
+
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief Check if port is linkup
+ *
+ * @param[in]  aPortNo          0 based virtual port
+ * @returns                     void
+ */
+static bool _IsPortLinkUp(const uint8_t aPortNo)
+{
+    char uri[128] = {0};
+    char uri_result[20] = {0};
+
+    snprintf(uri, 128, "/api/v1/status/portStatus/portTable/%d/linkStatus", aPortNo);
+    _GetUri(uri, uri_result, 20);
+    //linkstatus: up(1), down(2), testing(3), unknown(4), dormant(5), notPresent(6), lowerLayerDown(7)
+    if (strncmp (uri_result, "1", strlen("1")) != 0 ) {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Denote FiberCheck service is first started or not since bootup
+ *
+ * @param[in]  aFirstStart      true for first start
+ * @returns                     void
+ */
+static void _SetFiberCheckFirstStart(bool aFirstStart)
+{
+    gFirstTimeExec = aFirstStart;
+}
+
+/**
+ * @brief Get FiberCheck service is first started or not since bootup
+ *
+ * @returns true for first start
+ */
+static bool _IsFiberCheckFirstStart(void)
+{
+    return gFirstTimeExec;
+}
+
+
+/**
+ * @brief Create directories for Fiber Check service running
+ *
+ * @returns void
+ */
+static void _CreateFiberCheckDirectories(void)
+{
+    int ret = 0;
+
+    ret = mkdir("/moxa/storage/fiber_check", 0755);
+    ret = mkdir("/moxa/run/fiber_check", 0755);
+    if (ret == 0) {
+        //first time run fiber check service
+        FIBER_CHECK_APP_DEBUG_MSG("fiber check directories first create\n");
+        ret = mkdir("/moxa/run/fiber_check/config", 0755);
+        _SetFiberCheckFirstStart(true);
+    } else {
+        //not first time run fiber check service, return value string will be "Unknown error -1"
+        FIBER_CHECK_APP_DEBUG_MSG("fiber check directories have been created\n");
+        _SetFiberCheckFirstStart(false);
+    }
+}
+
+/**
+ * @brief Process exit handler function
+ *
+ * @returns void
+ */
+static void _OnStop(void)
+{
+    FIBER_CHECK_APP_DEBUG_MSG("Fiber check exits ...\n");
+
+    return;
+}
+
+
+/**
+ * @brief Register handler function for process exit
+ *
+ * @returns void
+ */
+static void _RegisterOnStopFunction(void)
+{
+    int ret = FIBER_CHECK_ERR_DEFAULT;
+
+    ret = atexit(_OnStop);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Cannot set exit function\n");
+    }
+}
+
+/**
+ * @brief Init other linux relative processes
+ *
+ * @returns                     void
+ */
+static void _InitSystemRelative(void)
+{
+    setbuf(stdout, NULL);//make stdout no buffer, print to console immediately
+
+    _RegisterOnStopFunction();
+    _CreateFiberCheckDirectories();
+    return;
+}
+
+/**
+ * @brief Handle registered signals
+ *
+ * @param[in]  aSignal          system signal
+ * @returns                     void
+ */
+static void _SignalHandler(const int32_t aSignal)
+{
+    switch(aSignal) {
+        case SIGTERM:
+        {
+            FIBER_CHECK_APP_DEBUG_MSG("received SIGTERM\n");
+
+            exit(EXIT_SUCCESS);
+        }
+        case SIGUSR1:
+        {
+            /* TEST SIGNAL METHOD:
+             * 1. get PID:
+             *  # ps aux | grep fiber_check | grep -v grep | awk '{print $2}'
+             * 2. send signal:
+             *  # kill -s USR1 $PID
+             */
+            FIBER_CHECK_APP_DEBUG_MSG("received SIGUSR1\n");
+
+            //read new config file to new config instance
+            //fibr_check_Cfg_UpdateConfig(MAX_PORT_NUM);
+            break;
+        }
+        default:
+            break;
+    }
+
+    return;
+}
+
+/**
+ * @brief Register system signals and signal handlers
+ *
+ * @returns void
+ */
+static void _InitSystemSignal(void)
+{
+    struct sigaction action;
+
+    action.sa_handler = _SignalHandler;
+    sigemptyset (&action.sa_mask);
+    action.sa_flags = 0;
+
+    sigaction(SIGTERM, &action, NULL); /* catch SIGTERM signal */
+}
+
+/**
+ * @brief Init model relative parameters for fiber check system
+ *
+ * @returns                     void
+ */
+static void _InitModelParameter(void)
+{
+    uint32_t value = 0;
+
+    //Unique place to prepare system parameters for whole fiber check applications
+    memset(&gFiberCheckModelParameter, 0, sizeof(struct FiberCheckModelParameter));
+    LibSystem_GetMaxNumOfEthModules(&value);
+    gFiberCheckModelParameter.mMaxModuleNum = (uint8_t)value;
+    LibSystem_GetMaxPortNumInSystem(&value);
+    gFiberCheckModelParameter.mMaxPortNum = (uint8_t)value;
+    LibSystem_GetMaxNumOfPowerModules(&value);
+    gFiberCheckModelParameter.mMaxPowerModuleNum = (uint8_t)value;
+
+    //set static global parameters for easier local use
+    MAX_PORT_NUM = gFiberCheckModelParameter.mMaxPortNum;
+    MAX_MODULE_NUM = gFiberCheckModelParameter.mMaxModuleNum;
+    MAX_POWER_MODULE_NUM = gFiberCheckModelParameter.mMaxPowerModuleNum;
+
+    return;
+}
+
+/**
+ * @brief Take actions here if got fiber events
+ *
+ * @param[in]   aSlotNo         0-based module ID
+ * @returns                     void
+ */
+static int32_t _FiberEventHandler(const struct FiberCheckMsgNode msgnode)
+{
+    uint32_t u4ModulePort = 0;
+    uint32_t u4IfIdx = 0;
+    uint32_t u4Inserted = 0;
+    char port_str[20] = {0};
+
+    _ConvertVport2Interface(msgnode.mPortInfo.mLogicalIndex, port_str);
+
+    FIBER_CHECK_APP_DEBUG_MSG("Recv fiber evt %d/%d : fiber event-%d\n", msgnode.mPortInfo.mMdno + 1, msgnode.mPortInfo.mMdPortIndex + 1, msgnode.mFiberEvent);
+
+    if (msgnode.mFiberEvent == kSfpInserted || msgnode.mFiberEvent == kSfpRemoved) {
+        //Vendor name have been checked in iss
+        FiberCheckMntr_SetPortNeedUpdateAsync(msgnode.mPortInfo.mLogicalIndex, false, true);
+    } else if (msgnode.mFiberEvent == kFiberLinkChanged ||
+               msgnode.mFiberEvent == kFiberLinkUp || msgnode.mFiberEvent == kFiberLinkDown) {
+        if (FiberCheckMntr_IsPortValid(msgnode.mPortInfo.mLogicalIndex)) {
+            FiberCheckMntr_SetPortNeedUpdateAsync(msgnode.mPortInfo.mLogicalIndex, false, false);
+            LIBMOXADEBUGLOGNG_SYSLOG(port_str, FIBER_CHECK_STR_ID_FIBER_MONITOR_DETECT_LINK_STATUS_CHANGE_UPDATE_DDM_INFO, port_str);
+        } else {
+            FIBER_CHECK_APP_DEBUG_MSG("Port-%d/%d link changed but invalid\n", msgnode.mPortInfo.mMdno + 1, msgnode.mPortInfo.mMdPortIndex + 1);
+        }
+
+        // update LinkStatus from ISS event trigger
+        FiberCheckMntr_SetPortLinkUp(msgnode.mPortInfo.mLogicalIndex,
+                                     (msgnode.mFiberEvent == kFiberLinkUp) ? true : false);
+    }
+    return FIBER_CHECK_OK;
+}
+
+/**
+ * @brief FiberCheck subtask "Receive Fiber Event" main
+ *
+ * @param[in]  aParameter       Parameters come from parent process(Fiber Check main)
+ * @returns                     0 means success, others fail.
+ */
+static void* _ReceiveFiberEvent(void* aParameter)
+{
+    int32_t                 ret = FIBER_CHECK_ERR_DEFAULT;
+    uint32_t                recv_evt = 0;
+    struct FiberCheckMsgNode   msg_node;
+
+    FIBER_CHECK_APP_DEBUG_MSG("Start to receive fiber event\n");
+
+    while(1){
+        memset(&msg_node, 0, sizeof(struct FiberCheckMsgNode));
+
+        //Fiber Check service start to wait fiber event
+        if(LibUtil_TaskEventRecv(FIBER_CHECK_SRV_TSKEVT_ID, LIB_MOXA_FIBER_CHECK_SRV_EVENT, LIB_MOXA_UTIL_TSKEVT_WAIT_EVENT, &recv_evt) ==
+           LIB_MOXA_UTIL_TSKEVT_RECV_EVT_SUCCESS) {
+
+            while(LibUtil_MsgQueueRecv(FIBER_CHECK_SRV_TSKEVT_MSGQ_ID, (unsigned char *)&msg_node, LIB_MOXA_UTIL_MSGQ_NO_WAIT) ==
+               LIB_MOXA_UTIL_MSGQ_RECV_MSG_SUCCESS) {
+                ret = FIBER_CHECK_ERR_DEFAULT;
+                ret = _FiberEventHandler(msg_node);
+                if (ret != FIBER_CHECK_OK) {
+                    FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d\n", __FILE__, __func__, __LINE__, ret);
+                }
+
+            }
+        }
+
+    }
+}
+
+/**
+ * @brief Init other Fiber Check sub tasks listed below.
+ *            - Monitor
+ *            - FiberEvent
+ *
+ * @returns void
+ */
+static void _InitSubTasks(void)
+{
+    pthread_t threadMonitor;
+    pthread_t threadFiberEvent;
+    int32_t tidMonitor;
+    int32_t tidFiberEvent;
+
+    tidMonitor = pthread_create(&threadMonitor, NULL, FiberCheckMntr_Main, (void*) &gFiberCheckModelParameter);
+    tidFiberEvent = pthread_create(&threadFiberEvent, NULL, _ReceiveFiberEvent, (void*) NULL);
+
+    return;
+}
+
+/**
+ * @brief Send Fiber Check events and system logs
+ *
+ * @param[in]  aEvent           Event package
+ * @returns                     void
+ */
+static void _SendEvent(const enum FiberCheckEvent aEvent, ...)
+{
+    const char * severity_str[] = { "emerg", "alert", "crit", "error", "warning", "notice", "info", "debug"};
+    char auJsonString[256] = {0};
+    char topic_buffer[64] = {0};
+    char data_buffer[256] = {0};
+    char output_buffer[1024] = {0};
+    char tag_buffer[16] = {0};
+    char module_name[32] = {0};
+    unsigned char interface_str[8] = {0};
+    uint32_t severity = kSeverityLevelDebug;
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    int32_t cmd_exit_status = 0;
+    bool send_event_log = false;
+    bool send_system_log = false;
+    va_list list;
+    int32_t port = 0;
+    uint32_t slot = 0;
+    uint32_t module_name_length = 0;
+    char *str = NULL;
+    char        event_id[MAX_EVENT_ID_LEN];
+    char        args[MAX_ARGS][MAX_ARG_LEN];
+
+    FIBER_CHECK_APP_DEBUG_MSG("send event %d\n", aEvent);
+
+    memset(args, '\0', sizeof(args));
+
+    va_start(list, aEvent);
+
+    switch (aEvent) {
+        case kFiberCheckTemperatureWarn : {
+            //prepare log message
+            port = va_arg(list, int32_t);
+            ret = _ConvertVport2Interface(port, interface_str);
+            if (ret != LIB_SYSTEM_RET_SUCCESS) {
+                FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d\n", __FILE__, __func__, __LINE__, ret);
+                break;
+            }
+            snprintf(data_buffer, sizeof(data_buffer), FIBER_CHECK_LOG_MSG_TEMPERATURE_WARN, interface_str);
+
+            //send event log
+            send_event_log = true;
+            snprintf(topic_buffer, sizeof(topic_buffer), "fiberCheckEvent/fiberWarning");
+            //prepare JSON objects
+            snprintf (auJsonString, sizeof(auJsonString), "{\\\"ifIndex\\\" :\\\"%d\\\"}", port + 1);
+
+            //send system log
+            send_system_log = true;
+            severity = kSeverityLevelWarning;
+            strncpy(tag_buffer, "Diagnostics", strlen("Diagnostics"));
+            strncpy(event_id, "0x40000707", sizeof("0x40000707"));
+            sprintf(args[0], interface_str);
+            sprintf(args[1], "temperature");
+            sprintf(args[2], "exceeded");
+            break;
+        }
+        case kFiberCheckTxPowerWarn : {
+            //prepare log message
+            port = va_arg(list, int32_t);
+            str = va_arg(list, char*);
+            ret = _ConvertVport2Interface(port, interface_str);
+            if (ret != LIB_SYSTEM_RET_SUCCESS) {
+                FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d\n", __FILE__, __func__, __LINE__, ret);
+                break;
+            }
+            snprintf(data_buffer, sizeof(data_buffer), FIBER_CHECK_LOG_MSG_TX_POWER_WARN, interface_str, str);
+
+            //send event log
+            send_event_log = true;
+            snprintf(topic_buffer, sizeof(topic_buffer), "fiberCheckEvent/fiberWarning");
+            //prepare JSON objects
+            snprintf (auJsonString, sizeof(auJsonString), "{\\\"ifIndex\\\" :\\\"%d\\\"}", port + 1);
+
+            //send system log
+            send_system_log = true;
+            severity = kSeverityLevelWarning;
+            strncpy(tag_buffer, "Diagnostics", strlen("Diagnostics"));
+            strncpy(event_id, "0x40000707", sizeof("0x40000707"));
+            sprintf(args[0], interface_str);
+            sprintf(args[1], "Tx power");
+            sprintf(args[2], str);
+            break;
+        }
+        case kFiberCheckRxPowerWarn : {
+            //prepare log message
+            port = va_arg(list, int32_t);
+            str = va_arg(list, char*);
+            ret = _ConvertVport2Interface(port, interface_str);
+            if (ret != LIB_SYSTEM_RET_SUCCESS) {
+                FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d\n", __FILE__, __func__, __LINE__, ret);
+                break;
+            }
+            snprintf(data_buffer, sizeof(data_buffer), FIBER_CHECK_LOG_MSG_RX_POWER_WARN, interface_str, str);
+
+            //send event log
+            send_event_log = true;
+            snprintf(topic_buffer, sizeof(topic_buffer), "fiberCheckEvent/fiberWarning");
+            //prepare JSON objects
+            snprintf (auJsonString, sizeof(auJsonString), "{\\\"ifIndex\\\" :\\\"%d\\\"}", port + 1);
+
+            //send system log
+            send_system_log = true;
+            severity = kSeverityLevelWarning;
+            strncpy(tag_buffer, "Diagnostics", strlen("Diagnostics"));
+            strncpy(event_id, "0x40000707", sizeof("0x40000707"));
+            sprintf(args[0], interface_str);
+            sprintf(args[1], "Rx power");
+            sprintf(args[2], str);
+            break;
+        }
+        default : {
+            FIBER_CHECK_APP_ERR_MSG("event %d no define\n", aEvent);
+            break;
+        }
+    }
+
+    va_end(list);
+
+    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_SEND_EVENT, data_buffer);
+
+    if(send_event_log){
+        memset(output_buffer, 0, sizeof(output_buffer));
+
+        ret = LibUtil_ExecShCmd(&cmd_exit_status, output_buffer, sizeof(output_buffer), "/usr/bin/moxa_send_event -n fiber_check_moxa -t %s -d \"%s\" -D \"%s\"", topic_buffer, auJsonString, data_buffer);
+        if(ret != 0){
+            FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d,exec=%d\n", __FILE__, __func__, __LINE__, ret, cmd_exit_status);
+            return;
+        }
+    }
+
+    if(send_system_log){
+        memset(output_buffer, 0, sizeof(output_buffer));
+
+        sprintf(output_buffer, "/usr/bin/app_moxa_syslog -t %s -i %s", tag_buffer, event_id);
+        for (int i=0; i<MAX_ARGS; i++) {
+            if (strlen(args[i])) {
+                if (i==0) {
+                    strcat(output_buffer, " -a");
+                }
+                strcat(output_buffer, " \"");
+                strcat(output_buffer, args[i]);
+                strcat(output_buffer, "\"");
+            }
+            else {
+                break;
+            }
+        }
+        ret = LibUtil_ExecShCmd(&cmd_exit_status, output_buffer,
+                                sizeof(output_buffer),
+                                output_buffer
+                                );
+        if(ret != 0){
+            FIBER_CHECK_APP_ERR_MSG("%s,%s,%d,ret=%d,exec=%d\n", __FILE__, __func__, __LINE__, ret, cmd_exit_status);
+            return;
+        }
+    }
+
+    return;
+}
+
+/**
+ * @brief Check if over limitation.
+ *
+ * @returns                     void
+ */
+static void _CheckOverLimit(void)
+{
+    static struct FiberCheckWarningStatus WarningStatus;
+    struct FiberCheckPortStatus status;
+    struct FiberCheckPortWarningConfig config;
+    struct FiberCheckWarnThreshold warn_th;
+    DataBufferPortInfo_t  *pIssPortStatus = NULL;
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    char port_str[20] = {0};
+    uint32_t slot = 0;
+    uint32_t module_port = 0;
+
+    pIssPortStatus = calloc(MAX_PORT_NUM, sizeof(DataBufferPortInfo_t));
+    if (pIssPortStatus == NULL)
+    {
+        FIBER_CHECK_APP_DEBUG_MSG("Error: pIssPortStatus failure \n");
+        free(pIssPortStatus);
+        return;
+    }
+
+    if (LibBuffer_GetPortStatus(MAX_PORT_NUM, pIssPortStatus) != 0)
+    {
+        FIBER_CHECK_APP_DEBUG_MSG("Error: LibBuffer_GetPortStatus failure \n");
+        free(pIssPortStatus);
+        return;
+    }
+    
+    for (uint8_t port = 0; port < MAX_PORT_NUM; port++) {
+        LibSystem_GetEthModulePortIdxByPortIdx(port, &module_port);
+        LibSystem_GetEthModuleIdxByPortIdx(port, &slot);
+        memset(port_str, 0, sizeof(port_str));
+        snprintf(port_str, 20, "%d/%d", slot + 1, module_port + 1);
+
+        if (pIssPortStatus[port].mAdminState == kDataBufferPortDisable)
+        {
+            FIBER_CHECK_APP_DEBUG_MSG("port = %s is shutdown \n", port_str);
+            continue;
+        }
+
+        if (FiberCheckMntr_IsPortValid(port)) {
+            memset(&status, 0, sizeof(struct  FiberCheckPortStatus));
+            memset(&config, 0, sizeof(struct  FiberCheckPortWarningConfig));
+
+            if (!FiberCheckMntr_IsPortSupportDdm(port)) {
+                // FIBER_CHECK_APP_DEBUG_MSG("port:%d is not support ddm, skip threshold checking\n", port);
+                continue;
+            }
+            FiberCheckMntr_GetPortRealTimeStatus(port, &status);
+            FiberCheckCfg_GetPortWarningConfig(port, &config);
+
+            if (config.mMode == kAuto) {
+                ret = FiberCheck_GetFiberDefaultThreshold(status.mModelName, &warn_th);
+                if (ret != FIBER_CHECK_OK) {
+                    FIBER_CHECK_APP_ERR_MSG("FiberCheck_GetFiberDefaultThreshold failed with %d\n", ret);
+                    //Prevent invalid information
+                    warn_th.mTemperatureWarningC = FIBER_CHECK_DDM_STD_TEMP_C_MAX;
+                    warn_th.mTemperatureWarningF = FIBER_CHECK_DDM_STD_TEMP_F_MAX;
+                    warn_th.mTxPowerWarningUnder = FIBER_CHECK_DDM_STD_DBM_MIN;
+                    warn_th.mTxPowerWarningOver = FIBER_CHECK_DDM_STD_DBM_MAX;
+                    warn_th.mRxPowerWarningUnder = FIBER_CHECK_DDM_STD_DBM_MIN;
+                    warn_th.mRxPowerWarningOver = FIBER_CHECK_DDM_STD_DBM_MAX;
+                }
+            } else {
+                warn_th.mTemperatureWarningC = config.mTemperatureWarningC;
+                warn_th.mTemperatureWarningF = config.mTemperatureWarningF;
+                warn_th.mTxPowerWarningUnder = config.mTxPowerWarningUnder;
+                warn_th.mTxPowerWarningOver = config.mTxPowerWarningOver;
+                warn_th.mRxPowerWarningUnder = config.mRxPowerWarningUnder;
+                warn_th.mRxPowerWarningOver = config.mRxPowerWarningOver;
+            }
+            // FIBER_CHECK_APP_DEBUG_MSG("CheckOverLimit port:%d, tempC[%.2f], tempF[%.2f], txPower[%.2f, %.2f], rxPower[%.2f, %.2f]\n", port,
+            //        config.mTemperatureWarningC, config.mTemperatureWarningF, config.mTxPowerWarningUnder, config.mTxPowerWarningOver,
+            //        config.mRxPowerWarningUnder, config.mRxPowerWarningOver);
+
+            //Check temperature over threshold
+            if (status.mTemperatureC > warn_th.mTemperatureWarningC || (status.mTemperatureC * 9 / 5 + 32) > warn_th.mTemperatureWarningF) {
+                //Prevent send event repeatedly
+                if (!(WarningStatus.mDdmWarn[port] & (1 << kTempWarnMask))) {
+                    WarningStatus.mPortOverCount[port].mTemperatureOverCount++;
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, temperature over count++, count: %d\n", port, WarningStatus.mPortOverCount[port].mTemperatureOverCount);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TEMPERATURE_OVER,
+                                             port_str,
+                                             status.mTemperatureC, warn_th.mTemperatureWarningC,
+                                             WarningStatus.mPortOverCount[port].mTemperatureOverCount);
+                    if (WarningStatus.mPortOverCount[port].mTemperatureOverCount > OVER_TIME_TOLERANCE) {
+                        WarningStatus.mDdmWarn[port] |= (1 << kTempWarnMask);
+                        _SendEvent(kFiberCheckTemperatureWarn, port);
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, temperature over limit degree C(%.2f > %.2f), degree F(%.2f > %.2f), count: %d\n", port,
+                               status.mTemperatureC, warn_th.mTemperatureWarningC, (status.mTemperatureC * 9 / 5 + 32), warn_th.mTemperatureWarningF,
+                               WarningStatus.mPortOverCount[port].mTemperatureOverCount);
+                    }
+                }
+            } else {
+                if (WarningStatus.mDdmWarn[port] & (1 << kTempWarnMask)) {
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, temperature resume normal\n", port);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TEMPERATURE_RESUME,
+                                             port_str,
+                                             status.mTemperatureC, warn_th.mTemperatureWarningC);
+                }
+                WarningStatus.mPortOverCount[port].mTemperatureOverCount = 0;
+                WarningStatus.mDdmWarn[port] &= ~(1 << kTempWarnMask);
+            }
+
+            //Check txPower out of threshold
+            if (status.mTxPower > warn_th.mTxPowerWarningOver) {
+                //Prevent send event repeatedly
+                if (!(WarningStatus.mDdmWarn[port] & (1 << kTxPowerOverWarnMask))) {
+                    WarningStatus.mPortOverCount[port].mTxPowerOverCount++;
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, tx power over count++, count: %d\n", port, WarningStatus.mPortOverCount[port].mTxPowerOverCount);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TX_POWER_OVER,
+                                             port_str,
+                                             status.mTxPower, warn_th.mTxPowerWarningOver,
+                                             WarningStatus.mPortOverCount[port].mTxPowerOverCount);
+                    if (WarningStatus.mPortOverCount[port].mTxPowerOverCount > OVER_TIME_TOLERANCE) {
+                        WarningStatus.mDdmWarn[port] |= (1 << kTxPowerOverWarnMask);
+                        _SendEvent(kFiberCheckTxPowerWarn, port, "exceeded");
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, txPower over limit degree %.2f > %.2f, count: %d\n", port,
+                               status.mTxPower, warn_th.mTxPowerWarningOver, WarningStatus.mPortOverCount[port].mTxPowerOverCount);
+                    }
+                }
+            } else {
+                if (WarningStatus.mDdmWarn[port] & (1 << kTxPowerOverWarnMask)) {
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, tx power over resume normal\n", port);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TX_POWER_RESUME,
+                                             port_str,
+                                             status.mTxPower, warn_th.mTxPowerWarningOver);
+                }
+                WarningStatus.mPortOverCount[port].mTxPowerOverCount = 0;
+                WarningStatus.mDdmWarn[port] &= ~(1 << kTxPowerOverWarnMask);
+            }
+
+            if (status.mTxPower < warn_th.mTxPowerWarningUnder) {
+                //Prevent send event repeatedly
+                if (!(WarningStatus.mDdmWarn[port] & (1 << kTxPowerUnderWarnMask))) {
+                    WarningStatus.mPortOverCount[port].mTxPowerUnderCount++;
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, tx power under count++, count: %d\n", port, WarningStatus.mPortOverCount[port].mTxPowerUnderCount);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TX_POWER_UNDER,
+                                             port_str,
+                                             status.mTxPower, warn_th.mTxPowerWarningUnder,
+                                             WarningStatus.mPortOverCount[port].mTxPowerUnderCount);
+                    if (WarningStatus.mPortOverCount[port].mTxPowerUnderCount > OVER_TIME_TOLERANCE) {
+                        WarningStatus.mDdmWarn[port] |= (1 << kTxPowerUnderWarnMask);
+                        _SendEvent(kFiberCheckTxPowerWarn, port, "dropped below");
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, txPower under limit degree %.2f > %.2f, count: %d\n", port,
+                               status.mTxPower, warn_th.mTxPowerWarningUnder, WarningStatus.mPortOverCount[port].mTxPowerUnderCount);
+                    }
+                }
+            } else {
+                if (WarningStatus.mDdmWarn[port] & (1 << kTxPowerUnderWarnMask)) {
+                    FIBER_CHECK_APP_DEBUG_MSG("port:%d, tx power under resume normal\n", port);
+                    LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_TX_POWER_RESUME,
+                                             port_str,
+                                             status.mTxPower, warn_th.mTxPowerWarningOver);
+                }
+                WarningStatus.mPortOverCount[port].mTxPowerUnderCount = 0;
+                WarningStatus.mDdmWarn[port] &= ~(1 << kTxPowerUnderWarnMask);
+            }
+
+            //Check rxPower out of threshold
+            if (FiberCheckMntr_IsPortLinkUp(port)) {
+                if (status.mRxPower > warn_th.mRxPowerWarningOver) {
+                    //Prevent send event repeatedly
+                    if (!(WarningStatus.mDdmWarn[port] & (1 << kRxPowerOverWarnMask))) {
+                        WarningStatus.mPortOverCount[port].mRxPowerOverCount++;
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, rx power over count++, count: %d\n", port, WarningStatus.mPortOverCount[port].mRxPowerOverCount);
+                        LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_RX_POWER_OVER,
+                                             port_str,
+                                             status.mRxPower, warn_th.mRxPowerWarningOver,
+                                             WarningStatus.mPortOverCount[port].mRxPowerOverCount);
+                        if (WarningStatus.mPortOverCount[port].mRxPowerOverCount > OVER_TIME_TOLERANCE) {
+                            WarningStatus.mDdmWarn[port] |= (1 << kRxPowerOverWarnMask);
+                            _SendEvent(kFiberCheckRxPowerWarn, port, "exceeded");
+                            FIBER_CHECK_APP_DEBUG_MSG("port:%d, rxPower over limit degree %.2f > %.2f, count: %d\n", port,
+                                status.mRxPower, warn_th.mRxPowerWarningOver, WarningStatus.mPortOverCount[port].mRxPowerOverCount);
+                        }
+                    }
+                } else {
+                    if (WarningStatus.mDdmWarn[port] & (1 << kRxPowerOverWarnMask)) {
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, rx power over resume normal\n", port);
+                        LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_RX_POWER_RESUME,
+                                             port_str,
+                                             status.mRxPower, warn_th.mRxPowerWarningOver);
+                    }
+                    WarningStatus.mPortOverCount[port].mRxPowerOverCount = 0;
+                    WarningStatus.mDdmWarn[port] &= ~(1 << kRxPowerOverWarnMask);
+                }
+
+                if (status.mRxPower < warn_th.mRxPowerWarningUnder) {
+                    //Prevent send event repeatedly
+                    if (!(WarningStatus.mDdmWarn[port] & (1 << kRxPowerUnderWarnMask))) {
+                        WarningStatus.mPortOverCount[port].mRxPowerUnderCount++;
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, rx power under count++, count: %d\n", port, WarningStatus.mPortOverCount[port].mRxPowerUnderCount);
+                        LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_RX_POWER_UNDER,
+                                             port_str,
+                                             status.mRxPower, warn_th.mRxPowerWarningUnder,
+                                             WarningStatus.mPortOverCount[port].mRxPowerUnderCount);
+                        if (WarningStatus.mPortOverCount[port].mRxPowerUnderCount > OVER_TIME_TOLERANCE) {
+                            WarningStatus.mDdmWarn[port] |= (1 << kRxPowerUnderWarnMask);
+                            _SendEvent(kFiberCheckRxPowerWarn, port, "dropped below");
+                            FIBER_CHECK_APP_DEBUG_MSG("port:%d, rxPower under limit degree %.2f > %.2f, count: %d\n", port,
+                                status.mRxPower, warn_th.mRxPowerWarningUnder, WarningStatus.mPortOverCount[port].mRxPowerUnderCount);
+                        }
+                    }
+                } else {
+                    if (WarningStatus.mDdmWarn[port] & (1 << kRxPowerUnderWarnMask)) {
+                        FIBER_CHECK_APP_DEBUG_MSG("port:%d, rx power under resume normal\n", port);
+                        LIBMOXADEBUGLOGNG_SYSLOG(NULL, FIBER_CHECK_STR_ID_FIBER_MONITOR_RX_POWER_RESUME,
+                                             port_str,
+                                             status.mRxPower, warn_th.mRxPowerWarningOver);
+                    }
+                    WarningStatus.mPortOverCount[port].mRxPowerUnderCount = 0;
+                    WarningStatus.mDdmWarn[port] &= ~(1 << kRxPowerUnderWarnMask);
+                }
+            } else {
+                // FIBER_CHECK_APP_DEBUG_MSG("port:%d is link down, skip rx power checking\n", port);
+            }
+        }
+    }
+
+    free(pIssPortStatus);
+    return;
+}
+
+static void _InitSystemIpcRelated(void)
+{
+    int32_t ret = -1;
+
+    //Create semaphore for SHM API and status plugin to access SHM safely
+    ret = LibUtil_SemCreate(kSemCritSecSrvTypeFiberCheckStatusSrv, 1);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: sem create failed, returned %d.\n", ret);
+        return;
+    }
+
+    //Create shared memory for SHM API and status plugin
+    // FIBER_CHECK_APP_DEBUG_MSG("fiberstatussize = %d\n", sizeof(struct FiberCheckStatus));
+    ret = LibUtil_ShmCreate(kShmSrvBlkTypeFiberCheckStatusSrv, sizeof(struct FiberCheckStatus));
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm create failed, returned %d.\n", ret);
+        return;
+    }
+
+     FIBER_CHECK_APP_DEBUG_MSG("create kShmSrvBlkTypeFiberCheckStatusSrv shm ret=%d\n", ret);
+
+    ret = FiberCheck_InitFiberEvent();
+    if (ret != FIBER_CHECK_OK) {
+        FIBER_CHECK_APP_ERR_MSG("Error: FiberCheck_InitFiberEvent failed, returned %d.\n", ret);
+        return;
+    }
+}
+
+static bool _InitPortLinkStatus(void)
+{
+    // do once at the process init state
+
+    struct LibFrameworkUri_Handle *handle = NULL;
+    JSON_Value *port_table_value = NULL;
+    JSON_Object  *port_obj = NULL;
+    JSON_Array   *port_arr = NULL;
+    char aUri[32] = "/api/v1/status/portStatus";
+    int32_t result, i;
+
+    handle = LibFrameworkUri_CreateHandle("127.0.0.1", 80);
+    if (handle == NULL) {
+        FIBER_CHECK_APP_ERR_MSG("Create handle error\n");
+        return false;
+    }
+
+    result = LibFrameworkUri_GetUri(handle, aUri, sUriToken, &port_table_value);
+
+    if (result != 0 || !port_table_value) {
+        FIBER_CHECK_APP_ERR_MSG("Get %s error\n", aUri);
+        json_value_free(port_table_value);
+        port_table_value = NULL;
+        LibFrameworkUri_ReleaseHandle(handle);
+        return false;
+    }
+
+    port_obj = json_value_get_object(port_table_value);
+    port_arr = json_object_get_array(port_obj, "portTable");
+
+    for (i = 0; i < MAX_PORT_NUM; i++) {
+        JSON_Object *obj = json_array_get_object(port_arr, i);
+        // URI: /api/v1/status/portStatus/portTable/%d/linkStatus
+        // linkStatus: up(1), down(2), testing(3), unknown(4), dormant(5), notPresent(6), lowerLayerDown(7)
+        bool is_link_up = (json_object_get_number(obj, "linkStatus") == 1) ? true : false;
+        FiberCheckMntr_SetPortLinkUp(i, is_link_up);
+        FIBER_CHECK_APP_DEBUG_MSG("Port[%d] is %s\n", i, is_link_up ? "LinkUp" : "LinkDown");
+    }
+
+    json_value_free(port_table_value);
+    port_table_value = NULL;
+    LibFrameworkUri_ReleaseHandle(handle);
+    return true;
+}
+
+/**
+ * @brief fiber check main task
+ *
+ * @param[in]  argc             argument count
+ * @param[in]  argv             argument vectors
+ * @returns                     0 means success, others fail.
+ */
+int main(int argc, char* argv[])
+{
+    int32_t ret = FIBER_CHECK_ERR_DEFAULT;
+    int32_t retry_cnt = 0;
+
+    /* Main task general init */
+    _InitSystemRelative();
+    _InitSystemSignal();
+    _InitModelParameter();
+    if(_IsFiberCheckFirstStart()){
+        _InitSystemIpcRelated();
+        _InitToken();
+    }
+    _GetToken();
+
+    _InitSubTasks();
+    FiberCheckCfg_InitConfig(MAX_PORT_NUM);
+
+    do {
+        // get all port status once until ISS and status_moxa_port ready.
+        if (_InitPortLinkStatus())
+            break;
+        sleep(5);
+    } while (retry_cnt++ < 6);
+
+    /* Main task general init done */
+    while(1){
+        _CheckOverLimit();
+        sleep(5);
+    }
+    return FIBER_CHECK_OK;
+}
+
+
+

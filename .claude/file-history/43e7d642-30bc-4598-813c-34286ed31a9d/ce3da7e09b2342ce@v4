@@ -1,0 +1,5 @@
+- [Never flash EDS-G4000 .swu to the attached DUT](no-flash-edsg4000-swu-to-mdsg4000-dut.md) — serial DUT is an MDS-G4000-L3, cross-model flash risk
+- [Plan C/D/E port to EDS-G4000 spans 13 repos](edsg4000-plan-e-port-scope.md) — branch snmp-plan-E-edsg4000, squashed; the moxa overlay, ISS and lib_moxa_utility are the traps
+- [AgentX libs live in a personal GitLab namespace](agentx-libs-in-personal-gitlab-namespace.md) — Config.in's general/ URLs don't exist; blocks clean install.sh
+- [Address peer sessions by uds:, not by name](address-peer-sessions-by-uds-not-name.md) — duplicate and stale session names have already misdelivered messages here
+- [How to measure Plan E on the EDS rig](plan-e-ab-measurement-method.md) — single-variable A/B, the md5 trap that fakes a null result, and the shadowed snmpwalk

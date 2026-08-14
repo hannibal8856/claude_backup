@@ -1,0 +1,20 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ GET=/usr/bin/snmpget; SET=/usr/bin/snmpset; HOST=192.168.127.253
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ OID=1.3.6.1.4.1.8691.603.1.1.1.1.1.6.1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ 
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ ORIG=$($GET -v2c -c public -Ovq -t2 $HOST $OID)
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ echo "original value: $ORIG"
+original value: 1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ 
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ $SET -v2c -c private -t2 $HOST $OID i 2
+Error in packet.
+Reason: (badValue) The value given has the wrong type or length.
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ $GET -v2c -c public -Ovq -t2 $HOST $OID
+1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ # expected: 2
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ 
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ $SET -v2c -c private -t2 $HOST $OID i "$ORIG"
+iso.3.6.1.4.1.8691.603.1.1.1.1.1.6.1 = INTEGER: 1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ $GET -v2c -c public -Ovq -t2 $HOST $OID
+1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ # expected: back to $ORIG
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/WORK/SNMP_50ms] (develop) 11:31 $ 

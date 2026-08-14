@@ -1,0 +1,87 @@
+# ADR-0025: `stdethdb/` 與 `mxportdb/` 維持不加 `+getfwd` —— 因為該旗標在這兩個 group 上根本沒生效
+
+Status:
+  **Accepted(2026-08-10)** —— 補齊 ADR-0024 之後剩下兩條前綴的實測紀錄,
+  並**改寫 ADR-0014 對 `mxportdb/` 的結論**(理由從「成本太高」變成「旗標無效」)。
+  同時記錄一個**尚未根因的缺陷**與一個**與本案無關的既有間歇性問題**。
+
+Date: 2026-08-10
+
+Context:
+  ADR-0024 給 `mxrstpdb/` 加上 `+getfwd` 之後,`agentx_owned.list` 上還有兩條沒帶旗標:
+  `stdethdb/`(34 欄,1 個 RW:`Dot3PauseAdminMode`)與 `mxportdb/`(17 欄,8 個 RW)。
+
+  使用者要求兩條各實測一次,理由是 ADR-0024 已經證明**「轉發快的本地讀一定變慢」不成立**,
+  所以 ADR-0014 對 `mxportdb/` 量到的 +13.5% 不能當永久結論;而 `stdethdb/`
+  **從未被量過** —— 目前是「預設沒加」而不是「量過決定不加」,紀錄上必須分開。
+
+Decision:
+  **兩條都維持不加 `+getfwd`,但理由與 ADR-0014 記載的完全不同。**
+
+  **① 實測結果:兩條的 `+getfwd` 都是 no-op**
+
+  量測方式與 ADR-0024 相同:bind mount 換掉 `/etc/moxa/netsnmp/agentx_owned.list`、
+  重啟 `app_moxa_snmp_server.service`、只計 ISS 自己那條 AgentX TCP stream、
+  每個視窗 150 次 GET 並配對空窗與正對照。
+
+  | 動作(各 150 次 GET) | Δ 封包 | 判讀 |
+  |---|---|---|
+  | 空窗 15s | +42 | 背景 ≈ 2.8 pkt/s |
+  | `mxportdb/` config RW 表欄 `.603.1.1.1.1.1.2.1` | **+30** | 背景以下 → **未轉發** |
+  | `mxportdb/` scalar RW `.603.1.1.1.2.0` | **+30** | **未轉發** |
+  | `mxportdb/` LinkUpDelay RW `.603.1.1.1.3.1.2.1` | **+39** | **未轉發** |
+  | `mxportdb/` status RO `.603.1.1.2.1.1.2.1`(正對照) | **+333** | 已委派,正常 |
+  | `stdethdb/` 唯一 RW `.10.7.10.1.1.1` | **+30** | **未轉發** |
+  | `stdethdb/` RO `.10.7.2.1.2.1`(正對照) | **+333** | 已委派,正常 |
+  | `mxrstpdb/` config RW `.603.3.2.1.1.0`(機制健康度對照) | **+327** | **機制本身當下是好的** |
+
+  最後一列很關鍵:**同一顆 snmpd instance、同一次量測期間**,mxRstp 的 RW GET 轉發正常。
+  所以不是 AgentX 壞了、不是 ISS 沒連上、不是量測方法錯 —— **是這兩個 group 的旗標沒作用。**
+
+  **② 因此時間沒有變化,而「沒變化」不能解讀成「轉發免費」**
+
+  | group | A(無旗標) | B(有旗標) | A2(撤回後交錯再量) | 完整性 |
+  |---|---|---|---|---|
+  | `mxportdb/` `.603.1.1` | 0.644s | 0.647s | 0.707s | 193 vb / 16 欄,全程不變 |
+  | `stdethdb/` `.10.7` | 1.443s | 1.578s | 1.552s | 44 欄,全程不變 |
+
+  `stdethdb/` 的 B 看起來慢 9.4%,但 **A→A2 的漂移就有 7.5%**,B 落在漂移範圍內。
+  搭配 pcap 的「未轉發」,唯一自洽的解釋是 **旗標沒作用,時間差是量測漂移**。
+  ⚠️ 這也是為什麼**只量時間會得到錯誤結論**:單看 A vs B 會寫成「`stdethdb/` 加了慢 9.4%,
+  所以不加」—— 理由完全是錯的。
+
+  **③ ADR-0014 對 `mxportdb/` 的結論必須改寫**
+
+  ADR-0014 記的 +13.5%(0.694s → 0.788s)是 `6185d43`「全部自動轉發、尚未 opt-in」
+  狀態下量的,而且依 memory 記載,當時的 probe 是**手工指定**為
+  `portStatIndex.1` = `.603.1.1.2.1.1.1.1` 才生效的。改成 `e605314` 的執行期推導 + opt-in 之後,
+  `mxportdb/` 的推導 probe 顯然不再可用。
+  → **「mxPort 加 `+getfwd` 會慢 13.5%」在當前 code base 上無法重現,因為它根本不會轉發。**
+    這個數字不可再被引用為「轉發成本」的證據。
+
+Consequences:
+  - `agentx_owned.list` 不變(兩條的旗標都已撤回)。**沒有程式碼或設定進版。**
+  - 目前 `+getfwd` **只有 `ifmibdb/`(出貨既有,probe 是手工推導年代留下的)與
+    `mxrstpdb/`(ADR-0024)兩條確實生效**。
+  - **未根因的缺陷(要另開)**:`+getfwd` 對 `mxportdb/` 與 `stdethdb/` 靜默無效。
+    `mox_snmp_handle_entry()` 的 GET 分支有兩條會**靜默 fall through 回本地**的路徑 ——
+    `mox_snmp_probe_for_entry()` 回 NULL,或 `mox_snmp_forward_get_to_iss()` 回 -1。
+    可排除的是 memory 記載的「probe 解析到本地 subtree」那種失敗:那會產生**錯誤型別 /
+    No Such Instance**,而本次三個 mxPort RW 欄與 dot3 RW 欄的值與型別**全部正確**
+    (`""`、`INTEGER: 1/2`),代表走的是乾淨的本地路徑。
+    另一個未排除的假說:那些 RW 欄可能由
+    `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()` 合成的表註冊掛上**別的 handler**,
+    根本沒經過 `MODE_IS_GET` 那個閘。**黑箱測不出來,需要 debug build 加 instrument。**
+  - **與本案無關的既有問題**:`.10.7` 的 walk **間歇性回 516 而不是 581 varbind**
+    (A2 9 次中 2 次、B 9 次中 1 次),**有無旗標都會發生**,不是本次變更造成的。
+    缺的 65 個 varbind 是什麼、為什麼掉,**未查**。
+
+Alternatives considered:
+  - **只用 walk 時間判斷要不要加** —— 已捨棄,見 ② 的說明:會得到「慢 9.4% 所以不加」
+    這種理由錯誤的結論,而且下次有人重測會推翻它。**每次都要配 pcap 與正對照。**
+  - **既然沒生效、乾脆把旗標留著** —— 不可。清單是給人讀的契約,留一個無效旗標
+    會讓後續讀者以為「mxPort / dot3 的 GET 已經走 ISS」,那是錯的。
+  - **順手把 probe 推導修好再量** —— 超出使用者本次請求(「各量一次」)的範圍,
+    且根因未定位,應另開一輪處理。
+
+相關:ADR-0011、ADR-0012、ADR-0013、ADR-0014、ADR-0016、ADR-0024。

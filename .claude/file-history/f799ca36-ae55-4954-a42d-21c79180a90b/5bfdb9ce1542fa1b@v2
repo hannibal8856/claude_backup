@@ -1,0 +1,14 @@
+menuconfig BR2_PACKAGE_LIB_MOXA_IES_AUTO_MIBS
+    bool "lib_moxa_ies_auto_mibs"
+    help
+        OID <-> URI SNMP mapping data + lookup (Plan D).
+
+if BR2_PACKAGE_LIB_MOXA_IES_AUTO_MIBS
+config BR2_PACKAGE_LIB_MOXA_IES_AUTO_MIBS_URL
+    string "URL"
+    default "git@gitlab.com:moxa/sw/switch/general/linuxframework/library/lib_moxa_ies_auto_mibs.git"
+
+config BR2_PACKAGE_LIB_MOXA_IES_AUTO_MIBS_REV
+    string "REV"
+    default "develop"
+endif

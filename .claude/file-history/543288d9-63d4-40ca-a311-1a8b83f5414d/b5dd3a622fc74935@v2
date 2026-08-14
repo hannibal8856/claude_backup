@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""mxqos_check.py <walk.txt> [oracle.txt]
+
+Judge an mxQos walk against the column-level oracle. Compares OIDs, never
+names: 8 of the 29 columns are spelled differently in the MIB than in
+ies-auto-mibs (qosConfigQueueWeight1 vs qosConfigQueue1Weight), so a
+name-based diff reports 8 columns missing when nothing is wrong -- which is
+indistinguishable from the real failure mode this gate exists to catch.
+
+Exits 1 if any oracle column is missing from the walk.
+"""
+import re
+import sys
+from collections import OrderedDict
+
+ROOT = ".1.3.6.1.4.1.8691.603.2.9"
+OID_RE = re.compile(r"\s*\.?((?:\d+)(?:\.\d+)+)\s*=")
+
+# not-accessible in mxQos.mib, so a walk must NOT return them
+INDEX_COLS = {f"{ROOT}.1.{t}.1.1" for t in range(1, 8)}
+
+
+def columns(path):
+    """Instance OIDs reduced to their column OID (drop the final sub-id)."""
+    seen = OrderedDict()
+    total = 0
+    for line in open(path, encoding="utf-8", errors="replace"):
+        m = OID_RE.match(line)
+        if not m:
+            continue
+        total += 1
+        parts = m.group(1).split(".")
+        seen["." + ".".join(parts[:-1])] = seen.get("." + ".".join(parts[:-1]), 0) + 1
+    return seen, total
+
+
+def main():
+    walk = sys.argv[1]
+    oracle_path = sys.argv[2] if len(sys.argv) > 2 else \
+        "/home/moxa/mxqosdb-oracle-walkdiff-2026-08-13.txt"
+
+    oracle = set()
+    for line in open(oracle_path, encoding="utf-8"):
+        if line.startswith("#") or not line.strip():
+            continue
+        oracle.add(line.split("=")[0].strip())
+
+    seen, total = columns(walk)
+    got = set(seen)
+
+    missing = sorted(oracle - got)
+    surplus = sorted(got - oracle)
+
+    print(f"walk     : {walk}")
+    print(f"varbinds : {total}")
+    print(f"columns  : {len(got)}  (oracle has {len(oracle)})")
+
+    print("--- per table ---")
+    per = OrderedDict()
+    for col, n in seen.items():
+        m = re.match(re.escape(ROOT) + r"\.1\.(\d+)\.", col)
+        if m:
+            t = per.setdefault(m.group(1), [0, 0])
+            t[0] += n
+            t[1] += 1
+    for t in sorted(per, key=int):
+        vb, cols = per[t]
+        print(f"  .1.{t}: {vb:5d} varbinds  {cols:3d} columns")
+
+    print(f"--- missing: {len(missing)} ---")
+    for c in missing:
+        print(f"  {c}")
+    print(f"--- surplus: {len(surplus)} ---")
+    for c in surplus:
+        tag = "  <-- not-accessible index column, MIB violation" \
+            if c in INDEX_COLS else "  <-- check MIB"
+        print(f"  {c}{tag}")
+
+    return 1 if missing else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

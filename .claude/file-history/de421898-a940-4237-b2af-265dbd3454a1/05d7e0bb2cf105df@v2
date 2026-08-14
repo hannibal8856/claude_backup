@@ -1,0 +1,73 @@
+# LLDP GETNEXT loop — not a Plan E defect
+
+Found 2026-08-05 while capturing the Task 5 baseline. **Not caused by Plan E**,
+recorded here so it does not get charged to it and does not get lost.
+
+## What happens
+
+```
+$ snmpgetnext -v2c -c public -On 192.168.127.253 .1.0.8802.1.1.2.1.5.3791.1.1.1.1.1.1
+.1.0.8802.1.1.2.1.5.3791.1.1.1.1.1.1 = INTEGER: 0
+```
+
+GETNEXT returns the OID it was given. SNMP requires a lexicographically greater
+OID, so any walk that reaches this point never advances.
+
+## Cost
+
+`capture_baseline.sh` does not finish on this device. The `1.0.8802` walk spins
+until the timeout, writing a file that grows without bound:
+
+| | 2026-08-04 baseline | 2026-08-05 |
+|---|---|---|
+| `1.0.8802.txt` size | 118 KB | 14.4 MB in 15 minutes |
+| lines | — | 293,082 |
+| unique OIDs | 1472 | 479 |
+| walk ended at | `…1.1.3.1.2.1.1.1.12.4294967040` (complete) | `…1.1.2.1.5.3791.1.1.1.1.1.1` (stuck) |
+
+About 993 LLDP OIDs are unreachable, including the whole
+`.1.0.8802.1.1.2.1.5.32962` subtree (IEEE 802.1 extensions) — 3791 sorts before
+32962, so the walk never gets there.
+
+## It is not the AgentX subagent
+
+Tested directly rather than argued, because three Plan E diagnoses on the same
+day had already been wrong by inference:
+
+```
+# framework running, two AgentX sessions on 705
+getnext -> returns itself
+
+systemctl stop app_moxa_framework      # 705 now has ISS only
+getnext -> returns itself               # unchanged
+
+systemctl start app_moxa_framework
+```
+
+The framework subagent registers zero OIDs at this point anyway, but that was
+the reasoning that needed checking, not the conclusion.
+
+## Still open
+
+- **Is it also in NOS 7 mainline?** Not yet checked. If mainline loops the same
+  way it is a product defect of longer standing and nothing to do with this
+  build; if mainline is clean, something in this tree introduced it. That
+  comparison is the next step and was deliberately deferred.
+- `3791` is the IEEE 802.3 OUI subtree of LLDP-EXT-DOT3-MIB, served on the ISS
+  side (`iss_build == 1`), so the suspect is the ISS LLDP GETNEXT path rather
+  than ies-auto-mibs.
+
+## What it blocks
+
+`walkdiff` over `1.0.8802` is unusable until this is fixed — the capture is
+truncated at the loop, so every comparison of that subtree reports ~993
+missing OIDs regardless of what changed.
+
+Everything else compares cleanly: `1.3.6.1.2`, `1.3.6.1.4.1.2021`,
+`8691.600`, `8691.602`, `8691.603`, `8691.605` all match the 2026-08-04
+baseline exactly.
+
+Phase 3's pilots are `mx_device_io` (`8691.602.8.6.2`) and `mx_portmirror`
+(`8691.603.5.5.1`), neither under `1.0.8802`, so Tasks 6 and 7 can be verified
+without this being fixed first — as long as the LLDP subtree is excluded from
+the comparison rather than silently truncated.

@@ -1,0 +1,74 @@
+---
+name: feedback_verify_extra_oids_are_mib_defined
+description: "比 NOS 7 多出來的 OID,一律要確認是 .mib 裡有定義的物件、而不是我們多註冊的,並主動把這個資訊告訴使用者"
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: d3f32579-7f66-464a-b856-526a67163a15
+  modified: 2026-08-13T00:57:56.548Z
+---
+
+2026-08-09 使用者明示:**只要我們比 NOS 7 mainline 多回 OID,就要先確認那些 OID
+在 `.mib` 檔裡真的有定義,而不是我們自己多註冊出來的;而且要主動把這個結論講出來,
+不能只報「多了 N 個」。**
+
+**Why:** 「多」不等於「好」。2026-08-09 查 mxPort 時,多出的 39 個 varbind 裡
+**有 12 個是 `.603.1.1.1.1.1.7`(`PortConfigTid`,來自 `net_mxPortdb.h` 的
+`#ifdef TRACKING_WANTED`),而 `mxPort.mib` 根本沒有定義這個物件** —— 那不是效益,
+是外露了一個 MIB 外的內部欄位。當時這個數字正要寫進給主管看的 Confluence 文件,
+只要有人拿 MIB 對一遍就會被問出來。
+
+**How to apply:**
+1. 逐欄比對(不是比總數)找出「我們有、mainline 沒有」的欄位。
+2. 每個都回 `snmp_moxa_mib/private/<group>.mib`(私有)或
+   `snmp_moxa_mib/standard/<NAME>.mib`(標準)查:**物件存不存在**、MAX-ACCESS 是什麼。
+3. 分成兩堆回報:**MIB 有定義且 accessible = 真效益(mainline 漏實作)**;
+   **MIB 沒定義 = 多註冊,不得計入效益**,要標明來歷(通常是 `net_*db.h` 的欄位)。
+4. 這條與 [[project_delegation_completeness_judge_by_mib]] 是一組:
+   **少掉的欄位查 MAX-ACCESS(是不是本來就不該露),多出的欄位查有沒有定義(是不是根本不該有)。**
+
+**已查證的實例(2026-08-09):**
+
+| 群組 | 多出 | 結果 |
+|---|---|---|
+| dot3 `.10.7` | 252(6 個物件) | **全部乾淨** —— 6 個都在標準 `EtherLike-MIB.mib` 有定義且 `read-only`;主體是整張 `dot3CollTable`(192) |
+| mxPort `.603.1.1` | 39(3 個欄位) | **27 乾淨**(`portStatIndex`、`portStatLinkUpDelayIndex`,`read-only`);**12 不乾淨**(`PortConfigTid`,MIB 未定義) |
+
+兩支答案不同 → **不能推論,要逐支查**。
+
+相關:[[project_delegation_completeness_judge_by_mib]]、[[feedback_verify_completeness_and_perf]]
+
+
+---
+
+## 🔴 2026-08-13 更新:那 12 個已經不存在了
+
+`PortConfigTid` `.603.1.1.1.1.1.7` 來自 `net_mxPortdb.h` 的 `#ifdef TRACKING_WANTED`。
+**現況:`net_mxPortdb.h` 的 `portConfigTable` 只到 col 6,該筆已移除,`TRACKING_WANTED`
+全樹已無。** 所以「mxPort 多出 12 個 MIB 外欄位」是 **2026-08-09 的狀態,現已不成立**。
+(來源:`snmp-plan-E trace 2` 讀原始碼與 `.mib`,無 DUT 實測。)
+
+**另兩個曾被質疑的欄位是正當效益,不是違規:**
+
+```
+portStatIndex              .1.3.6.1.4.1.8691.603.1.1.2.1.1.1   read-only
+portStatLinkUpDelayIndex   .1.3.6.1.4.1.8691.603.1.1.2.2.1.1   read-only
+portConfigIndex            .1.3.6.1.4.1.8691.603.1.1.1.1.1.1   read-only
+portConfigLinkUpDelayIndex .1.3.6.1.4.1.8691.603.1.1.1.3.1.1   read-only
+```
+
+（方法論:這次要回答的問題,答案其實早就寫在本檔 08-09 的表格裡 ——
+看索引行沒看 body 才多繞一圈,印證 [[feedback_read_memory_body_not_index]]。)
+
+`mxPort.mib` 定義為 **read-only → 本來就該回傳**,in-master 與 NOS 7 不回才是缺陷。
+
+## ⚠️ 判讀規則:index 欄的 MAX-ACCESS **每支 MIB 不同,不可從一支推另一支**
+
+| MIB | index 欄 | 出現在 walk 裡代表 |
+|---|---|---|
+| `mxPort.mib` | **read-only** | 正確,缺了才是缺陷 |
+| `mxQos.mib` | **not-accessible** | surplus 且**違規** |
+
+in-master 的 `GenerateTableIndexEntry()` 把合成的 col 1 一律註冊成 `HANDLER_CAN_RONLY` ——
+**同一條機制,對 read-only 的表是補漏,對 not-accessible 的表是違規洩漏。**
+所以「多回的欄位是不是效益」**必須逐 MIB 查 MAX-ACCESS**,不能看到 index 欄就一律歸類。

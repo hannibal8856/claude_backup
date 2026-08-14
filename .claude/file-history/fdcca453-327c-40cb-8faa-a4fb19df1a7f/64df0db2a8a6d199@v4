@@ -1,0 +1,293 @@
+/*
+ * lib_moxa_snmp_agentx — implementation.
+ * See include/lib_moxa_snmp_agentx.h.
+ */
+#include "lib_moxa_snmp_agentx.h"
+
+#include <net-snmp/agent/table.h>
+#include <net-snmp/agent/table_data.h>
+#include <net-snmp/agent/table_dataset.h>
+
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+
+static volatile int g_running = 0;
+static pthread_t    g_thread;
+
+int
+MoxaAgentX_Init(const char *daemon_name)
+{
+    /* Become an AgentX sub-agent (not the master) and dial the master socket. */
+    netsnmp_ds_set_boolean(NETSNMP_DS_APPLICATION_ID,
+                           NETSNMP_DS_AGENT_ROLE, 1);
+    netsnmp_ds_set_string(NETSNMP_DS_APPLICATION_ID,
+                          NETSNMP_DS_AGENT_X_SOCKET, "tcp:127.0.0.1:705");
+
+    init_agent(daemon_name);
+    netsnmp_init_table_dataset();   /* enable the table_data_set helper */
+    init_snmp(daemon_name);   /* opens the AgentX session to the master */
+    return 0;
+}
+
+/* Plan E fix-1 PoC: register a self-contained read-only table_data_set at `root`
+ * (the table OID; entry is root.1). Two columns (1=INTEGER, 2=OCTET STRING),
+ * three rows indexed by INTEGER 1..3. net-snmp's table_data_set helper serves
+ * GET/GETNEXT/GETBULK entirely — this proves a forwarded walk/bulkwalk into a
+ * framework-owned table works before we map real config data. Priority 200 so
+ * in-master (127) still wins the wire (dual-reg). Returns 0 on success. */
+int
+MoxaAgentX_RegisterDemoTable(const oid *root, size_t root_len)
+{
+    netsnmp_table_data_set       *tds;
+    netsnmp_handler_registration *reg;
+    int                           i;
+
+    tds = netsnmp_create_table_data_set("moxaDemoTable");
+    if (tds == NULL)
+    {
+        return -1;
+    }
+    netsnmp_table_dataset_add_index(tds, ASN_INTEGER);           /* index: INTEGER */
+    netsnmp_table_set_add_default_row(tds, 1, ASN_INTEGER,   0, NULL, 0);
+    netsnmp_table_set_add_default_row(tds, 2, ASN_OCTET_STR, 0, NULL, 0);
+
+    for (i = 1; i <= 3; i++)
+    {
+        netsnmp_table_row *row = netsnmp_create_table_data_row();
+        long               idx = i;
+        long               val = i * 10;
+        char               buf[16];
+        int                n;
+
+        if (row == NULL)
+        {
+            return -1;
+        }
+        netsnmp_table_row_add_column(row, ASN_INTEGER, &idx, sizeof(idx));   /* index */
+        netsnmp_set_row_column(row, 1, ASN_INTEGER, (const void *) &val, sizeof(val));
+        n = snprintf(buf, sizeof(buf), "row-%d", i);
+        netsnmp_set_row_column(row, 2, ASN_OCTET_STR, (const void *) buf, (size_t) n);
+        netsnmp_table_dataset_add_row(tds, row);
+    }
+
+    reg = netsnmp_create_handler_registration("moxaDemoTable", NULL,
+                                              root, root_len, HANDLER_CAN_RONLY);
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    reg->priority = 200;
+    return netsnmp_register_table_data_set(reg, tds, NULL);
+}
+
+int
+MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                          int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    return netsnmp_register_scalar(reg);
+}
+
+int
+MoxaAgentX_RegisterTestInt(const char *descr, const oid *o, size_t olen, long value)
+{
+    static int s_val;   /* single test value; persists for net-snmp's pointer */
+    s_val = (int) value;
+    return netsnmp_register_read_only_int_instance(descr, o, olen, &s_val, NULL);
+}
+
+int
+MoxaAgentX_RegisterInstance(const char *descr, const oid *o, size_t olen,
+                            int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    /* Plan E (ADR-0003): lower precedence than in-master (default 127) so the
+     * in-master ies-auto-mibs registration wins the wire (SET stays in-master);
+     * framework is the sibling subtree that in-master forwards GET to. */
+    reg->priority = 200;
+    return netsnmp_register_instance(reg);
+}
+
+int
+MoxaAgentX_RegisterHandler(const char *descr, const oid *o, size_t olen,
+                           int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    /* Same priority policy as RegisterInstance; register_handler (not
+     * register_instance) keeps namelen equal to in-master column regs so
+     * priority — not namelen — decides the children-chain head. */
+    reg->priority = 200;
+    reg->handler->flags |= MIB_HANDLER_AUTO_NEXT;
+    return netsnmp_register_handler(reg);
+}
+
+int
+MoxaAgentX_GetRequestOid(void *requests, oid *buf, size_t buf_max, size_t *out_len)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+    size_t n;
+
+    if (req == NULL || req->requestvb == NULL || buf == NULL || out_len == NULL)
+    {
+        return -1;
+    }
+    n = req->requestvb->name_length;
+    if (n > buf_max)
+    {
+        return -1;
+    }
+    memcpy(buf, req->requestvb->name, n * sizeof(oid));
+    *out_len = n;
+    return 0;
+}
+
+int
+MoxaAgentX_SetOctetString(void *requests, const char *s, size_t len)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL || req->requestvb == NULL)
+    {
+        return -1;
+    }
+    snmp_set_var_typed_value(req->requestvb, ASN_OCTET_STR,
+                             (const u_char *) s, len);
+    return 0;
+}
+
+int
+MoxaAgentX_SetInt(void *requests, long value)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL || req->requestvb == NULL)
+    {
+        return -1;
+    }
+    snmp_set_var_typed_value(req->requestvb, ASN_INTEGER,
+                             (const u_char *) &value, sizeof(value));
+    return 0;
+}
+
+int
+MoxaAgentX_GetSetInt(void *requests, long *value)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL || req->requestvb == NULL || value == NULL)
+    {
+        return -1;
+    }
+    *value = *(req->requestvb->val.integer);
+    return 0;
+}
+
+int
+MoxaAgentX_SetError(void *requests, int snmp_err)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL)
+    {
+        return -1;
+    }
+    netsnmp_request_set_error(req, snmp_err);
+    return 0;
+}
+
+int
+MoxaAgentX_SetNoSuchInstance(void *requests)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL || req->requestvb == NULL)
+    {
+        return -1;
+    }
+    snmp_set_var_typed_value(req->requestvb, SNMP_NOSUCHINSTANCE, NULL, 0);
+    return 0;
+}
+
+int
+MoxaAgentX_GetMode(void *reqinfo)
+{
+    netsnmp_agent_request_info *ri = (netsnmp_agent_request_info *) reqinfo;
+    return ri ? ri->mode : -1;
+}
+
+int
+MoxaAgentX_GetVarType(void *requests)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+    if (req == NULL || req->requestvb == NULL)
+    {
+        return -1;
+    }
+    return req->requestvb->type;
+}
+
+int
+MoxaAgentX_GetSetString(void *requests, char *buf, size_t buf_max, size_t *out_len)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+    size_t n;
+
+    if (req == NULL || req->requestvb == NULL || buf == NULL || out_len == NULL)
+    {
+        return -1;
+    }
+    n = req->requestvb->val_len;
+    if (n >= buf_max)   /* need room for the NUL */
+    {
+        return -1;
+    }
+    memcpy(buf, req->requestvb->val.string, n);
+    buf[n] = '\0';
+    *out_len = n;
+    return 0;
+}
+
+static void *
+moxa_agentx_loop(void *arg)
+{
+    (void) arg;
+    while (g_running)
+    {
+        /* Blocks up to the internal select timeout, then processes AgentX fds. */
+        agent_check_and_process(1);
+    }
+    return NULL;
+}
+
+int
+MoxaAgentX_RunInThread(void)
+{
+    g_running = 1;
+    return pthread_create(&g_thread, NULL, moxa_agentx_loop, NULL);
+}
+
+void
+MoxaAgentX_Shutdown(void)
+{
+    g_running = 0;
+    snmp_shutdown("lib_moxa_snmp_agentx");
+}

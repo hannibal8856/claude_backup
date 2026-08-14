@@ -1,0 +1,771 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_mxladb_c
+#define _IES_AUTO_MIBS_FLAGS_net_mxladb_c
+
+
+/**
+ * @brief function body for handle active/NotInService in fscfadb/ifMainTable/ifMainRowStatus
+
+ * @param[in]    ifIndex     ifIndex
+ * @param[in]    rowStatus   rowStatus command
+
+ * @returns      0 means success, others fail.
+ */
+int32_t fscfadb_ifMainTable_ifMainRowStatus_activeAndNotInService( int32_t ifIndex,
+                                                                   int32_t rowStatus )
+{
+    int32_t      ret                      = (-1);
+    JSON_Value  *jsonVal                  = NULL;
+    JSON_Object *jsonObj                  = NULL;
+    JSON_Value  *jsonVal_agent            = NULL;
+    JSON_Object *jsonObj_agent            = NULL;
+    int32_t      portChannelTableURIIndex = 0;
+    char         uriPath[MOXA_SNMP_MAX_URI_LENGTH]  = {0x0};
+    int32_t      laGroupSelectionPolicy   = 0;
+    int32_t      enable                   = 0;
+    int32_t      ifMainType               = 0;
+
+    if ( moxaSnmpHandle_UtilLaGetPortChannelIndex(ifIndex,
+                                                  &portChannelTableURIIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get portChannelTableURIIndex for ifIndex(%d)",
+            __func__, __LINE__, ifIndex);
+        return (-1);
+    }
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH("/%s/%d/"),
+        MXCFG_GRP_mxla_portChannelTable, portChannelTableURIIndex);
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal From (%s)\n",
+            __func__, __LINE__, uriPath);
+        return (-1);
+    }
+
+    jsonObj = json_value_get_object(jsonVal);
+    if ( jsonObj == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't init jsonObj from jsonValue\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    if ( rowStatus == MOXA_SNMP_READ_CREATE_ACTIVE )
+    {
+
+        jsonVal_agent = json_value_init_object();
+
+        if (jsonVal_agent == NULL)
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal_agent\n",
+                __func__, __LINE__ );
+            goto config_end;
+        }
+
+        jsonObj_agent = json_value_get_object(jsonVal_agent);
+        if ( jsonObj_agent == NULL )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonObj_agent\n",
+                __func__, __LINE__ );
+            goto config_end;
+        }
+
+        enable                 = json_object_dotget_boolean(jsonObj, MXCFG_KEY_IfEnable);
+        ifMainType             = json_object_dotget_number (jsonObj, MXCFG_KEY_IfMainType);
+        laGroupSelectionPolicy = json_object_dotget_number (jsonObj, MXCFG_KEY_laSelectPolicy);
+
+        json_object_dotset_boolean(jsonObj_agent, MXCFG_KEY_IfEntryActive,  MOXA_SNMP_JSON_TRUE);
+        json_object_dotset_number (jsonObj_agent, MXCFG_KEY_IfIndex,        ifIndex);
+        json_object_dotset_boolean(jsonObj_agent, MXCFG_KEY_IfEnable,       enable);
+        json_object_dotset_number (jsonObj_agent, MXCFG_KEY_IfMainType,     ifMainType);
+        json_object_dotset_number (jsonObj_agent, MXCFG_KEY_laSelectPolicy, laGroupSelectionPolicy);
+
+        if ( moxaSnmpHandle_UtilCfgDelURIConfig(uriPath) != 0 )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't del portChannelTableURIIndex(%d)",
+                __func__, __LINE__, portChannelTableURIIndex);
+            goto config_end;
+        }
+
+        snprintf(uriPath, sizeof(uriPath),
+            MOXA_SNMP_AGENT_PATH(MXAGENT_GRP_LAportChannelTable));
+
+        if ( moxaSnmpHandle_UtilCfgPostURIConfig(uriPath, jsonVal_agent) != 0 )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't post agent(%s)",
+                __func__, __LINE__, uriPath);
+            goto config_end;
+        }
+    }
+    else
+    if ( rowStatus == MOXA_SNMP_READ_CREATE_NOT_IN_SERVICE )
+    {
+        json_object_dotset_boolean(jsonObj, MXCFG_KEY_IfEntryActive, MOXA_SNMP_JSON_FALSE);
+
+        if ( moxaSnmpHandle_UtilCfgPatchURIConfig(uriPath, jsonVal) != 0 )
+        {
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't patch config(%s)",
+                __func__, __LINE__, uriPath);
+            goto config_end;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : unsupport rowStatus(%d)",
+            __func__, __LINE__, rowStatus);
+            goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+
+    if ( jsonVal_agent != NULL )
+    {
+        json_value_free(jsonVal_agent);
+        jsonVal_agent = NULL;
+    }
+
+    return ret;
+}
+
+
+
+/**
+ * @brief function body for handle destroy in fscfadb/ifMainTable/ifMainRowStatus
+
+ * @param[in]    ifIndex     ifIndex
+ * @param[in]    rowStatus   rowStatus command
+
+ * @returns      0 means success, others fail.
+ */
+int32_t fscfadb_ifMainTable_ifMainRowStatus_destroy( int32_t ifIndex )
+{
+    int32_t portChannelTableURIIndex = 0;
+    int32_t laGroup                  = 0;
+    char    uriPath[MOXA_SNMP_MAX_URI_LENGTH]  = {0x0};
+
+    if ( moxaSnmpHandle_UtilLaGetPortChannelIndex(ifIndex,
+                                                  &portChannelTableURIIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get portChannelTableURIIndex for ifIndex(%d)",
+            __func__, __LINE__, ifIndex);
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilLaFindLaGroup(portChannelTableURIIndex, &laGroup) != LA_SEARCH_HIT )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get laGroup for portChannelTableURIIndex(%d)",
+            __func__, __LINE__, portChannelTableURIIndex);
+        return (-1);
+    }
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_AGENT_PATH(MXAGENT_GRP_LAportChannelTable)"?%s=%d",
+        MXAGENT_KEY_laGroup,
+        laGroup);
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : uriPath('%s')\n",
+        __func__, __LINE__, uriPath );
+
+    if ( moxaSnmpHandle_UtilCfgDelURIConfig(uriPath) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't del laGroup(%d) for uriPath(%s)",
+            __func__, __LINE__, laGroup, uriPath);
+        return (-1);
+    }
+
+    return 0;
+}
+
+
+/**
+ * @brief function body for handle CreateAndWait in fscfadb/ifMainTable/ifMainRowStatus
+
+ * @param[in]    ifIndex     ifIndex
+ * @param[in]    rowStatus   rowStatus command
+
+ * @returns      0 means success, others fail.
+ */
+int32_t fscfadb_ifMainTable_ifMainRowStatus_createAndWait( int32_t ifIndex )
+{
+    int32_t       ret                      = (-1);
+    JSON_Value   *jsonVal                  = NULL;
+    JSON_Object  *jsonObj                  = NULL;
+    int32_t       portChannelTableURIIndex = 0;
+    int32_t       portChannelTableURICount = 0;
+    int32_t       laGroupSelectionPolicy   = 0;
+    char          uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+    char          ifAlias[32]  = {0x0};
+    int32_t       ifMainType   = 0;
+    int32_t       maxPortNo    = 0;
+
+    if ( moxaSnmpHandle_UtilLaGetPortChannelIndex(ifIndex,
+                                                  &portChannelTableURIIndex) == 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : portChannelTableURIIndex(%d) for ifIndex(%d) should not exist\n",
+            __func__, __LINE__, portChannelTableURIIndex, ifIndex);
+        return (-1);
+    }
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH(MXCFG_GRP_mxla_portChannelTable) );
+
+    if ( moxaSnmpHandle_UtilJsonGetTableCnt(uriPath, &portChannelTableURICount) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get portChannelTableURICount for uriPath(%s)\n",
+            __func__, __LINE__, uriPath);
+        return (-1);
+    }
+
+    jsonVal = json_value_init_object();
+
+    if ( jsonVal == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't init jsonVal\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    jsonObj = json_value_get_object(jsonVal);
+    if ( jsonObj == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonObj for jsonVal\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    LibSystem_GetMaxPortNumInSystem(&maxPortNo);
+
+    laGroupSelectionPolicy = LA_PORTCHANNELTABLE_DEFAULT_POLICY;
+    ifMainType             = LA_PORTCHANNELTABLE_IFMAIN_TYPE;
+    snprintf(ifAlias, sizeof(ifAlias), "po%d", ifIndex - maxPortNo);
+
+    json_object_dotset_number (jsonObj, MXCFG_KEY_IfIndex,        ifIndex);
+    json_object_dotset_boolean(jsonObj, MXCFG_KEY_IfEnable,       MOXA_SNMP_JSON_FALSE);
+    json_object_dotset_number (jsonObj, MXCFG_KEY_laSelectPolicy, laGroupSelectionPolicy);
+    json_object_dotset_string (jsonObj, MXCFG_KEY_IfAlias,        ifAlias);
+    json_object_dotset_number (jsonObj, MXCFG_KEY_IfMainType,     ifMainType);
+    json_object_dotset_boolean(jsonObj, MXCFG_KEY_IfEntryActive,  MOXA_SNMP_JSON_FALSE);
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH(MXCFG_GRP_mxla_portChannelTable)"/%d/",
+        portChannelTableURICount );
+
+    if ( moxaSnmpHandle_UtilCfgPatchURIConfig(uriPath, jsonVal) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't PatchURIConfig\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+
+    return ret;
+}
+
+
+/**
+ * @brief RemovePortChannelMembers in fsladb/fsLaPortTable/fsLaPortMode
+
+ * @param[in]    ifIndex     ifIndex in MIB fsladb/fsLaPortTable
+
+ * @returns      0 means success, others fail.
+ */
+int32_t fsladb_fsLaPortTable_fsLaPortMode_RemovePortChannelMembers( int32_t ifIndex )
+{
+
+    char uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_AGENT_PATH(MXAGENT_GRP_members)"?%s=%d",
+        MXAGENT_KEY_laPorts,
+        MXCFG_INTERNAL_PORT_INDEX(ifIndex));
+
+    if ( moxaSnmpHandle_UtilCfgDelURIConfig(uriPath) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't del uri('%s')\n",
+            __func__, __LINE__, uriPath );
+        return (-1);
+    }
+
+    return 0;
+}
+
+
+/**
+ * @brief AddPortChannelMembers in fsladb/fsLaPortTable/fsLaPortMode
+
+ * @param[in]    ifIndex     ifIndex    in MIB ifIndex of fsladb/fsLaPortTable
+ * @param[in]    laPortMode  laPortMode in MIB value   of fsladb/fsLaPortTable/
+
+ * @returns      0 means success, others fail.
+ */
+int32_t fsladb_fsLaPortTable_fsLaPortMode_AddPortChannelMembers( int32_t ifIndex,
+                                                                 int32_t laPortMode )
+{
+    int32_t       ret           = (-1);
+    JSON_Value   *jsonVal       = NULL;
+    JSON_Object  *jsonObj       = NULL;
+    JSON_Value   *jsonVal_agent = NULL;
+    JSON_Object  *jsonObj_agent = NULL;
+    int32_t       dot3adAggPortActorAdminKey = 0;
+    int32_t       lacpActivity               = 0;
+    char          uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH(MXCFG_GRP_mxla_portTable)"/%d",
+        MXCFG_INTERNAL_PORT_INDEX(ifIndex));
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    jsonObj = json_value_get_object(jsonVal);
+    if ( jsonObj == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonObj for jsonVal\n",
+            __func__, __LINE__);
+        goto config_end;
+    }
+
+    jsonVal_agent = json_value_init_object();
+
+    if (jsonVal_agent == NULL)
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal_agent\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    jsonObj_agent = json_value_get_object(jsonVal_agent);
+    if ( jsonObj_agent == NULL )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonObj_agent\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    dot3adAggPortActorAdminKey = json_object_dotget_number (jsonObj, MXCFG_KEY_portAdminKey);
+    lacpActivity               = json_object_dotget_boolean(jsonObj, MXCFG_KEY_activity);
+
+    json_object_dotset_number (jsonObj_agent, MXCFG_KEY_portAdminKey, dot3adAggPortActorAdminKey);
+    json_object_dotset_boolean(jsonObj_agent, MXCFG_KEY_activity,     lacpActivity);
+    json_object_dotset_number (jsonObj_agent, MXCFG_KEY_portMode,     laPortMode);
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_AGENT_PATH(MXAGENT_GRP_MemInSingleChannel)"?%s=%d",
+        MXAGENT_KEY_laPorts,
+        MXCFG_INTERNAL_PORT_INDEX(ifIndex));
+
+    if ( moxaSnmpHandle_UtilCfgPostURIConfig(uriPath, jsonVal_agent) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't post jsonVal_agent\n",
+            __func__, __LINE__ );
+        goto config_end;
+    }
+
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+
+    if ( jsonVal_agent != NULL )
+    {
+        json_value_free(jsonVal_agent);
+        jsonVal_agent = NULL;
+    }
+
+    return ret;
+}
+
+
+/**
+ * @brief function body for set fscfadb/ifMainTable/ifMainType
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t setEntryValue_fscfadb_ifMainTable_ifMainType( netsnmp_agent_request_info    *reqinfo,
+                                                      netsnmp_request_info          *request,
+                                                      struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t  ifIndex = 0;
+    int32_t  portChannelTableURIIndex = 0;
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &ifIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get request OID index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilLaCheckPortChannel(ifIndex) == LA_NORMAL_PORT )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d : only portChannel port is allow to set \n\n",
+            __func__, __LINE__);
+        return (-1);
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : ifIndex(%d)\n",
+        __func__, __LINE__, ifIndex);
+
+    if ( moxaSnmpHandle_UtilLaGetPortChannelIndex(ifIndex,
+                                                  &portChannelTableURIIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get portChannelTableURIIndex for ifIndex(%d)",
+            __func__, __LINE__, ifIndex);
+        return (-1);
+    }
+
+    if ( setEntryValue_mibTableEntry( reqinfo, request, entry,
+            MXCFG_GRP_mxla_portChannelTable,
+            portChannelTableURIIndex,
+            MXCFG_KEY_IfMainType,
+            MOXA_SNMP_JSON_NUMBER ) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't set %s\n",
+            __func__, __LINE__, MXCFG_KEY_IfMainType);
+        return (-1);
+    }
+
+    return 0;
+}
+
+
+/**
+ * @brief function body for set fscfadb/ifMainTable/ifMainRowStatus
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t setEntryValue_fscfadb_ifMainTable_ifMainRowStatus( netsnmp_agent_request_info    *reqinfo,
+                                                           netsnmp_request_info          *request,
+                                                           struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t                   ifIndex   = 0;
+    int32_t                   rowStatus = 0;
+    struct moxaSnmpSetBuffer  setBuf;
+
+    memset(&setBuf, 0, sizeof(setBuf));
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &ifIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get request OID index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilLaCheckPortChannel(ifIndex) == LA_NORMAL_PORT )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d : only portChannel port is allow to set \n\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilSnmpGetSetBuffer(reqinfo, request, entry, &setBuf) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get set buffer\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    rowStatus = atoi(setBuf.valStrBuf);
+
+    switch(rowStatus)
+    {
+        case MOXA_SNMP_READ_CREATE_ACTIVE:
+        case MOXA_SNMP_READ_CREATE_NOT_IN_SERVICE:
+
+            if ( fscfadb_ifMainTable_ifMainRowStatus_activeAndNotInService(ifIndex, rowStatus) != 0 )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't handle active or notInService\n",
+                    __func__, __LINE__ );
+                return (-1);
+            }
+            break;
+
+        case MOXA_SNMP_READ_CREATE_DESTROY:
+
+            if ( fscfadb_ifMainTable_ifMainRowStatus_destroy( ifIndex ) != 0 )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't handle destroy\n",
+                    __func__, __LINE__ );
+                return (-1);
+            }
+            break;
+
+        case MOXA_SNMP_READ_CREATE_CREATE_AND_WAIT:
+
+            if ( fscfadb_ifMainTable_ifMainRowStatus_createAndWait( ifIndex ) != 0 )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't handle createAndWait\n",
+                    __func__, __LINE__ );
+                return (-1);
+            }
+            break;
+
+        default :
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : unsupport rowStatus(%d)\n",
+            __func__, __LINE__, rowStatus );
+            return (-1);
+    }
+
+    return 0;
+}
+
+
+/**
+ * @brief function body for set fsladb/fsLaPortTable/fsLaPortMode
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t setEntryValue_fsladb_fsLaPortTable_fsLaPortMode( netsnmp_agent_request_info    *reqinfo,
+                                                         netsnmp_request_info          *request,
+                                                         struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t                   ret        = (-1);
+    int32_t                   ifIndex    = 0;
+    struct moxaSnmpSetBuffer  setBuf;
+    int32_t                   laPortMode = 0;
+
+    memset(&setBuf, 0, sizeof(setBuf));
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &ifIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get request OID index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : ifIndex(%d)\n",
+        __func__, __LINE__, ifIndex);
+
+    if ( moxaSnmpHandle_UtilSnmpGetSetBuffer(reqinfo, request, entry, &setBuf) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get set buffer\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    laPortMode = atoi(setBuf.valStrBuf);
+
+    switch(laPortMode)
+    {
+        case LA_PORT_MODE_DISABLE :
+
+            if ( fsladb_fsLaPortTable_fsLaPortMode_RemovePortChannelMembers( ifIndex ) != 0 )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't RemovePortChannelMembers \n",
+                    __func__, __LINE__);
+                return (-1);
+            }
+            break;
+
+        case LA_PORT_MODE_LACP :
+        case LA_PORT_MODE_MANUAL :
+
+            if ( fsladb_fsLaPortTable_fsLaPortMode_AddPortChannelMembers( ifIndex, laPortMode ) != 0 )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't AddPortChannelMembers \n",
+                    __func__, __LINE__);
+                return (-1);
+            }
+            break;
+
+        default :
+            LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : unsupport laPortMode(%d)\n",
+                __func__, __LINE__, laPortMode );
+            return (-1);
+    }
+
+    return 0;
+}
+
+
+
+/**
+ * @brief function body for set fscfadb/fsLaPortChannelTable/laConfigGroupSelectionPolicy
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t setEntryValue_fscfadb_fsLaPortChannelTable_laConfigGroupSelectionPolicy( netsnmp_agent_request_info    *reqinfo,
+                                                                                 netsnmp_request_info          *request,
+                                                                                 struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t                   ret        = (-1);
+    int32_t                   ifIndex    = 0;
+    struct moxaSnmpSetBuffer  setBuf;
+    int32_t                   selPolicy  = 0;
+    int32_t                   portChannelTableURIIndex = 0;
+
+    memset(&setBuf, 0, sizeof(setBuf));
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &ifIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get request OID index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilLaGetPortChannelIndex(ifIndex,
+                                                  &portChannelTableURIIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get portChannelTableURIIndex for ifIndex(%d)",
+            __func__, __LINE__, ifIndex);
+        return (-1);
+    }
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : ifIndex(%d)\n",
+        __func__, __LINE__, ifIndex);
+
+    if ( moxaSnmpHandle_UtilSnmpGetSetBuffer(reqinfo, request, entry, &setBuf) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get set buffer\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    selPolicy = atoi(setBuf.valStrBuf);
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : laConfigGroupSelectionPolicy(%d)\n",
+        __func__, __LINE__, selPolicy);
+
+    if ( setEntryValue_mibTableEntry( reqinfo, request, entry,
+            MXCFG_GRP_mxla_portChannelTable,
+            portChannelTableURIIndex,
+            MXCFG_KEY_laSelectPolicy,
+            MOXA_SNMP_JSON_NUMBER ) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't set %s\n",
+            __func__, __LINE__, MXCFG_KEY_laSelectPolicy);
+        return (-1);
+    }
+
+    return 0;
+}
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_net_mxladb
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "fscfadb/ifMainTable/") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_ISS_REMAP_TBL,      entry->flags);
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_INDEX_NOT_IN_ORDER, entry->flags);
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "ifMainType") ) 
+        {
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_fscfadb_ifMainTable_ifMainType) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "ifMainRowStatus") ) 
+        {
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_fscfadb_ifMainTable_ifMainRowStatus) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "fsladb/fsLaPortChannelTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_INDEX_NOT_START_FROM_1, entry->flags);
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_ISS_REMAP_TBL, entry->flags);
+        if ( IES_NOERR == IES_SNMP_COMPARE_NAME(entry->name, "laConfigGroupSelectionPolicy") )
+        {
+
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_fscfadb_fsLaPortChannelTable_laConfigGroupSelectionPolicy) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "fsladb/fsLaPortTable/") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_ISS_REMAP_TBL, entry->flags);
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "fsLaPortMode") ) 
+        {
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_fsladb_fsLaPortTable_fsLaPortMode) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "fsLaPortActorResetAdminState") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_LA_REPLACE_BIT, entry->flags);
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags);
+            snprintf(entry->mod_uri      , IES_MAX_URI,       "laSettings/portTable/");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "fsLaPortAggregateWaitTime") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            snprintf(entry->mod_uri      , IES_MAX_URI,       "laSettings/portTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "lacpWaitTime");
+        }
+    }
+    return IES_NOERR;
+}
+
+
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_mxladb_c

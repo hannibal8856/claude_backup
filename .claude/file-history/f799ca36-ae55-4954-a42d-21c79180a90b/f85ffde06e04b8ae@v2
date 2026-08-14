@@ -1,0 +1,10 @@
+[package]
+name = "lib_moxa_rust_snmp_agentx"
+version = "0.1.0"
+edition = "2021"
+
+# Pure FFI over the C lib `lib_moxa_snmp_agentx` (libmoxasnmpagentx.so).
+# The C bindings are gated to the target build; on the x86_64 host the crate
+# compiles with stubs so it can be checked/tested off-target.
+
+[dependencies]

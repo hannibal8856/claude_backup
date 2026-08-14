@@ -1,0 +1,118 @@
+# Plan E — SNMP GET/SET 分流（in-master SET + AgentX GET）Session 紀錄
+
+## TL;DR
+
+用 Plan C 已驗證的架構把 iss_build==0 的 SNMP **GET 前送 framework AgentX（快）、SET 留 in-master（顧 rowStatus）**；關鍵是 framework 要用 net-snmp `table_data_set` 註冊表，才能讓 net-snmp 代勞 GETNEXT/GETBULK。
+
+一句話：**「FRR 的 GET 哲學（讓 net-snmp 排序）＋ Plan C 的 SET 分流（留 in-master）」**。
+
+## 背景與目標
+
+- **現況三條路**：ISS（iss_build==1，自研完整 SNMP agent）、framework（iss_build==0，net-snmp subagent，config 來源）、in-master（ies-auto-mibs dlmod，跑在 snmpd 內）。
+- **痛點**：iss_build==0 的 GET 目前走 in-master 的 REST 慢路徑（`entry_handle_generate_uri_value_file`，約 600ms）；walk 時整批被拖慢。
+- **目標**：GET 交給 framework AgentX（in-process config 讀，快）；SET 留 in-master（既有 `readCreate_v2` 多階段能原子處理 rowStatus）。
+- **維護原則**：使用者要「最終一致性」——單一機制、決策各有單一來源，好維護。
+- **Plan C 已證明可行**：ifTable RW 欄 GET 前送 ISS、SET 留 in-master，已出貨。
+- **Plan E 定位**：= Plan C 架構，把 forward 目標從 ISS 換成 framework，借用 Plan D 的 framework GET 服務 code。
+
+本 session 從「Plan E 該怎麼設計」一路走到「PoC 撞牆 → 找出根因 → 收斂機制 → Phase 1 驗證通過 → Phase 2 起手」。核心價值是把 GET 加速與 SET 正確性拆開，各自用最適合的機制。
+
+## 參考資料 / 來源
+
+- ADR：`~/mds4xgl3/.adr/ADR-0001`（mxTrap rowStatus valid-toggle）、`ADR-0002`（ies-auto-mibs 資料/引擎分層）、`ADR-0003`（本 session 產出，Plan E，Proposed）。
+- 設計/計畫：`~/plan-e-iss0-get-forward-framework-set-in-master-design-2026-07-23.md`、`~/plan-e-...-plan-2026-07-23.md`；Plan C/D 舊檔在 `~/plan-c-*`、`~/plan-d-*`。
+- 關鍵 code：`3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`（`mox_snmp_handle_entry`、`mox_iss_get_forward_rules`、`mox_snmp_entry_is_agentx_owned`）、`moxa_snmp_handle_util.c`（`CheckFromIss/FromUri`、`RegisterToNetSNMP`）、`lib_moxa_snmp_agentx/src/agentx.c`、`lib_moxa_rust_snmp_agentx/src/lib.rs`、`app_moxa_framework/src/snmp_subagent.rs`、`lib_moxa_ies_auto_mibs/src/mapping_reuse.c`。
+- net-snmp 5.9.3：`include/net-snmp/agent/table_dataset.h`、`table_data.h`、`agent/helpers/bulk_to_next.c`。
+- ISS 流程（使用者提供）：`snxmain.c` → `SnxMainProcessMgmtPdu` → `SNMPPDUProcess` → `SNMPGet/GetNext/GetBulkProcess`。
+
+## 討論脈絡（問題 → 方案 → 取捨 → 決定）
+
+- **要不要 agentx_owned.list？** 釐清：它是 **skip 清單**（in-master 不註冊、讓給 ISS），不是「註冊 table」；table 是 ISS 自己註冊的。分流其實由 forward（`mox_iss_get_forward_rules`）做，不是 list。
+- **Plan E 初版（dual-register + 迭代 forward）** → PoC 用 trustAccess 撞牆：單一 GET 正常、**walk 的 GETNEXT timeout**。
+- **根因**：framework 用 `register_instance`/後改 `register_handler`（column 子樹），但 handler 只處理 `MODE_GET`；`register_handler` 沒有 instance helper 幫忙排序 GETNEXT → walk 卡。對照 syslog/email（`register_instance`，helper 自動排 GETNEXT）walk 正常。
+- **是不是我改動造成？** 鑑別測試：framework 獨佔群組 walk 正常 → 確認是「dual-register + forward 進 per-instance」特有，不是 flapping。
+- **Plan E 還需要嗎？** 盤點 iss0 表：trustedIp(maxItems 20)、l3VlanIfTable(256) 都是**固定槽**，leaseTable 是 RO status → **沒有「真動態 + rowStatus SET」的表**。但使用者要的是**架構與 GET 速度**，仍決定走分流。
+- **顯式 vs 隱式閘門？** 結論：forward-only 才能讓隱式取代顯式（skip 無 fallback 需白名單）；純顯式會把 iss_build 歸屬手動複製、維護倒退。
+- **怎麼修？** ISS 能動是因為它是 **table**；framework 是 per-instance。→ **framework 改用 `table_data_set`**，net-snmp 代勞 GET/GETNEXT/GETBULK（含 bulk_to_next），等於用 net-snmp 機制達成 ISS 手刻的效果。
+- **貼近 FRR 嗎？** 是。framework = net-snmp subagent（讓 net-snmp 做協定），不是 ISS 那種自研 agent；`table_data_set` 甚至比 FRR 舊的 findVar 更「交給 net-snmp」。
+- **載具 event_port vs trustAccess？** rowStatus createAndGo 是 **Plan D** 的難題；Plan E 把 SET 留 in-master、framework 唯讀 → 難題自動避開。framework 只多一個 rowStatus 的 **GET 值對映**（易）。event_port 是 scalar+portsPbmp 混合（對映難），trustAccess 是 flat table（易）→ **選 trustAccess**。
+
+## 結論與決策
+
+- **Plan E = Plan C 架構 + framework 為 forward 目標**：GET 前送 framework、SET 留 in-master。理由：重用已驗證機制，避免 Plan D「framework 擁有 SET」的 per-instance 原子 append 天花板。
+- **framework 用 `table_data_set` 註冊被 forward 的表**：因為 raw `register_handler` 會丟掉 net-snmp 的 GETNEXT/GETBULK 排序；table_data_set 讓 net-snmp 全包。這是本 session 最關鍵的技術決定。
+- **SET 留 in-master、framework 唯讀**：rowStatus createAndGo 用 in-master 既有引擎；framework 只需 rowStatus 的 GET 值對映（valid→active/notInService）。
+- **終局 forward-only + 隱式閘門、agentx_owned.list 漸進退休**：已寫入 ADR-0003 Decision #6–8。
+- **priority 200**：framework 註冊比 in-master(127)低優先 → in-master 贏 wire、顧 SET；framework 當被 forward 的 GET 服務端。
+- **Phase 1 已驗證**：自足 demo `table_data_set` 的 snmpwalk **和** snmpbulkwalk 都正確 → table_data_set 機制與 C wrapper 成立。
+
+## 後續待辦 / 開放問題
+
+- **Phase 2a build**：修掉 `netsnmp_table_row_add_column` macro 的 cast-precedence 編譯錯後，重 build 確認通用 table-builder FFI 編過。
+- **Phase 2b**：Rust 讀 trustedIp config array → 用 builder 建 dataset（index INT、ipAddress/netmask ASN_IPADDRESS、rowStatus INT）→ `table_register` 取代現有 column-subtree 迴圈；in-master 保留 INIT_ENTRY(SET) + agentx_owned.list skip RO index 欄 + RW 欄 forward GET。
+- **需先探查**：framework 在 Rust 怎麼枚舉一張 config table 的所有列（讀整個 array）。
+- **refresh 策略**：config 變動時重建 dataset（PoC 先 startup 建一次）。
+- **驗證目標**：`snmpset` ipAddress（走 in-master→config）＋`snmpwalk`（走 framework table，快）都成功 = Plan E 分流證成。
+- **開放**：GETBULK 是否真的送到 subagent（ISS 有 SNMPGetBulkProcess 暗示會）——table_data_set 已含 bulk_to_next，可 `snmpbulkwalk` 印證。
+- **ADR-0003 狀態**：維持 Proposed；全推穩定後轉 Accepted、並（先問使用者）把 ADR-0001/0002 標 Superseded。
+- **環境限制**：本 session 無法編譯/上 DUT（外部 toolchain 不在），所有 build/DUT 由使用者跑。
+
+## 附錄
+
+### A. Plan C skip vs forward（ies_auto_mibs.c）
+```c
+/* mox_snmp_init_entry 迴圈: RO + agentx_owned prefix → skip(去 ISS) */
+if ( mox_snmp_entry_is_agentx_owned(entry) ) { free(entry); continue; }
+/* is_agentx_owned: RW 一律 return 0(留 in-master); 只有 RO+prefix 命中 return 1 */
+
+/* mox_snmp_handle_entry: 分流在 handler 內按 mode 分 */
+if ( MODE_IS_GET(reqinfo->mode) ) { /* forward 給 ISS/framework */ }
+else if ( MODE_IS_SET(reqinfo->mode) ) { /* 留 in-master */ }
+```
+
+### B. net-snmp table_data_set 使用序（Phase 1 demo，已驗證）
+```c
+tds = netsnmp_create_table_data_set("moxaDemoTable");
+netsnmp_table_dataset_add_index(tds, ASN_INTEGER);
+netsnmp_table_set_add_default_row(tds, 1, ASN_INTEGER,   0, NULL, 0);
+netsnmp_table_set_add_default_row(tds, 2, ASN_OCTET_STR, 0, NULL, 0);
+/* per row: */ row = netsnmp_create_table_data_row();
+netsnmp_table_row_add_column(row, ASN_INTEGER, &idx, sizeof(idx)); /* index */
+netsnmp_set_row_column(row, 1, ASN_INTEGER, &val, sizeof(val));
+netsnmp_table_dataset_add_row(tds, row);
+reg = netsnmp_create_handler_registration("moxaDemoTable", NULL, root, root_len, HANDLER_CAN_RONLY);
+reg->priority = 200;
+netsnmp_register_table_data_set(reg, tds, NULL); /* NULL table_info 由 net-snmp 自動推導 */
+```
+
+### C. Phase 2a 通用 wrapper（C 端 8 個 + Rust FFI）
+```
+MoxaAgentX_TableNew / TableAddIndex / TableAddColumn / RowNew /
+RowAddIndex / RowSetCol / TableAddRow / TableRegister
+Rust: table_new / table_add_index / table_add_column / row_new /
+      row_add_index_int / row_set_col_int / row_set_col_bytes / table_add_row / table_register
+```
+編譯錯修正：`netsnmp_table_row_add_column` macro 未括號化 `row`，需先存 typed local
+`netsnmp_table_row *r = (netsnmp_table_row *) row;` 再傳 `r`。
+
+### D. Build 指令（使用者環境，docker 內）
+```bash
+run_in_docker.sh "make lib_moxa_snmp_agentx-rebuild lib_moxa_rust_snmp_agentx-rebuild app_moxa_framework-rebuild rust_moxa_build-rebuild"
+```
+
+### E. DUT 驗證（Phase 1 通過範例 / Phase 2 目標）
+```bash
+# Phase 1(已過): demo table 走 walk 與 bulkwalk 都回 3 列 x 2 欄
+snmpwalk     -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.99
+snmpbulkwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.99
+# Phase 2(目標): SET 走 in-master、GET 走 framework
+snmpset  -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.<idx> a 192.168.1.5
+snmpwalk -v2c -c public  192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+```
+
+### F. 三方架構對照（FRR / framework / ISS）
+| | FRR | framework 現在 | ISS |
+|---|---|---|---|
+| 協定 | net-snmp subagent | net-snmp subagent | 自研 snxmain.c |
+| 排序 | variable[]/header_table | **table_data_set（net-snmp）** | 自刻 GetNext/GetBulk |
+| SET | WriteMethod（subagent） | **留 in-master** | nmhSet* |

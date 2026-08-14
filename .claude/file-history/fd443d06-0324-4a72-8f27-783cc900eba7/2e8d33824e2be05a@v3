@@ -1,0 +1,47 @@
+---
+name: dut-console-is-linux-shell-not-moxa-cli
+description: dut-console skill 進到的是 Linux root zsh，不是 Moxa CLI；別把 moxashell.exe 丟進去會卡住 console
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: fd443d06-0324-4a72-8f27-783cc900eba7
+  modified: 2026-08-04T09:54:47.413Z
+---
+
+`dut-console` skill 登入後停在 **Linux shell**，不是 Moxa CLI。
+所以 `show ?`、`show running-config` 這類指令會被 shell 解析而失敗
+（2026-08-04 實測回 `zsh: no matches found: ?`，因為 `?` 被當 glob）。
+
+**要進產品 shell：`su` 之後執行 `moxash`**（使用者 2026-08-04）。
+`/usr/bin/moxash` 是 `moxashell.exe` 的 symlink，同一支程式
+（`dl/app_moxa_cli/Makefile:85`，`install -m 4755`）。
+
+**預設 shell 會改成 `/bin/sh`**：`plugin_moxa_user_account` 的 `admin_sh_develop`
+分支（`6b3c19a login to Linux shell`、`bb3ebf1 Add debug user`），使用者進行中。
+2026-08-04 build 出來的 image 裡 `/etc/passwd` 仍是 `root:x:0:0:root:/root:/bin/zsh`，
+所以那批還沒生效。改成 `/bin/sh` 之後 glob 行為會不同，但**下面的 TTY 問題不變**——
+`moxash` 是同一支 binary。
+
+**不要用 dut-console 去跑 moxashell.exe。** 它需要真正的 TTY：
+
+```
+echo 'show running-config' | /bin/moxashell.exe    # 印出 banner 後就卡住
+```
+
+會印 `Welcome to MOXA command shell` 然後永遠等不到 fence，wrapper 逾時，
+而且 **DUT console 會被留在卡死狀態**，下一次呼叫變成
+`Could not detect a prompt after 8 attempts`。
+
+**Why:** 2026-08-04 實際踩到。skill 本身是 fire-and-forget 設計，
+明講不適合需要讀中間輸出再決定下一步的互動式程式。
+
+**How to apply:**
+- 救援方式（實測有效）：用 expect 直接開 picocom，送 **`\034`（Ctrl-\ = SIGQUIT）**，
+  再送 `\r`，就會回到 Linux shell。`\003`（Ctrl-C）與 `exit` 都**無效**——
+  因為 moxashell 的輸出被導進 pipe，看不到回應。
+  驗證回到 shell：`echo RECOVER$(id -u)END` 應回 `RECOVER0END`。
+- 要問 CLI 指令集，改走這兩條：
+  1. 請使用者在 minicom 裡敲 `show ?` 貼回來
+  2. 讀原始碼——見 [[snmpwalk-diff-confounded-by-dut-config]] 裡的 export-cli 清單
+- 若真的要程式化驅動 CLI，需要配 pty（例如 `script -qc /bin/moxashell.exe /dev/null`）
+  並自己處理 CLI 的 prompt，這已超出 dut-console skill 的範圍。

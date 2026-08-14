@@ -1,0 +1,131 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+
+#ifndef __APP_MOXA_FIBER_CHECK_MONITOR_H__
+#define __APP_MOXA_FIBER_CHECK_MONITOR_H__
+
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "libmoxaio/lib_moxa_io.h"
+#include "libmoxa_fiber_check/lib_moxa_fiber_ddm_sff8472.h"
+#include "fiber_check_defines.h"
+
+
+struct FiberCheckPortStatus {
+    float      mTxPower;
+    float      mRxPower;
+    float      mVoltage;
+    float      mTxBiasCurrent;
+    float      mTemperatureC;
+    uint32_t    mWaveLength;
+    uint8_t     mSerialNumber[MOXA_MAX_SN_LEN];
+    uint8_t     mModelName[MOXA_MAX_MODEL_NAME_LEN];
+    bool        mSupportDdm;
+    bool        mValid;
+};
+
+struct FiberCheckStatus {
+    struct FiberCheckPortStatus mPortStatus[LIB_SYSTEM_DEF_MAX_PORT_NUM_IN_SYSTEM];
+};
+
+/**
+ * @brief Check if port valid
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                   true means valid, false means invalid
+ */
+bool FiberCheckMntr_IsPortValid(const uint8_t aPortNo);
+
+/**
+ * @brief Check if port support ddm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                   true means support, false means not support
+ */
+bool FiberCheckMntr_IsPortSupportDdm(const uint8_t aPortNo);
+
+/**
+ * @brief Get real time temperature value in degree C
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  Real time temperature value in degree C
+ */
+float FiberCheckMntr_GetPortTempC(const uint8_t aPortNo);
+
+/**
+ * @brief Get the whole current status structure
+ *
+ * @param[in]   aPortNo          Specified logical port index (0-based).
+ * @param[out]  aFiberPortStatus Status Structure
+ * @returns                      0 means success, other means fail
+ */
+int FiberCheckMntr_GetPortRealTimeStatus(const uint8_t aPortNo, struct  FiberCheckPortStatus *aFiberPortStatus);
+
+/**
+ * @brief Get real time tx power value in dbm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time tx power value
+ */
+float FiberCheckMntr_GetPortTxPower(const uint8_t aPortNo);
+
+/**
+ * @brief Get real time rx power value in dbm
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time rx power value
+ */
+float FiberCheckMntr_GetPortRxPower(const uint8_t aPortNo);
+
+/**
+ * @brief Get real time voltage value
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time voltage value
+ */
+float FiberCheckMntr_GetPortVoltage(const uint8_t aPortNo);
+
+/**
+ * @brief Get real time tx bias current value
+ *
+ * @param[in]   aPortNo      Specified logical port index (0-based).
+ * @returns                  real time tx bias current value
+ */
+float FiberCheckMntr_GetPortTxBiasCurrent(const uint8_t aPortNo);
+
+/**
+ * @brief Force to update specific port's ddm status
+ *
+ * @param[in]   aPortNo         Specified logical port index (0-based).
+ * @param[in]   aCheckVendor    If need to check vendor. (ISS will do for us, only check when reload service)
+ * @param[in]   aUpdateBaseData If need to update base data. (A0h data will not be changed in run time)
+ * @returns                     0 means success, others fail.
+ */
+int FiberCheckMntr_UpdateFiberDdmStatus(const uint8_t aPortNo, const bool aCheckVendor, const bool aUpdateBaseData);
+
+/**
+ * @brief Set port need to be update async
+ *
+ * @param[in]   aPortNo         Specified logical port index (0-based).
+ * @param[in]   aCheckVendor    If need to check vendor. (ISS will do for us, only check when reload service)
+ * @param[in]   aUpdateBaseData If need to update base data. (A0h data will not be changed in run time)
+ * @returns                     0 means success, others fail.
+ */
+int FiberCheckMntr_SetPortNeedUpdateAsync(const uint8_t aPortNo, const bool aCheckVendor, const bool aUpdateBaseData);
+
+/**
+ * @brief Fiber Check subtask monitor main
+ *
+ * @param[in]  aParameter       Parameters come from parent process(Fiber Check main)
+ * @returns                     0 means success, others fail.
+ */
+void* FiberCheckMntr_Main(void* aParameter);
+
+#endif  // __APP_MOXA_FIBER_CHECK_MONITOR_H__

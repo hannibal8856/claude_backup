@@ -1,0 +1,78 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file LICENSE for details.
+ */
+
+#ifndef __APP_MOXA_FIBER_CHECK_MAIN_H__
+#define __APP_MOXA_FIBER_CHECK_MAIN_H__
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+
+#define OVER_TIME_TOLERANCE 3
+
+#define FIBER_CHECK_LOG_MSG_TEMPERATURE_WARN "The port %s temperature exceeded the threshold."
+#define FIBER_CHECK_LOG_MSG_TX_POWER_WARN    "The port %s Tx power is %s the threshold."
+#define FIBER_CHECK_LOG_MSG_RX_POWER_WARN    "The port %s Rx power is %s the threshold."
+
+#define FIBER_CHECK_SRV_TSKEVT_ID        kTskEvtSrvTypeFiberCheckSrv
+#define FIBER_CHECK_SRV_TSKEVT_MSGQ_ID   kMsgQTypeFiberCheckSrvEvtQ
+#define LIB_MOXA_FIBER_CHECK_SRV_EVENT   0x00000001
+
+
+enum SeverityLevel{
+    kSeverityLevelEmergency,
+    kSeverityLevelAlert,
+    kSeverityLevelCritical,
+    kSeverityLevelError,
+    kSeverityLevelWarning,
+    kSeverityLevelNotice,
+    kSeverityLevelInfo,
+    kSeverityLevelDebug
+};
+
+enum FiberCheckEvent{
+    kFiberCheckTemperatureWarn,
+    kFiberCheckTxPowerWarn,
+    kFiberCheckRxPowerWarn
+};
+
+enum DdmWarnMask {
+    kTxPowerOverWarnMask,
+    kTxPowerUnderWarnMask,
+    kRxPowerOverWarnMask,
+    kRxPowerUnderWarnMask,
+    kTempWarnMask
+};
+
+struct FiberCheckPortOverCount {
+    uint32_t mTemperatureOverCount;
+    uint32_t mTxPowerOverCount;
+    uint32_t mTxPowerUnderCount;
+    uint32_t mRxPowerOverCount;
+    uint32_t mRxPowerUnderCount;
+};
+
+struct FiberCheckWarningStatus {
+    struct FiberCheckPortOverCount mPortOverCount[LIB_SYSTEM_DEF_MAX_PORT_NUM_IN_SYSTEM];
+    uint8_t mDdmWarn[LIB_SYSTEM_DEF_MAX_PORT_NUM_IN_SYSTEM];
+};
+
+struct FiberCheckModelParameter {
+    uint8_t mMaxPortNum;
+    uint8_t mMaxModuleNum;
+    uint8_t mMaxPowerModuleNum;
+};
+
+/* Plan A: expose per-port link status so the status layer can read it from the
+ * .stat dump instead of querying ISS ifTable. gIsPortLinkUp is file-static in
+ * fiber_check_main.c. */
+bool FiberCheck_IsPortLinkUp(const uint8_t aPortIdx);
+
+#endif
+
+

@@ -1,0 +1,135 @@
+#!/usr/bin/expect -f
+#
+# Drive the Moxa DUT serial console.
+#   Args:  $argv = list of commands to run
+#   Log :  ~/console_<YYYYMMDD>_<HHMMSS>.log (full session)
+#
+# Exit codes mirror SKILL.md:
+#   0 ok, 2 login failed, 3 no prompt, 4 su failed, 5 timeout
+#
+
+# tuning via env
+set default_timeout [expr {[info exists env(DUT_CONSOLE_TIMEOUT)] ? $env(DUT_CONSOLE_TIMEOUT) : 60}]
+set device          [expr {[info exists env(DUT_CONSOLE_DEV)]     ? $env(DUT_CONSOLE_DEV)     : "/dev/ttyS0"}]
+set baud            [expr {[info exists env(DUT_CONSOLE_BAUD)]    ? $env(DUT_CONSOLE_BAUD)    : "115200"}]
+
+set username "admin"
+set login_pw "moxa"
+set root_pw  "moxa"
+
+# Single, simple prompt pattern: any of $, #, > followed by space.
+# No end-anchor (Tcl regex $ doesn't span \n by default and the device
+# usually emits CRLF after the prompt, which broke earlier versions).
+set PROMPT_RE {[$#>] }
+
+# ---- logging ------------------------------------------------------
+set log_path [exec sh -c {echo $HOME/console_$(date +%Y%m%d_%H%M%S).log}]
+log_file -a $log_path
+log_user 1
+send_user "=== dut-console session $log_path ===\n"
+send_user "=== device $device @ $baud ===\n"
+
+# ---- spawn picocom ------------------------------------------------
+spawn picocom -b $baud --noinit --noreset --quiet $device
+
+# ---- state machine -------------------------------------------------
+set state "unknown"
+set tries 0
+set max_tries 8
+
+while {$state eq "unknown" && $tries < $max_tries} {
+    incr tries
+    send "\r"
+    set timeout 4
+    expect {
+        -re "(L|l)ogin: " {
+            send "$username\r"
+            expect {
+                -re "(P|p)assword: " {
+                    send "$login_pw\r"
+                    exp_continue
+                }
+                -re "Login incorrect|Authentication failure" {
+                    send_user "\n*** Login failed ***\n"
+                    exit 2
+                }
+                -re {\$ }       { set state "linux_user" }
+                -re {# }        { set state "linux_root" }
+                -re {> }        { set state "iss"        }
+                timeout         { ; # outer loop retries }
+            }
+        }
+        -re {\$ } { set state "linux_user" }
+        -re {# }  { set state "linux_root" }
+        -re {> }  { set state "iss"        }
+        timeout   { ; # outer loop retries }
+    }
+}
+
+if {$state eq "unknown"} {
+    send_user "\n*** Could not detect a prompt after $max_tries attempts ***\n"
+    catch {send "\x01\x18"}
+    exit 3
+}
+
+# ---- su to root if Linux as non-root -------------------------------
+if {$state eq "linux_user"} {
+    set timeout 10
+    send "su\r"
+    expect {
+        -re "(P|p)assword: " {
+            send "$root_pw\r"
+            expect {
+                -re {# } { set state "linux_root" }
+                -re "su: |Authentication failure" {
+                    send_user "\n*** su failed ***\n"
+                    catch {send "\x01\x18"}
+                    exit 4
+                }
+                timeout {
+                    send_user "\n*** Timeout waiting for root prompt ***\n"
+                    catch {send "\x01\x18"}
+                    exit 5
+                }
+            }
+        }
+        -re {# } { set state "linux_root" }
+        timeout {
+            send_user "\n*** Timeout sending su ***\n"
+            catch {send "\x01\x18"}
+            exit 5
+        }
+    }
+}
+
+send_user "\n=== reached state: $state ===\n"
+
+# ---- run user commands --------------------------------------------
+# Use a fence after each command so we don't false-match the prompt
+# inside command output.
+set timeout $default_timeout
+set fence "__CONSOLE_FENCE__"
+foreach cmd $argv {
+    send_user "\n--- CMD: $cmd ---\n"
+    send -- "$cmd ; echo $fence\r"
+    expect {
+        -re "$fence\[\r\n\]" {
+            # consume the prompt that follows
+            expect -re $PROMPT_RE {}
+        }
+        timeout {
+            send_user "\n*** Timeout (${default_timeout}s) waiting for fence after: $cmd ***\n"
+            catch {send "\x01\x18"}
+            exit 5
+        }
+    }
+}
+
+# ---- exit picocom cleanly: C-a C-x --------------------------------
+send "\x01\x18"
+expect eof
+catch {wait}
+
+send_user "\n=== session saved: $log_path ===\n"
+puts $log_path
+exit 0

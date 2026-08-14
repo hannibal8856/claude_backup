@@ -1,0 +1,156 @@
+# Plan C — AgentX GET/SET 分流(agentx_owned.list 委派白名單 + VACM 曝露白名單)
+
+> Design decision date: 2026-06-30
+> Supersedes the ad-hoc "change A (hardcode skip ifmibdb) + Q2 (ISS-side SET up-call)" approach.
+> Builds on the already-working AgentX foundation (ISS subagent + snmpd master agentx:705 + reconnect timer).
+> Codebase: `~/mds4xgl3/buildroot/dl`
+
+---
+
+## 1. 目標與範圍
+
+**目標**:ifTable / ifXTable 的 **RO GET / walk** 加速(NMS 大量讀)——交給 ISS AgentX subagent in-process 回答(~3 ms/OID),取代繞 framework REST 的慢路徑。
+
+**不在範圍**(維持現狀):
+- SET 路徑:仍走 framework(`ies-auto-mibs → nginx → actix → config layer`),framework 維持 config source-of-truth。
+- 其他 MIB 的加速、daemon-owned status OID、mapping 共用 → 留 Plan D。
+
+**成功準則**:
+- `snmpwalk ifTable/ifXTable` 的 RO column 由 ISS 回答(快),且 top-level `snmpwalk`(mib-2)能完整跑完不被截斷。
+- `snmpset ifAdminStatus` 仍經 framework 寫入 config layer(ISS 不往上呼叫 framework)。
+- 對外可見的 OID 面 = framework 支援清單(ISS 多曝露的原生 MIB 不外漏)。
+
+---
+
+## 2. 為什麼選這條(Option B)
+
+design review 時有三條路;選 B 的理由整理:
+
+| | 委派(誰服務 OID) | 曝露(NMS 看得到什麼) | 分層(Morris top-down) | 動 ISS 內核 |
+|---|---|---|---|---|
+| **ISS-as-full-subagent**(目前 change A + Q2) | ISS 整棵樹 | 無控制 → 漏 VRRP/MAU…、walk 被 68 截斷 | **違反**:UI 直打 control + ISS 上呼叫 framework 寫 SET | 中 |
+| **dlmod middleware .so** | 只認指定 OID | 只露註冊的 | 最乾淨(GET/SET 都在 middleware) | 需新 .so + 快速 IPC 取資料 |
+| **B: agentx_owned.list + VACM 白名單** ✅ | 委派白名單(opt-in) | VACM 白名單 | GET 走 AgentX(標準機制);**SET 回 framework,ISS 不上呼叫** | 小(沿用現有基礎) |
+
+**關鍵分層觀察**(已用 source 核實):
+- net-snmp master 對「AgentX subagent」與「dlmod handler」一視同仁,都只是 MIB tree 上依 OID+priority 解析的 registration。SNMP→AgentX 轉換由 `agentx/master.c::agentx_master_handler` 依 `reqinfo->mode` 建 `AGENTX_MSG_*` PDU、`snmp_async_send` 給 subagent(`master_admin.c:223` 註冊、`master.c:466/617` 轉換+送)。
+- 現況 ISS 早已透過 `code/future/mxcfg/`(7 檔、13 處 `LibFrameworkUri_*`)往上寫 config(TurboRing/TurboChain/port-security/loop-protection/RLPS/goosecheck 在用)。**祖制其實早破**;但 B 讓 SET 回到 framework,**不再擴大**這個違規(且可 revert 掉 Q2)。
+
+**6/2 docx 的定位**:`agentx_owned.list` 是「**委派**」軸的白名單(opt-in,空檔=legacy 全留 framework),但**沒有「曝露」軸的控制**——它隱性假設 framework 的 ~800 條 column-level 註冊把 ISS 全 shadow,實測發現 framework 沒註冊的標準 MIB(VRRP 68 等)會漏。B = 補上 docx 缺的那半(VACM 曝露白名單),精神一致(都是 default-deny / opt-in)。
+
+---
+
+## 3. 架構與資料流
+
+```
+            UI 層            middleware 層                control 層
+        ┌───────────┐    ┌──────────────────────┐   ┌──────────────┐
+GET RO  │  snmpd     │ AgentX│ (ies-auto-mibs 讓位) │   │ ISS subagent │
+ifTable │  (master)  │──705──┼─────────────────────┼──▶│ gpMibReg getter (快)
+        │            │    │                      │   └──────────────┘
+SET     │            │    │ ies-auto-mibs handler │       config layer
+ifAdmin │            │───▶│ → URI PATCH ──────────┼──▶ nginx→actix→plugin→DB
+Status  └───────────┘    └──────────────────────┘   (top-down,ISS 不上呼叫)
+            ▲ VACM view(master)在每個 request 套用:只露白名單子樹
+```
+
+- **GET(RO ifTable/ifXTable)**:master 因 ies-auto-mibs 讓出該 column → longest-prefix-match 路由到 ISS subagent → ISS in-process getter 回答。
+- **SET(ifAdminStatus,RW)**:ies-auto-mibs 仍註冊 → 走既有 framework URI PATCH → config layer。ISS 不參與、不上呼叫。
+- **VACM view**:master 對所有 request 套白名單,ISS 漏出的非支援 MIB 一律 not-in-view → walk 跳過。
+
+---
+
+## 4. 組件改動
+
+### 4.1 委派白名單(取代 change A)
+
+**檔案**:`/etc/moxa/netsnmp/agentx_owned.list`(新增,buildroot 安裝)
+```
+# RO entries under these URI prefixes skip local netsnmp_register_*
+# (讓 master 路由到 ISS AgentX subagent)
+ifmibdb/
+```
+> `ifmibdb/` 同時涵蓋 `ifmibdb/ifTable/` 與 `ifmibdb/ifXTable/`(兩者 URI 都在此 prefix 下)。
+
+**檔案**:`3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`(+~85 行,沿用 6/2 docx 設計)
+- `mox_snmp_load_agentx_owned_list()`:讀 list 到 `gAgentXOwnedPrefix[]`;找不到檔 → empty(legacy:全部 register)。
+- `mox_snmp_entry_is_agentx_owned(entry)`:
+  - entry 是 **RW** → return 0(**永遠留本地 → SET 走 framework**)。
+  - entry 是 **RO** 且 URI prefix 命中 list → return 1。
+- 插進 register loop:`if (is_agentx_owned(entry)) continue;`(不呼 `netsnmp_register_*`,讓位給 master 路由)。
+
+**還原 change A**:`ies_auto_mibs_setup.c:292` 的 `/* MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry); */` **改回正常註冊**——改由上面 list+RO 判斷逐 column 決定 skip 哪些(而非整段 ifmibdb 全 skip)。
+> 差別:change A 全 skip(RO+RW 都丟 ISS,逼出 Q2 的 ISS 上呼叫);新做法只 skip RO,RW 留本地。
+
+### 4.2 revert Q2(SET 回 framework)
+
+`app_moxa_iss_10_1_0/code/future/cfa2/src/ifmibwr.c`:
+- 移除 `IfAdminStatusSet` 內的 `PortSetAdminStatus2MxCfgAsync(...)` 呼叫與其 `extern` 宣告,還原成單純 `nmhSetIfAdminStatus`。
+- 理由:ifAdminStatus(RW)現在留在 framework,SET 由 framework URI 寫 config;ISS 不需上呼叫。
+
+### 4.3 曝露白名單(VACM view)
+
+`plugin_moxa_snmp/app/config_moxa_snmp_control.c::setup_snmpd_config`:
+- 把兩個 view 區塊的 `view all included .1 80` 換成 **curated `view ... included`** 清單。
+- 清單來源 = `app_moxa_iss_10_1_0/code/future/.../ies_auto_mibs_setup.c` 的 `MOX_SNMP_INIT_ENTRY` 註冊 DB(framework 真正打算支援的那套)對應的 OID root + 下列固定項:
+  - 企業:`.1.3.6.1.4.1.8691`
+  - 介面(委派給 ISS 的):`.1.3.6.1.2.1.2`(ifTable)、`.1.3.6.1.2.1.31`(ifXTable)
+  - master 自身:`.1.3.6.1.2.1.1`(system)、`.1.3.6.1.2.1.11`(snmp)、`.1.3.6.1.6.3`(SNMPv3 framework)
+- **實作時的精確 OID 清單**:從各 `net_*.h` / `*db` 的 root OID 反推(implementation plan 第一步產出對照表)。
+- 現有 `view all excluded .1.3.6.1.2.1.68` 在白名單下變多餘 → 移除(白名單本就不含 68)。
+
+---
+
+## 5. 尚未根治 / 已知限制(明列)
+
+- **VRRP(68)的 badValue 是 ISS handler 的真 bug**,本設計只是「白名單不露它」→ walk 不再被截斷,但 bug 仍在。若未來要支援標準 VRRP-MIB,需另修 ISS handler(獨立工項/回報)。
+- **SET 延遲不變**(framework REST + sleep,50–500 ms)——本設計只解 RO GET。
+- **ifAdminStatus 的 GET 仍走 framework**(它是 RW、留本地),非 ISS 快路徑;NMS walk 主要量是 RO counter,影響可忽略。
+- ies-auto-mibs 仍註冊約 800 RW+RO,memory 用量基本不變。
+- 對齊面是 framework 支援清單,**不是**截斷的 mainline walk(mainline walk 自己也卡在 68,不可作基準)。
+
+---
+
+## 6. 驗證計畫
+
+```bash
+# 1. RO ifTable/ifXTable 由 ISS 回答(快)
+snmpwalk -v2c -c public <dut> ifTable
+snmpwalk -v2c -c public <dut> ifXTable
+#    DUT: show snmp agentx statistics → Rx GetNext/Get 應隨上面增加
+
+# 2. top-level walk 完整(不被 VRRP 等截斷)
+snmpwalk -v2c -c public <dut>            # 走完 mib-2 不報 badValue
+snmpwalk -v2c -c public <dut> .1.3.6.1.4.1.8691   # 企業 MIB 可達
+
+# 3. SET 仍走 framework、ISS 不上呼叫
+snmpset -v2c -c private <dut> ifAdminStatus.<port> i 2
+#    確認 config layer 有變(/api/v1/.../ifmib/portTable/<port-1>/enable)
+#    且 ISS 端無 LibFrameworkUri 上呼叫(SET 由 ies-auto-mibs 處理)
+
+# 4. 曝露面 = 白名單
+snmpwalk -v2c -c public <dut> .1.3.6.1.2.1.68   # VRRP → 應 no-such / 空(被 view 擋)
+#    比對 walk 結果只含白名單子樹
+
+# 5. 延遲對照(目標 ~7ms → ~3ms / RO OID)
+for i in $(seq 1 100); do /usr/bin/time -f "%e" \
+  snmpget -v2c -c public <dut> ifInOctets.1 >/dev/null 2>>/tmp/lat.txt; done
+sort -n /tmp/lat.txt | awk '{a[NR]=$1} END{print "P50",a[int(NR*.5)]; print "P99",a[int(NR*.99)]}'
+```
+
+---
+
+## 7. 實作順序(交給 writing-plans 展開)
+
+1. 從 `ies_auto_mibs_setup.c` + `net_*.h` 反推 VACM 白名單 OID 清單(產對照表)。
+2. agentx_owned.list:list 檔 + buildroot 安裝 + `ies_auto_mibs.c` reader/skip;還原 change A 的 ifmibdb 註冊。
+3. revert Q2(ifmibwr.c)。
+4. VACM view 改 curated whitelist;移除 `excluded .68`。
+5. build(依 build order:plugin_moxa_snmp → rust → final)。
+6. 上 DUT 跑第 6 節驗證。
+
+## Reference
+- 6/2 原始設計:`~/SNMP_Plan_C_Design_2026-06-02.docx`
+- 6/12 演化版(hardcode skip + URI SET):`~/plan-c-agentx-poc-design-2026-06-12.md`
+- net-snmp 機制核實:`3rdparty_net_snmp/net-snmp-5.9.3/agent/mibgroup/agentx/{master.c,master_admin.c}`
+- framework 註冊清單:`3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c`

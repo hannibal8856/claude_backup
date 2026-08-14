@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""由工作版產生 Confluence 貼上版。
+
+confluence-snmp-agentx-v2.md  ->  confluence-snmp-agentx-CLEAN.md
+
+清掉:HTML 註解、素材註記、尚待補齊區塊;<details> 轉成標題。
+標題層級:拿掉檔頭的 H1(頁面標題由 Confluence 提供),其餘各升一級。
+"""
+import re
+
+SRC = 'confluence-snmp-agentx-v2.md'
+DST = 'confluence-snmp-agentx-CLEAN.md'
+
+s = open(SRC, encoding='utf-8').read()
+
+# --- 原有清理(與 handoff §7 一致)---
+s = re.sub(r'<!--.*?-->\n?', '', s, flags=re.S)
+s = re.sub(r'>\s*\n> \*\*尚待補齊\*\*.*?已完成。\n', '', s, flags=re.S)
+s = re.sub(r'^> \*\*已有素材.*(?:\n> .*)*\n', '', s, flags=re.M)
+s = re.sub(r'> \*\*簡報用的彩色版\*\*.*?\n(?:> .*\n)*', '> 【此處插入彩色架構圖】\n', s)
+s = re.sub(r'<details>\n<summary><b>(.*?)</b></summary>\n', r'#### \1\n', s)
+s = s.replace('</details>\n', '')
+
+# --- 標題層級上調 ---
+# 檔頭 H1 拿掉(Confluence 的頁面標題就是 H1),其餘 ## -> #、### -> ##、#### -> ###。
+# code fence 內的 '#' 是註解,不能動。
+out, in_fence, dropped_h1 = [], False, False
+for line in s.split('\n'):
+    if line.startswith('```'):
+        in_fence = not in_fence
+        out.append(line)
+        continue
+    if not in_fence:
+        m = re.match(r'^(#{1,6}) (.*)$', line)
+        if m:
+            level, text = len(m.group(1)), m.group(2)
+            if level == 1:
+                if not dropped_h1:      # 檔頭標題:整行拿掉
+                    dropped_h1 = True
+                    continue
+            else:
+                line = '#' * (level - 1) + ' ' + text
+    out.append(line)
+s = '\n'.join(out)
+
+s = re.sub(r'\n{3,}', '\n\n', s).lstrip('\n')
+open(DST, 'w', encoding='utf-8').write(s)
+print(f'{DST} written ({len(s)} chars)')

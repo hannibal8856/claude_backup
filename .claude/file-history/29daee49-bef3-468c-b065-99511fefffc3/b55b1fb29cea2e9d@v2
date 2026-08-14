@@ -1,0 +1,481 @@
+/*
+ * lib_moxa_ies_auto_mibs — reuse the canonical ies-auto-mibs entry arrays.
+ *
+ * Single source of truth: instead of hand-copying OID<->URI rows, #include the
+ * same net_*.h that 3rdparty_net_snmp/ies-auto-mibs compiles, and convert each
+ * `struct ies_auto_mibs_entry` to our `struct ies_map_entry` at first use. The
+ * framework subagent then serves whatever groups are listed in g_reuse_srcs[]
+ * (and whose MOX_SNMP_INIT_ENTRY is commented out on the snmpd side).
+ *
+ * This file is the ONLY one that pulls in the ies-auto-mibs headers + net-snmp;
+ * lookup.c / mapping_data.c stay dependency-free. Build must pass the same
+ * product -D flags as 3rdparty_net_snmp so the #if entry set matches.
+ *
+ * PoC scope: scalars only (uri_index == "0"); tables (uri_index != "0") are
+ * skipped until table handling lands.
+ *
+ * mod_uri: a group whose MIB URI (net_*.h `.uri`) differs from the framework
+ * config-layer path carries a per-group `ies_auto_mibs_setup_entry_flags_*` that
+ * populates entry->mod_uri exactly as the in-master path does. When a group has
+ * one (the `setup` field below), we call it and use `mod_uri[0] ? mod_uri : uri`,
+ * so the config path matches ies-auto-mibs byte-for-byte. Groups whose URI == the
+ * config path pass NULL.
+ */
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>   /* HANDLER_CAN_* */
+
+#include "ies_auto_mibs_handle.h"   /* struct ies_auto_mibs_entry, SNMP_DATA_TYPE_* */
+#include "net_mx_event_port.h"      /* mx_event_port_MibEntry[] */
+#include "net_mx_event_general.h"   /* mx_event_general_MibEntry[] */
+#include "net_mx_event_switching.h" /* mx_event_switching_MibEntry[] */
+#include "net_mx_event_poe.h"       /* mx_event_poe_MibEntry[] */
+#include "net_mx_email.h"           /* mx_email_MibEntry[] */
+#include "net_mxLoginPolicy.h"      /* mx_LoginPolicy_MibEntry[] */
+#include "net_mxPasswordPolicy.h"   /* mx_PasswordPolicy_MibEntry[] */
+#include "net_mx_RMON.h"            /* mx_RMON_MibEntry[] */
+#include "net_mx_syslogServer.h"    /* mx_syslogServer_MibEntry[] (index-table) */
+#if defined(INCLUDE_MOXA_L3)
+#include "net_mx_event_routing.h"   /* mx_event_routing_MibEntry[] */
+#endif
+#if defined(MOXA_TRACKING)
+#include "net_mx_event_tracking.h"  /* mx_event_tracking_MibEntry[] */
+#endif
+#include "net_mx_turboring_v2.h"    /* mxTurboRingV2_MibEntry[] */
+#include "net_mx_device_io.h"       /* mx_deviceIO_MibEntry[] (status index-table) */
+#include "net_mx_trap_notification.h" /* mxTrap_MibEntry[] (index-table + RowStatus) */
+#include "net_mx_trustAccess.h"     /* mxSysTrustAccess_MibEntry[] (index-table + RowStatus) */
+#include "net_mxMms.h"              /* mx_Mms_MibEntry[] (first group off the dlmod path) */
+
+/* Per-group setup fns that populate mod_uri/flags (same source the in-master
+ * ies_auto_mibs_setup.c calls). Included as source, like ies_auto_mibs_setup.c. */
+#include "ies_auto_mibs_setup_net_mx_turboring_v2.c"
+#include "ies_auto_mibs_setup_net_mx_device_io.c"
+
+#include "lib_moxa_ies_auto_mibs.h"
+
+#include "lib_moxa_system_product_info_api.h"   /* LibSystem_GetMaxPortNumInSystem */
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Per-entry setup that fills mod_uri/flags, matching the in-master path. */
+typedef ies_handle_t (*reuse_setup_fn)(struct ies_auto_mibs_entry *entry);
+
+/* Groups migrated to the framework subagent. Add { <array>, ARRAY_LEN, <setup> }
+ * here as each group's MOX_SNMP_INIT_ENTRY is commented out in
+ * ies_auto_mibs_setup.c. `setup` is NULL when the group's URI == config path. */
+struct reuse_src {
+    struct ies_auto_mibs_entry *arr;
+    size_t                      count;
+    reuse_setup_fn              setup;
+};
+
+#define REUSE_SRC(arr, setup) { (arr), sizeof(arr) / sizeof((arr)[0]), (setup) }
+
+static struct reuse_src g_reuse_srcs[] = {
+    REUSE_SRC(mx_event_port_MibEntry,       NULL),
+    REUSE_SRC(mx_event_general_MibEntry,    NULL),
+    REUSE_SRC(mx_event_switching_MibEntry,  NULL),
+    REUSE_SRC(mx_event_poe_MibEntry,        NULL),
+    REUSE_SRC(mx_email_MibEntry,            NULL),
+    REUSE_SRC(mx_LoginPolicy_MibEntry,      NULL),
+    REUSE_SRC(mx_PasswordPolicy_MibEntry,   NULL),
+    REUSE_SRC(mx_RMON_MibEntry,             NULL),
+    REUSE_SRC(mx_syslogServer_MibEntry,     NULL),
+#if defined(INCLUDE_MOXA_L3)
+    REUSE_SRC(mx_event_routing_MibEntry,    NULL),
+#endif
+#if defined(MOXA_TRACKING)
+    REUSE_SRC(mx_event_tracking_MibEntry,   NULL),
+#endif
+    REUSE_SRC(mxTurboRingV2_MibEntry,
+              ies_auto_mibs_setup_entry_flags_mx_turboring_v2),
+    REUSE_SRC(mx_deviceIO_MibEntry,
+              ies_auto_mibs_setup_entry_flags_net_mx_deviceIO),
+    /* RowStatus handled as IES_COL_ROWSTATUS in the framework (ADR-0001);
+     * in-master READ_CREATE_v2 flags are unused on this path. */
+    REUSE_SRC(mxTrap_MibEntry, NULL),
+    /* Plan E (ADR-0003): trustAccess is dual-registered — framework serves GET
+     * here, but in-master KEEPS MOX_SNMP_INIT_ENTRY(mxSysTrustAccess_MibEntry)
+     * so SET (incl. trustedIp RowStatus create/destroy) stays in-master and wins
+     * the wire by priority. Do NOT comment out its INIT_ENTRY. RowStatus col in
+     * framework is GET-only (active/notInService); framework SET is never hit. */
+    REUSE_SRC(mxSysTrustAccess_MibEntry, NULL),
+    /* dlmod path (first migration): mxMms never had a MOX_SNMP_INIT_ENTRY --
+     * it was served by plugin_snmp_mms_setting.so, loaded via the dlmod
+     * directive in /etc/moxa/netsnmp/config/mms_setting.conf. That line is
+     * removed instead, which is this path's equivalent of commenting out
+     * INIT_ENTRY. Verified on the DUT: with the dlmod line commented out and
+     * nothing else registered, .1.3.6.1.4.1.8691.602.1.8 returns
+     * "No Such Object" -- so there is no competing registration and no
+     * priority contest here, unlike the in-master groups above. */
+    REUSE_SRC(mx_Mms_MibEntry, NULL),
+};
+
+static struct ies_map_entry *s_table = NULL;
+static size_t                s_len   = 0;
+
+/* A portsPbmp table column: uri_index != "0" and the config path is a per-port
+ * boolean array. Two columns: "portIndex" (value = port) and the value column
+ * (value = array[port-1] as TruthValue). Other tables stay skipped. */
+static int
+is_ports_pbmp(const struct ies_auto_mibs_entry *e)
+{
+    return (strcmp(e->uri_index, "0") != 0) &&
+           (strstr(e->uri, "portsPbmp") != NULL);
+}
+
+/* index column (value = port) vs value column (config bool array). */
+static int
+ports_pbmp_col(const struct ies_auto_mibs_entry *e)
+{
+    return (strcmp(e->uri_index, "portIndex") == 0) ? IES_COL_ROW_INDEX
+                                                    : IES_COL_PBMP_VALUE;
+}
+
+/* A generic config index-table column: oid_index==1, the config is an object
+ * array addressed per field as "<uri><row-1>/<column>" (column = uri_index).
+ * Fixed-size config arrays (e.g. syslog): register up to MAX_TABLE_ROWS and let
+ * the handler return noSuchInstance past the array's end. Status-layer device_io
+ * tables use the product max IO counts instead (see index_table_rows). */
+#define REUSE_MAX_TABLE_ROWS 16
+
+static int
+is_index_table(const struct ies_auto_mibs_entry *e)
+{
+    /* turboring ring is a NAMED-KEY group ({ring1,ring2}), not an array
+     * index-table — see is_turboring_ring(). Excluding it here keeps any column
+     * is_turboring_ring() does not claim out of the table entirely. Otherwise it
+     * falls through to the index-table branch and emits REUSE_MAX_TABLE_ROWS rows
+     * whose path is built as "<uri><row-1>/<col>" -> "turboringv20/<col>", which
+     * can never resolve: 16 permanently valueless OIDs that a GETNEXT has to step
+     * over one by one. */
+    if (strcmp(e->uri, "config/turboringv2/ring/") == 0 ||
+        strcmp(e->uri, "stat/turboringv2/ring/") == 0)
+    {
+        return 0;
+    }
+    return e->oid_index == 1 &&
+           strcmp(e->uri_index, "0") != 0 &&
+           !is_ports_pbmp(e) &&
+           strncmp(e->uri, "stat/", 5) != 0;
+}
+
+/* Row count for one index-table column. device_io status arrays are sized by
+ * LibSystem max counts (same length plugin_moxa_io::get_status builds); other
+ * index tables keep REUSE_MAX_TABLE_ROWS. Returns 0 to skip registration. */
+static uint32_t
+index_table_rows(const char *uri)
+{
+    uint32_t n = 0;
+
+    /* plugin_moxa_snmp config_snmp_trap.rs: host.maxItems = 2 */
+    if (strcmp(uri, "snmpTrap/host/") == 0)
+    {
+        return 2;
+    }
+    if (strcmp(uri, "io/power/system/") == 0)
+    {
+        if (LibSystem_GetMaxNumOfSystemPower(&n) != 0 || n == 0 || n > 256)
+        {
+            return 0;
+        }
+        return n;
+    }
+    if (strcmp(uri, "io/power/poe/") == 0)
+    {
+        if (LibSystem_GetMaxNumOfExtPsePower(&n) != 0 || n > 256)
+        {
+            return 0;
+        }
+        return n;   /* 0 = no PoE power rails; skip */
+    }
+    if (strcmp(uri, "io/di/") == 0)
+    {
+        if (LibSystem_GetMaxNumOfDi(&n) != 0 || n == 0 || n > 256)
+        {
+            return 0;
+        }
+        return n;
+    }
+    if (strcmp(uri, "io/relay/") == 0)
+    {
+        if (LibSystem_GetMaxNumOfDo(&n) != 0 || n == 0 || n > 256)
+        {
+            return 0;
+        }
+        return n;
+    }
+    return REUSE_MAX_TABLE_ROWS;
+}
+
+/* turboring ring table (config AND status): named-key data ({ring1,ring2}), path
+ * "<mod_uri>/ring<N>/<column>" (N = ring number, 1-based). 2 rings, fixed. The
+ * setup fn sets mod_uri="turboringv2" for both, so the stored uri drops the
+ * "config/"/"stat/" prefix; is_status (from the "stat/" prefix, mapping below)
+ * then routes the status columns to the status layer. index column -> row number;
+ * value columns -> IES_COL_TR2RING_VALUE. config "interface" (REDUNDANT_PORT) is
+ * a composite of two config objects -> IES_COL_TR2RING_IFACE. */
+#define TR2_RING_NUM 2
+
+static int
+is_turboring_ring(const struct ies_auto_mibs_entry *e)
+{
+    if (strcmp(e->uri, "config/turboringv2/ring/") == 0)
+    {
+        return strcmp(e->uri_index, "index") == 0 ||
+               strcmp(e->uri_index, "enable") == 0 ||
+               strcmp(e->uri_index, "master") == 0 ||
+               strcmp(e->uri_index, "interface") == 0;
+    }
+    /* status ring columns: {ring1,ring2} named-key, DUT-verified addressable as
+     * /api/v1/status/turboringv2/ring<N>. designatedMaster is a MacAddress. */
+    if (strcmp(e->uri, "stat/turboringv2/ring/") == 0)
+    {
+        return strcmp(e->uri_index, "index") == 0 ||
+               strcmp(e->uri_index, "masterStatus") == 0 ||
+               strcmp(e->uri_index, "designatedMaster") == 0 ||
+               strcmp(e->uri_index, "firstPortStatus") == 0 ||
+               strcmp(e->uri_index, "secondPortStatus") == 0 ||
+               strcmp(e->uri_index, "brokenStatus") == 0;
+    }
+    return 0;
+}
+
+/* Physical port count = length of the portsPbmp config array. 0 disables table
+ * expansion (falls back to skipping, as before). */
+static uint32_t
+system_port_num(void)
+{
+    uint32_t n = 0;
+    if (LibSystem_GetMaxPortNumInSystem(&n) != 0 || n == 0 || n > 256)
+    {
+        return 0;
+    }
+    return n;
+}
+
+/* in-master's gMaxPortInDevice, for the IES_COL_TR2RING_IFACE encoding. */
+unsigned int
+ies_max_port_num(void)
+{
+    return (unsigned int) system_port_num();
+}
+
+/* Fill one row: instance OID = e->oid_list + `suffix` (.0 for a scalar, or the
+ * port number for a table column). Returns 0 on success. */
+static int
+emit_row(struct ies_map_entry *row, const struct ies_auto_mibs_entry *e,
+         moxa_oid suffix, const char *uri, const char *uri_index, int table_col)
+{
+    moxa_oid *o;
+    int j;
+
+    o = (moxa_oid *) malloc((e->oid_len + 1) * sizeof(moxa_oid));
+    if (o == NULL)
+    {
+        return -1;
+    }
+    for (j = 0; j < e->oid_len; j++)
+    {
+        o[j] = (moxa_oid) e->oid_list[j];
+    }
+    o[e->oid_len] = suffix;
+
+    row->oid       = o;
+    row->oid_len   = (size_t) (e->oid_len + 1);
+    row->uri       = uri;         /* static storage; lives for program */
+    row->uri_index = uri_index;   /* "" for scalar/pbmp; column name for index-table */
+    row->val_type  = e->val_type; /* SNMP_DATA_TYPE_* == ASN tag */
+    row->mode      = e->mode;
+    row->table_col = table_col;
+    /* Served from the status layer if the URI had a "stat/" prefix (turboring)
+     * or the setup marked it IES_FLAG_SNMP_URI_STATUS (device_io). */
+    row->is_status = (strncmp(e->uri, "stat/", 5) == 0 ||
+                      IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_STATUS, e->flags)) ? 1 : 0;
+    /* Port interface index: 0-based in the config layer, 1-based in SNMP. The
+     * flags bit array itself is not carried over — each flag whose semantics the
+     * framework implements is extracted into its own field, like is_status. */
+    row->is_iface = IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_INTERFACE, e->flags) ? 1 : 0;
+    return 0;
+}
+
+static void
+build_reuse_table(void)
+{
+    size_t   nsrc = sizeof(g_reuse_srcs) / sizeof(g_reuse_srcs[0]);
+    size_t   s, i, n, k;
+    uint32_t port_num = system_port_num();
+
+    if (s_table != NULL)
+    {
+        return;
+    }
+
+    /* Count: scalars (1 each) + portsPbmp columns (port_num each). */
+    n = 0;
+    for (s = 0; s < nsrc; s++)
+    {
+        for (i = 0; i < g_reuse_srcs[s].count; i++)
+        {
+            struct ies_auto_mibs_entry *e = &g_reuse_srcs[s].arr[i];
+
+            if (e->iss_build != 0)
+            {
+                continue;   /* iss_build==1 stays with ISS; serve iss0 only */
+            }
+            if (strcmp(e->uri_index, "0") == 0)
+            {
+                n++;
+            }
+            else if (port_num > 0 && is_ports_pbmp(e))
+            {
+                n += port_num;
+            }
+            else if (is_turboring_ring(e))
+            {
+                n += TR2_RING_NUM;
+            }
+            else if (is_index_table(e))
+            {
+                n += index_table_rows(e->uri);
+            }
+        }
+    }
+
+    s_table = (struct ies_map_entry *) calloc(n, sizeof(*s_table));
+    if (s_table == NULL)
+    {
+        return;
+    }
+
+    k = 0;
+    for (s = 0; s < nsrc; s++)
+    {
+        for (i = 0; i < g_reuse_srcs[s].count; i++)
+        {
+            struct ies_auto_mibs_entry *e = &g_reuse_srcs[s].arr[i];
+            const char *uri;
+            int         is_scalar;
+            int         is_pbmp;
+            int         is_idx_tbl;
+            int         is_tr2_ring;
+
+            if (e->iss_build != 0)
+            {
+                continue;   /* iss_build==1 stays with ISS; serve iss0 only */
+            }
+            is_scalar   = (strcmp(e->uri_index, "0") == 0);
+            is_pbmp     = (port_num > 0 && is_ports_pbmp(e));
+            is_tr2_ring = is_turboring_ring(e);
+            is_idx_tbl  = (!is_tr2_ring && is_index_table(e));
+
+            if (!is_scalar && !is_pbmp && !is_idx_tbl && !is_tr2_ring)
+            {
+                continue;   /* unsupported tables still skipped */
+            }
+
+            /* Populate mod_uri/flags in-place (our own array copy) so the URI we
+             * store below matches the config-layer path the in-master path uses.
+             * No-op for groups without a setup fn (URI == config path). */
+            if (g_reuse_srcs[s].setup != NULL)
+            {
+                g_reuse_srcs[s].setup(e);
+            }
+            uri = e->mod_uri[0] ? e->mod_uri : e->uri;
+
+            if (is_scalar)
+            {
+                if (emit_row(&s_table[k], e, 0, uri, "", IES_COL_SCALAR) == 0)
+                {
+                    k++;
+                }
+            }
+            else if (is_pbmp)
+            {
+                int      col = ports_pbmp_col(e);
+                uint32_t p;
+
+                for (p = 1; p <= port_num; p++)
+                {
+                    if (emit_row(&s_table[k], e, (moxa_oid) p, uri, "", col) == 0)
+                    {
+                        k++;
+                    }
+                }
+            }
+            else if (is_idx_tbl)
+            {
+                /* index column -> row number (existence-checked);
+                 * rowStatus -> IES_COL_ROWSTATUS (life-cycle, not a config leaf);
+                 * other value columns -> "<uri><row-1>/<column>". */
+                int      col;
+                uint32_t rows = index_table_rows(e->uri);
+                uint32_t r;
+
+                if (strcmp(e->uri_index, "index") == 0)
+                {
+                    col = IES_COL_IDXTBL_INDEX;
+                }
+                else if (strcmp(e->uri_index, "rowStatus") == 0)
+                {
+                    col = IES_COL_ROWSTATUS;
+                }
+                else
+                {
+                    col = IES_COL_IDXTBL_VALUE;
+                }
+                for (r = 1; r <= rows; r++)
+                {
+                    if (emit_row(&s_table[k], e, (moxa_oid) r, uri, e->uri_index, col) == 0)
+                    {
+                        k++;
+                    }
+                }
+            }
+            else /* is_tr2_ring */
+            {
+                /* index column -> ring number; enable/master -> config value
+                 * at "<uri>/ring<row>/<column>"; interface -> composite of
+                 * "<uri>/ring<row>/{firstPort,secondPort}". */
+                int      col;
+                uint32_t r;
+
+                if (strcmp(e->uri_index, "index") == 0)
+                {
+                    col = IES_COL_ROW_INDEX;
+                }
+                else if (strcmp(e->uri_index, "interface") == 0)
+                {
+                    col = IES_COL_TR2RING_IFACE;
+                }
+                else
+                {
+                    col = IES_COL_TR2RING_VALUE;
+                }
+
+                for (r = 1; r <= TR2_RING_NUM; r++)
+                {
+                    if (emit_row(&s_table[k], e, (moxa_oid) r, uri, e->uri_index, col) == 0)
+                    {
+                        k++;
+                    }
+                }
+            }
+        }
+    }
+    s_len = k;
+}
+
+const struct ies_map_entry *
+ies_map_reuse_table(size_t *len)
+{
+    build_reuse_table();
+    if (len != NULL)
+    {
+        *len = s_len;
+    }
+    return s_table;
+}

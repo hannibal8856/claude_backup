@@ -1,0 +1,21 @@
+################################################################################
+#
+# plugin_moxa_debug_trace_system
+#
+################################################################################
+
+PLUGIN_MOXA_DEBUG_TRACE_SYSTEM_SITE = "$(TOPDIR)/dl/plugin_moxa_debug_trace_system"
+PLUGIN_MOXA_DEBUG_TRACE_SYSTEM_DEPENDENCIES = app_moxa_cli
+
+TARGET_MAKE_ENV = PATH=$(BR_PATH):$(STAGING_DIR)/usr/bin
+
+define PLUGIN_MOXA_DEBUG_TRACE_SYSTEM_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) CC=$(TARGET_CC) TARGET=$(RUSTC_TARGET_NAME) RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)
+endef
+
+define PLUGIN_MOXA_DEBUG_TRACE_SYSTEM_INSTALL_TARGET_CMDS
+	$(MAKE) -C $(@D) install DESTDIR=$(TARGET_DIR)
+
+endef
+
+$(eval $(generic-package))

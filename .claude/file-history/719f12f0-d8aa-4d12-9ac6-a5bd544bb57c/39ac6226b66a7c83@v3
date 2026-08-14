@@ -1,0 +1,281 @@
+//! lib_moxa_rust_snmp_agentx — safe-ish Rust FFI over the C `lib_moxa_snmp_agentx`.
+//!
+//! Lets a Rust process (app_moxa_framework) act as an AgentX subagent. Links
+//! `libmoxasnmpagentx.so`. As a library crate this compiles to an rlib without
+//! resolving the C symbols (that happens when the final binary links), so it
+//! type-checks with a plain `cargo build` even off-target.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
+
+/// net-snmp `oid` is `unsigned long` on this target (32-bit ARM => 4 bytes);
+/// `c_ulong` matches it exactly on any target.
+pub type Oid = c_ulong;
+
+/// net-snmp `Netsnmp_Node_Handler`:
+/// `int (*)(mib_handler*, handler_registration*, agent_request_info*, request_info*)`.
+/// The four arguments are opaque here; the concrete handler (framework side)
+/// casts them to the net-snmp types.
+pub type MoxaHandler =
+    extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> c_int;
+
+// HANDLER_CAN_* modes (net-snmp agent_handler.h) for convenience.
+pub const HANDLER_CAN_RONLY: i32 = 0x01; // GETANDGETNEXT
+pub const HANDLER_CAN_SET: i32 = 0x02;
+pub const HANDLER_CAN_RWRITE: i32 = HANDLER_CAN_RONLY | HANDLER_CAN_SET;
+
+// SNMP handler return / error codes (net-snmp snmp.h).
+pub const SNMP_ERR_NOERROR: i32 = 0;
+pub const SNMP_ERR_GENERR: i32 = 5;
+pub const SNMP_ERR_WRONGTYPE: i32 = 7;
+pub const SNMP_ERR_COMMITFAILED: i32 = 14;
+pub const SNMP_ERR_NOTWRITABLE: i32 = 17;
+
+// net-snmp handler modes (reqinfo->mode, net-snmp/agent/snmp_agent.h).
+pub const MODE_GET: i32 = 160; // 0xA0 = SNMP_MSG_GET
+pub const MODE_GETNEXT: i32 = 161; // 0xA1 = SNMP_MSG_GETNEXT
+pub const MODE_SET_RESERVE1: i32 = 0;
+pub const MODE_SET_ACTION: i32 = 2;
+
+// ASN.1 type tags.
+pub const ASN_INTEGER: i32 = 0x02;
+pub const ASN_OCTET_STR: i32 = 0x04;
+pub const ASN_IPADDRESS: i32 = 0x40; // ASN_APPLICATION | 0 (net-snmp asn1.h)
+/// Exception value net-snmp puts in the varbind for "this OID has no value"
+/// (net-snmp snmp.h SNMP_NOSUCHINSTANCE) — what `set_no_such_instance` leaves.
+pub const SNMP_NOSUCHINSTANCE: i32 = 0x81;
+
+#[link(name = "moxasnmpagentx")]
+extern "C" {
+    fn MoxaAgentX_Init(name: *const c_char) -> c_int;
+    fn MoxaAgentX_RegisterScalar(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        mode: c_int,
+        h: MoxaHandler,
+    ) -> c_int;
+    fn MoxaAgentX_RegisterTestInt(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        value: c_long,
+    ) -> c_int;
+    fn MoxaAgentX_RegisterInstance(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        mode: c_int,
+        h: MoxaHandler,
+    ) -> c_int;
+    fn MoxaAgentX_RegisterHandler(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        mode: c_int,
+        h: MoxaHandler,
+    ) -> c_int;
+    fn MoxaAgentX_SetRequestOid(requests: *mut c_void, o: *const Oid, olen: usize) -> c_int;
+    fn MoxaAgentX_ClearValue(requests: *mut c_void) -> c_int;
+    fn MoxaAgentX_GetRequestOid(
+        requests: *mut c_void,
+        buf: *mut Oid,
+        buf_max: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn MoxaAgentX_SetOctetString(requests: *mut c_void, s: *const c_char, len: usize) -> c_int;
+    fn MoxaAgentX_SetInt(requests: *mut c_void, value: c_long) -> c_int;
+    fn MoxaAgentX_SetIpAddress(requests: *mut c_void, b4: *const u8) -> c_int;
+    fn MoxaAgentX_RegisterIterTable(
+        name: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        index_asn: c_int,
+        min_col: c_uint,
+        max_col: c_uint,
+        row_count: extern "C" fn() -> c_uint,
+        h: MoxaHandler,
+    ) -> c_int;
+    fn MoxaAgentX_GetSetInt(requests: *mut c_void, value: *mut c_long) -> c_int;
+    fn MoxaAgentX_SetError(requests: *mut c_void, snmp_err: c_int) -> c_int;
+    fn MoxaAgentX_SetNoSuchInstance(requests: *mut c_void) -> c_int;
+    fn MoxaAgentX_GetMode(reqinfo: *mut c_void) -> c_int;
+    fn MoxaAgentX_GetVarType(requests: *mut c_void) -> c_int;
+    fn MoxaAgentX_GetSetString(
+        requests: *mut c_void,
+        buf: *mut c_char,
+        buf_max: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn MoxaAgentX_RunInThread() -> c_int;
+    fn MoxaAgentX_Shutdown();
+}
+
+/// Initialize the process as an AgentX subagent (connects to snmpd master:705).
+/// Call once before any `register_scalar`. Returns 0 on success.
+pub fn init(daemon_name: &str) -> i32 {
+    let c = CString::new(daemon_name).expect("daemon_name has NUL");
+    unsafe { MoxaAgentX_Init(c.as_ptr()) }
+}
+
+/// Register one scalar OID (RO/RW via `mode`) with a Rust handler.
+pub fn register_scalar(descr: &str, oid: &[Oid], mode: i32, handler: MoxaHandler) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterScalar(c.as_ptr(), oid.as_ptr(), oid.len(), mode, handler) }
+}
+
+/// Register a read-only integer scalar backed by an internal value (B0 test).
+/// `oid` is the full instance OID (e.g. ...99.1.0).
+pub fn register_test_int(descr: &str, oid: &[Oid], value: i64) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterTestInt(c.as_ptr(), oid.as_ptr(), oid.len(), value as c_long) }
+}
+
+/// Register one exact-instance OID (full OID incl. trailing .0) with a Rust
+/// handler (mirrors the dlmod's netsnmp_register_instance).
+pub fn register_instance(descr: &str, oid: &[Oid], mode: i32, handler: MoxaHandler) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterInstance(c.as_ptr(), oid.as_ptr(), oid.len(), mode, handler) }
+}
+
+/// Register a subtree OID via netsnmp_register_handler at priority 200 (Plan E
+/// dual-reg with in-master). Matching namelen lets in-master priority 127 win
+/// the wire; framework is the children sibling for GET forward.
+pub fn register_handler(descr: &str, oid: &[Oid], mode: i32, handler: MoxaHandler) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterHandler(c.as_ptr(), oid.as_ptr(), oid.len(), mode, handler) }
+}
+
+/// Plan E (ADR-0003, refresh-gap fix): register a LIVE read-only table via
+/// net-snmp `table_iterator` at `oid` (the table OID; entry = oid.1). `row_count`
+/// is polled for the current row count and `handler` fills each column from live
+/// config on every request, so GET reflects config changes with no reboot (fixes
+/// the table_data_set startup-snapshot staleness). Index is one INTEGER row
+/// number 1..count; columns `min_col..max_col`. Priority 200 (SET stays
+/// in-master). Returns 0 on success.
+pub fn register_iter_table(
+    name: &str,
+    oid: &[Oid],
+    index_asn: i32,
+    min_col: u32,
+    max_col: u32,
+    row_count: extern "C" fn() -> c_uint,
+    handler: MoxaHandler,
+) -> i32 {
+    let c = CString::new(name).expect("name has NUL");
+    unsafe {
+        MoxaAgentX_RegisterIterTable(
+            c.as_ptr(),
+            oid.as_ptr(),
+            oid.len(),
+            index_asn,
+            min_col as c_uint,
+            max_col as c_uint,
+            row_count,
+            handler,
+        )
+    }
+}
+
+/// Extract the requested OID from a handler's `requests` pointer. `None` on error.
+pub fn get_request_oid(requests: *mut c_void) -> Option<Vec<Oid>> {
+    let mut buf = [0 as Oid; 128];
+    let mut out_len: usize = 0;
+    let r = unsafe {
+        MoxaAgentX_GetRequestOid(requests, buf.as_mut_ptr(), buf.len(), &mut out_len)
+    };
+    if r != 0 {
+        return None;
+    }
+    Some(buf[..out_len].to_vec())
+}
+
+/// Rewrite the varbind's OID. A GETNEXT handler answers with a DIFFERENT OID
+/// than the one asked for, so it must set that OID here before setting the value.
+pub fn set_request_oid(requests: *mut c_void, oid: &[Oid]) -> i32 {
+    unsafe { MoxaAgentX_SetRequestOid(requests, oid.as_ptr(), oid.len()) }
+}
+
+/// Reset the varbind to "no value" (ASN_NULL) — a GETNEXT handler that ran past
+/// the end of its subtree uses this to hand the request back untouched.
+pub fn clear_value(requests: *mut c_void) -> i32 {
+    unsafe { MoxaAgentX_ClearValue(requests) }
+}
+
+/// Set the request's value to an OCTET STRING (== the dlmod's json_string path).
+pub fn set_octet_string(requests: *mut c_void, s: &str) -> i32 {
+    unsafe { MoxaAgentX_SetOctetString(requests, s.as_ptr() as *const c_char, s.len()) }
+}
+
+/// Set the request's value to a raw-byte OCTET STRING (e.g. a 6-byte MacAddress /
+/// PhysAddress). Same C entry point as `set_octet_string`, but the bytes need not
+/// be valid UTF-8.
+pub fn set_octet_bytes(requests: *mut c_void, b: &[u8]) -> i32 {
+    unsafe { MoxaAgentX_SetOctetString(requests, b.as_ptr() as *const c_char, b.len()) }
+}
+
+/// Set the request's value to an INTEGER.
+pub fn set_int(requests: *mut c_void, value: i64) -> i32 {
+    unsafe { MoxaAgentX_SetInt(requests, value as c_long) }
+}
+
+/// Set the request's value to an IpAddress (4 network-order bytes).
+pub fn set_ipaddress(requests: *mut c_void, b4: &[u8; 4]) -> i32 {
+    unsafe { MoxaAgentX_SetIpAddress(requests, b4.as_ptr()) }
+}
+
+/// The incoming INTEGER SET value. `None` on error.
+pub fn get_set_int(requests: *mut c_void) -> Option<i64> {
+    let mut v: c_long = 0;
+    let r = unsafe { MoxaAgentX_GetSetInt(requests, &mut v) };
+    if r != 0 {
+        None
+    } else {
+        Some(v as i64)
+    }
+}
+
+/// Mark the request with an SNMP error (e.g. `SNMP_ERR_GENERR`).
+pub fn set_error(requests: *mut c_void, snmp_err: i32) -> i32 {
+    unsafe { MoxaAgentX_SetError(requests, snmp_err) }
+}
+
+/// Mark the request's value as noSuchInstance (a walk skips it and continues).
+pub fn set_no_such_instance(requests: *mut c_void) -> i32 {
+    unsafe { MoxaAgentX_SetNoSuchInstance(requests) }
+}
+
+/// net-snmp handler mode (`MODE_GET`, `MODE_SET_RESERVE1`, `MODE_SET_ACTION`, …).
+pub fn get_mode(reqinfo: *mut c_void) -> i32 {
+    unsafe { MoxaAgentX_GetMode(reqinfo) }
+}
+
+/// ASN type of the incoming SET value (for `MODE_SET_RESERVE1` type checking).
+pub fn get_var_type(requests: *mut c_void) -> i32 {
+    unsafe { MoxaAgentX_GetVarType(requests) }
+}
+
+/// The incoming OCTET-STRING SET value as a `String`. `None` on error.
+pub fn get_set_string(requests: *mut c_void) -> Option<String> {
+    // c_char is i8 on x86 but u8 on ARM — use c_char so the ptr type matches.
+    let mut buf = [0 as c_char; 512];
+    let mut out_len: usize = 0;
+    let r = unsafe {
+        MoxaAgentX_GetSetString(requests, buf.as_mut_ptr(), buf.len(), &mut out_len)
+    };
+    if r != 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = buf[..out_len].iter().map(|&b| b as u8).collect();
+    String::from_utf8(bytes).ok()
+}
+
+/// Spawn the dedicated AgentX loop thread (does not use tokio). Returns 0 on success.
+pub fn run_in_thread() -> i32 {
+    unsafe { MoxaAgentX_RunInThread() }
+}
+
+/// Stop the loop and shut net-snmp down.
+pub fn shutdown() {
+    unsafe { MoxaAgentX_Shutdown() }
+}

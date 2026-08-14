@@ -1,0 +1,275 @@
+# Plan D — Sub-project B: Framework AgentX Subagent (+ dlmod convergence)
+
+> Design spec. Date: 2026-07-09. Platform: MDS-G4000-L3-4XGS.
+> Part of Plan D (multi-subagent program). This is the FIRST sub-project (B).
+> References: `~/plan-d-framework-agentx-subagent-notes.md`, `~/agentx_multi.md`,
+> `~/WORK/SNMP_50ms/SNMP_Plan_D_Design_2026-06-02.docx`.
+> Predecessor: Plan C (AgentX + `agentx_owned.list`, deployed).
+
+## 0. Decisions locked (from brainstorm 2026-07-08/09)
+
+- **Order within Plan D:** B (this) → C (`lib_moxa_snmp_ies_auto_mibs` shared lib) → A (fiber_check strict subagent + status-layer optimization, independent).
+- **Design 2 — GET-only via subagent, SET untouched (locked 2026-07-13).** net-snmp routes an OID's GET **and** SET to a single owner, so you cannot natively split them across registrants. Instead the existing handler (`mox_snmp_handle_entry` / dlmod) **keeps owning each OID and does SET exactly as today**; its **GET branch forwards the read to the framework subagent** (the Plan C ifAdminStatus trick, generalized). B is therefore a **pure GET-acceleration** project.
+- **GET is identity-less.** VACM at the master already authorized the read before dispatch, and a per-OID value is uniform across users (SRS: no per-user read filtering), so the subagent's GET needs no requester identity. `security_token` and the entire per-user/permission/token machinery stay on the **untouched SET path** — not touched by B.
+- **Deferred to a later phase:** dlmod `.conf` removal / `agentx_owned.list` convergence, and moving SET into the subagent. (The old "remove-.conf + agentx_owned.list, subagent owns GET+SET" plan is superseded by Design 2.)
+- **Rust AgentX embedding:** build `lib_moxa_snmp_agentx` (C, FRR-style wrapper) + `lib_moxa_rust_snmp_agentx` (pure Rust FFI over it). NOT a Rust AgentX crate.
+- **Mapping access (same C-lib + Rust-FFI pattern):** the mapping lib is C `lib_moxa_ies_auto_mibs` (= docx's `lib_moxa_snmp_ies_auto_mibs`); the Rust framework reaches it via FFI binding `lib_moxa_rust_ies_auto_mibs`. **B builds a minimal seed of `lib_moxa_ies_auto_mibs`** (Layer-1 OID↔URI data for the converged set); **C completes it** (full data + Layer-2 SET dispatch + Layer-3 URI actions). So B and C share one artifact — B seeds, C completes — instead of a throwaway B-local table.
+
+## 1. Goal & scope
+
+Today SNMP has **three dispatch paths that all funnel to the same framework
+config/status layer over an HTTP loopback** (`LibFrameworkUri`):
+
+```
+SNMP GET ─┬─ ies-auto-mibs (methods 1–3)      ─┐
+          ├─ ~20 dlmod plugins (method 4)      ─┼─► LibFrameworkUri (HTTP) ─► app_moxa_framework (config/status)
+          └─ (future) framework subagent       ─┘
+```
+
+**B makes `app_moxa_framework` an AgentX subagent that answers config READS
+in-process**, and has the existing snmpd-side handlers **forward GET to it** (Design 2,
+§0). This removes the `snmpd → framework` HTTP hop **for reads** — the frequent,
+latency-sensitive operation. **SET is untouched** (stays on `mox_snmp_handle_entry` /
+dlmod → `LibFrameworkUri` → framework REST, with `security_token`/per-user handling
+intact). ISS stays a separate AgentX subagent, unchanged.
+
+**B delivers:**
+1. `app_moxa_framework` can act as an AgentX subagent (connect master:705, register, serve reads).
+2. Config-class OID **GET** answered **in-process, identity-less** (§3), no HTTP.
+3. GET-forward wired into the existing handlers so reads reach the subagent while SET stays local.
+4. First batch of config OIDs GET-accelerated; SET behaviour byte-identical to today.
+
+**Explicitly deferred (not B):** dlmod removal / path convergence, and moving SET
+in-process. B is pure GET acceleration.
+
+**Success metric:** for a target plugin, `snmpget`/`snmpwalk` returns values that are
+**byte-identical to today** but with GET latency dropped (HTTP hop gone), while `snmpset`
+still works exactly as before; measured on the first slice (§6, B1).
+
+## 2. Components
+
+| # | Component | Lang | Role |
+|---|---|---|---|
+| 1 | `lib_moxa_snmp_agentx` | C | FRR-style thin wrapper on net-snmp (`libnetsnmpagent`/`mibs`/`libnetsnmp`). Exposes `Init/RegisterScalar/RegisterTable/RunInThread/Shutdown`. **No trap API** — traps are out-of-band (§8). ~300–400 lines, clean-room (not copied from FRR GPLv2). |
+| 2 | `lib_moxa_rust_snmp_agentx` | Rust | Pure FFI over (1). Safe Rust API to register OIDs with Rust handlers. No async runtime of its own. |
+| 3 | `lib_moxa_ies_auto_mibs` | C | Mapping lib: OID↔URI(↔owner/val_type/flags) data + `lookup_by_oid`/`iterate` API. **B builds a MINIMAL seed** (Layer-1 data for the converged set, extracted from `3rdparty_net_snmp/ies-auto-mibs/net_*.h` + each plugin's OID defs). **C completes it** (full data + Layer-2 SET dispatch + Layer-3 URI actions). = docx's `lib_moxa_snmp_ies_auto_mibs`. |
+| 4 | `lib_moxa_rust_ies_auto_mibs` | Rust | Pure FFI over (3). The Rust framework's binding to look up OID→URI (and later Layer-2/3 helpers). |
+| 5 | framework subagent module | Rust | Inside `app_moxa_framework`. On startup spawns the net-snmp thread via (2); each Rust handler uses (4) to map OID→URI, then calls the in-process config-layer functions (§3). |
+| 6 | snmpd-side config | build/script | Per converged group: drop the dlmod `.conf`; add the ies-auto-mibs prefix to `agentx_owned.list`. |
+
+### 2.1 `lib_moxa_snmp_agentx` API sketch (C)
+
+```c
+int  MoxaAgentX_Init(const char *daemon_name);   /* AGENT_ROLE=1, AGENT_X_SOCKET=tcp:127.0.0.1:705, init_agent, init_snmp */
+int  MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                               int mode, Netsnmp_Node_Handler *handler);
+int  MoxaAgentX_RegisterTable (const char *descr, const oid *o, size_t olen,
+                               int mode, Netsnmp_Node_Handler *handler,
+                               netsnmp_table_registration_info *tinfo);
+int  MoxaAgentX_RunInThread(void);               /* spawn pthread: select(snmp_select_info)+snmp_read loop */
+void MoxaAgentX_Shutdown(void);
+/* No SendTrap: traps go app-events → MQTT → trap_notification → /bin/snmptrap, out-of-band (§8). */
+```
+
+Internal mapping to net-snmp (FRR `lib/agentx.c` pattern): init = `netsnmp_ds_set_boolean(NETSNMP_DS_AGENT_ROLE,1)` + `netsnmp_ds_set_string(AGENT_X_SOCKET)` + `init_agent()` + `init_snmp()`; register = `netsnmp_register_handler`; loop = `snmp_select_info`/`snmp_read`/`snmp_timeout`.
+
+## 3. Data flow
+
+**GET (read) — forwarded to the subagent, identity-less:**
+```
+SNMP GET → snmpd master (VACM authorizes) → existing handler owns the OID
+         → its GET branch FORWARDS to the framework subagent (netsnmp_call_handlers,
+           Plan C trick) → framework net-snmp thread → Rust handler:
+             (i)  map OID → URI via lib_moxa_rust_ies_auto_mibs
+             (ii) read the value with a FIXED system read identity, reusing the SAME
+                  read+redact logic the actix path uses:
+                  config_operation::get_config_from_path(plugins, SYS_READ_USERINFO,
+                      path, full_config, query, false)
+                  + remove_password_from_config(...)   (lib.rs:262/268 today)
+         → value → back. **No HTTP.**
+```
+The read is **identity-less**: VACM already authorized it at the master, and per-OID
+values are uniform across users (SRS: no per-user read filtering). `SYS_READ_USERINFO`
+is a single fixed read-capable identity used only so `get_config_from_path` has its
+required arg; it does NOT vary per requester. Output is byte-identical to today's path.
+
+**SET (write) — UNCHANGED:**
+```
+SNMP SET → snmpd master → existing handler (mox_snmp_handle_entry / dlmod)
+         → LibFrameworkUri (security_token, per-user via securityName) → framework REST
+         → config_operation::update_config → persist + notify.
+```
+B does **not** touch this path. `security_token`, per-v3-user token selection, and the
+whole permission machinery stay exactly as today. The subagent never receives SET.
+
+**Confirmed feasible (verified 2026-07-09):** `rust_moxa_config_layer/src/config_operation.rs`
+exposes the read logic as a plain function — `get_config_from_path` (+ `remove_password_from_config`)
+— that takes `path`/`plugins`/`userinfo` (NOT actix `HttpRequest`/`HttpResponse`; only
+`use actix_web::http` for status constants). The actix handler at `lib.rs:262/268` is a thin
+shell calling them. So the subagent calls them directly with `SYS_READ_USERINFO`, reusing
+the tested read path.
+
+### 3.1 Design points to pin before coding
+
+1. **Read identity — a single fixed `SYS_READ_USERINFO` (no per-requester identity).**
+   Under Design 2 the subagent handles **only GET**, so the hard SET/permission question is
+   moot — SET stays on the untouched master-side path where `securityName` is available and
+   the per-v3-user `security_token` machinery works exactly as today (per-user permission
+   *preserved*, not lost). The subagent's GET is **identity-less**: VACM at the master already
+   authorized the read, and per-OID values are uniform across users. `get_config_from_path`
+   requires a `userinfo` arg, so B0 constructs **one fixed read-capable `SYS_READ_USERINFO`**
+   (no HTTP session) used for every GET. It must reproduce today's read output byte-for-byte,
+   including the unconditional `remove_password_from_config` redaction (`lib.rs:262/268`).
+
+   SRS backing that identity-less reads are correct
+   (`~/WORK/SNMP_50ms/FR-1-8L_SNMP_Software_Requirement_Specification.pdf`): a SNMPv3 user's
+   only permission dimension is binary `authority = read-only | read-write`; **no** fine-grained
+   per-subtree permission, **no** role mapping, **no** per-user read filtering, **no**
+   audit/attribution requirement (full-text search). Read access is a VACM view decision at
+   the master; the value of an allowed OID is the same for everyone.
+2. **AppState access** — see §4 (`plugins` + `full_config`/`config_layer_state` must be
+   reachable from the subagent thread; **read-only** in Design 2, which simplifies it).
+
+## 4. Concurrency model (highest-risk area)
+
+- The net-snmp subagent runs in a **dedicated OS thread** (`MoxaAgentX_RunInThread`), NOT on the tokio runtime.
+- **Read-only in Design 2:** the subagent's Rust handlers are **GET-only** — no SET, no write into shared state. They **must not `.await`**.
+- **Config read is SYNCHRONOUS** — `config_operation::get_config_from_path` is `pub fn` (not `async fn`), so the net-snmp thread calls it **directly, no async bridge**. Read-only + sync removes essentially all the concurrency risk: the thread just needs a **read handle** to the shared `config_layer_state`/`plugins` (e.g. an `Arc<…>` clone / arc-swap read); no locking-for-write, no write-back.
+- **B0 spike (single, reduced):** confirm how the subagent thread obtains the shared read handle to `config_layer_state`/`plugins`. (Sync is already answered; the identity question collapsed to a fixed `SYS_READ_USERINFO`, §3.1.)
+
+## 5. Ownership & migration
+
+### 5.1 GET-forward mechanism (Design 2)
+
+- The **master-side handler keeps owning each config OID** — `mox_snmp_handle_entry`
+  (ies-auto-mibs OIDs) or the dlmod plugin's GET handler (dlmod OIDs). It stays registered
+  deep (column-level), **wins the master's dispatch, and serves SET exactly as today**.
+- The **framework subagent registers a *shallower* config region** covering those OIDs.
+  Being shallower it **loses dispatch (so it never receives SET)** but is reachable for
+  forwarding. (net-snmp rejects a *duplicate* same-OID+priority registration, so the
+  subagent must NOT re-register the exact column OIDs — a shallow region / a dedicated
+  probe OID instead.)
+- Each master-side handler's **GET branch forwards the read to the framework subagent** —
+  exactly the **Plan C ifAdminStatus mechanism** (`netsnmp_subtree_find` a subagent-owned
+  probe → `netsnmp_call_handlers` on the subagent's reg/session), generalized to config
+  OIDs. The **SET branch is untouched** (LibFrameworkUri + `security_token`).
+
+Result: GET travels snmpd → (master-side handler intercept) → AgentX → subagent in-process
+read; SET stays entirely on the current path. Read/write split for the same OID is proven
+feasible — Plan C already ships it for ifAdminStatus/ifXTable.
+
+### 5.2 Why not "subagent owns the OID + remove-.conf" (Design 1, superseded)
+
+Making the subagent own the OID (remove dlmod `.conf` / skip via `agentx_owned.list`)
+forces **SET** into the subagent — which loses `securityName` and the per-user token path.
+Design 2 keeps SET in the master **precisely to leave that untouched**. dlmod removal /
+convergence is a later phase, not B.
+
+### 5.3 B0 wiring spike
+
+Confirm the forward wiring reused from Plan C: where the subagent registers (shallow region
+vs dedicated probe OID), how the master-side handler locates the subagent's session, and
+that GETNEXT boundaries behave (Plan C `entry_handle_exception` precedent). **Rollback =
+disable the forward** → handlers fall back to their current `LibFrameworkUri` GET (nothing
+else changed). Also decide, per config OID, whether the forward lives in `mox_snmp_handle_entry`
+(ies-auto-mibs OIDs) or the dlmod GET handler (`lib_moxa_snmp_plugin`) — both need it.
+
+## 6. Phasing (inside B)
+
+- **B0 — infra spike.** Build minimal versions of all four libs: `lib_moxa_snmp_agentx` (C: init / register scalar / run-in-thread) + `lib_moxa_rust_snmp_agentx` (FFI); `lib_moxa_ies_auto_mibs` (C: seed OID↔URI for the B1 target) + `lib_moxa_rust_ies_auto_mibs` (FFI). `app_moxa_framework` registers **one trivial OID (read-only)** and answers it via AgentX; a master-side handler **forwards a GET to it** (prove the forward end-to-end on one OID). Resolve the single §4 spike: how the subagent thread reaches the shared read handle (`config_layer_state`/`plugins`). Identity is fixed `SYS_READ_USERINFO` (§3.1); config read is sync. Deliverable: framework proven as a read subagent, reachable via GET-forward.
+- **B1 — first end-to-end slice (go/no-go).** Pick the simplest **config** OID group (candidate: `plugin_moxa_system_information` config part). Wire the **GET-forward** in its owning master-side handler (`mox_snmp_handle_entry` or the dlmod GET handler), keeping **SET on the current path unchanged**. Verify GET values are **byte-identical to today**, GET latency dropped (HTTP hop gone), and `snmpset` still works exactly as before. Decision point to continue.
+- **B2 — extend the GET-forward** to more config OID groups. **Still no SET change, no dlmod `.conf` removal** (those are a later Plan-D phase). **Exclude OID groups earmarked for A's strict subagent (notably `fiber_check`).**
+
+## 7. Testing / verification
+
+- Per slice: `snmpget`/`snmpwalk` correct; `journalctl -u app_moxa_snmp_server | grep agentx` shows `agentx master handler starting`, **not** `dlmod_handler called` (docx §7.5); latency compared to pre-B (HTTP-hop removal should be visible).
+- SET: config layer reflects the change; `show running` consistent.
+- Subagent down: the converged prefix returns `noSuchObject` (accepted; rollback path exists).
+- Coexistence: ISS subagent (ifTable etc.) and un-converged dlmod/ies-auto-mibs continue to work unchanged.
+
+## 8. Non-goals (explicitly out of B)
+
+- **SET / write path — untouched, not converged (Design 2).** SET stays on `mox_snmp_handle_entry` / dlmod → LibFrameworkUri, with `security_token` and per-v3-user handling intact. Moving SET in-process is a later Plan-D phase.
+- **dlmod `.conf` removal / path convergence — deferred.** In B the existing handlers stay registered (they own the OID + forward GET + serve SET). Removing dlmod / retiring ies-auto-mibs is a later phase (with its end-of-Plan-D cleanup of `utilStoken_*`, the `snmp_script_rust` generators, `/moxa/run/auto_mibs`).
+- Speeding up the status layer internals → **A**.
+- Splitting any daemon into a strict subagent → later phase.
+- Any ISS change.
+- **Traps: entirely out of scope, no wrapper API.** Trap/notification stays on the existing independent path — Moxa app-layer events → MQTT → `trap_notification` → `/bin/snmptrap` (verified: `trap_notification` component + `/bin/snmptrap` sender). The AgentX subagent is **GET/SET only**; it never originates traps.
+
+## 9. Risks
+
+| Risk | Mitigation |
+|---|---|
+| C net-snmp thread ↔ tokio AppState safety | **De-risked:** config GET/SET are sync `pub fn` (`config_operation`), so no async bridge for config; only need a shared-state handle (§4). Status broad-fallback may need a blocking bridge (acceptable; A's scope). |
+| SNMP identity has no config-layer `userinfo` | synthesize a userinfo for the SNMP identity + map community/VACM r/o vs r/w to the permission model (§3.1); define in B0 |
+| net-snmp embedded in a non-snmpd process (global state, init order) | that is exactly what `lib_moxa_snmp_agentx` (FRR-style) encapsulates; FRR proves the pattern (10+ yr) |
+| Subagent startup vs snmpd ordering | systemd `After=app_moxa_snmp_server.service`; un-converged OIDs still served by ies-auto-mibs/dlmod during migration |
+| B-local mapping diverges from C later | keep B's mapping generated from the same `net_*.h`/plugin defs C will use; C extraction is a refactor, not a rewrite |
+| A converged group's data isn't actually reachable in-process | verified: all ~20 dlmod plugins + ies-auto-mibs read via `LibFrameworkUri` (same backend app_moxa_framework already hosts) |
+
+## 10. Key references (grounded in tree)
+
+- Framework process: `app_moxa_framework/` (actix-web), `app_moxa_framework/src/uri_service.rs` (LibFrameworkUri REST backend).
+- Config layer (in-process entry points the subagent calls): `rust_moxa_config_layer/src/config_operation.rs` — `get_config_from_path` (read), `update_config`/`delete_config`/`create_config` (write), `valid_and_get_userinfo`/`check_permission_by_action` (auth); all plain sync `pub fn`, no actix request/response types. Actix thin-shell call sites: `rust_moxa_config_layer/src/lib.rs:262` (GET), `:546` (SET). State: `config_layer_state.rs`, `config_reloader.rs`.
+- Mapping-lib FFI pattern mirrors the two agentx libs: C `lib_moxa_ies_auto_mibs` ← FFI `lib_moxa_rust_ies_auto_mibs` (framework), same as C `lib_moxa_snmp_agentx` ← FFI `lib_moxa_rust_snmp_agentx`.
+- dlmod plugins: `plugin_moxa_*/snmp*/document/*.conf` (dlmod loads) + shared `lib_moxa_snmp_plugin/src/handler/{scalar,table}.c`; all read via `LibFrameworkUri_GetUri`.
+- Plan C GET-forward mechanism to generalize: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` (`mox_snmp_forward_get_to_iss` + `netsnmp_call_handlers`, entry_handle_exception at ~1867).
+- net-snmp dispatch rule: `agent/agent_registry.c::netsnmp_subtree_load`; AgentX register: `agent/mibgroup/agentx/master_admin.c:223/232`.
+- FRR pattern (design reference only, clean-room): `~/SRC/frr/lib/agentx.c`.
+- ISS subagent (unchanged, coexists): `app_moxa_iss_10_1_0/code/future/snmpv3/snx*.c`.
+- Build order: `plugin_moxa_snmp` → rust → final `make`.
+
+## 11. Latency evaluation — transport layer (estimates; verified 2026-07-09)
+
+> **These are ESTIMATES for the embedded ARM platform, not on-hardware measurements.
+> The real numbers come from B1 (§6): same config OID, current path vs AgentX, 100×, P50/P99.**
+
+### 11.1 Transport verified
+
+`LibFrameworkUri` (snmpd side, C) opens a raw `socket()`+`connect()` to `127.0.0.1`
+(HTTP over TCP loopback); nginx fronts actix with `proxy_pass http://127.0.0.1:9759`
+(`rust_moxa_config_layer/document/nginx_configLayer.conf`, and the other layer .conf).
+So the current backend round-trip is **snmpd → nginx → actix(9759) → config_operation**.
+(Open item: the exact front port `LibFrameworkUri` dials was not pinned; if some calls
+hit 9759 directly, subtract the nginx component.) **All three current paths that reach the
+framework — ies-auto-mibs URI entries, the ~20 dlmod plugins, and (worse) ies-auto-mibs
+ISS-scalar entries which `fork+exec` the uri-control-client — funnel through this same
+HTTP round-trip.** AgentX-in-process removes it.
+
+### 11.2 Per-GET overhead (excludes the shared `config_operation` lookup)
+
+| Cost item | Current (URI or dlmod) | AgentX subagent | Saved |
+|---|---|---|---|
+| HTTP build + JSON serialize/parse (both ends) | yes | none (binary PDU) | ~hundreds of µs |
+| **nginx** accept+parse+route+proxy_pass+copy-back | yes | **none** | **~0.2–1 ms+** |
+| actix HTTP parse + tokio schedule + routing + **auth/nonce middleware** + extractors | yes | **none** (direct fn call) | **~0.5–3 ms** |
+| TCP connect handshake(s) (if not keepalive) | ×2 segments | 1 segment | ~tens of µs |
+| **context switches** | snmpd↔nginx↔actix ≈ **4** round-trip | snmpd↔framework ≈ **2** | **~10–60 µs** |
+| AgentX encode/decode | — | ~10–50 µs | — |
+| **Transport overhead total** | **~2–10 ms** | **~50–200 µs** | **~2–10 ms (≈10–50×)** |
+
+### 11.3 Answers to the two questions asked
+
+- **AgentX vs URI (snmpd→nginx→actix):** save **~2–10 ms** per config GET. **Context
+  switches are the SMALL part (~10–60 µs)** — the dominant saving is the *eliminated
+  processing*: nginx proxy + HTTP/JSON + actix routing/middleware.
+- **AgentX vs dlmod:** essentially the **same ~2–10 ms**, because the dlmod handler
+  (in-snmpd, cheap dispatch) still makes the same `LibFrameworkUri → nginx → actix`
+  HTTP-out. dlmod's only edge over AgentX is avoiding one snmpd→framework IPC
+  (~50–200 µs), which it throws away on the HTTP round-trip. dlmod is therefore **not
+  meaningfully faster than the URI path** — both bottleneck on the same backend. (Exception
+  would be a dlmod plugin holding data locally in snmpd with no `LibFrameworkUri` call;
+  verified none of the ~20 do.)
+
+### 11.4 Nuance — where this win matters
+
+The transport saving (~ms) is *dominant* for OIDs whose backend is already fast (config
+in-memory read → the docx's "5–15 ms → <1 ms"). For OIDs bottlenecked on the **backend**
+(status materialization ~600 ms, ISS ASIC reads), transport is a small fraction — those
+need A (status-layer optimization) / ISS-side work, not B. **B targets config, which is
+exactly the transport-dominated class, so B's transport win is maximal there.** Empirical
+anchors consistent with the ~multi-ms transport estimate: measured fiber_check GET ~12.5 ms;
+docx §5 config GET 5–15 ms.
+### 11.5 Design-2 note
+
+Under Design 2 the GET path is `snmpd master-side handler (intercept, ~µs) → AgentX forward → subagent in-process read`. The extra in-snmpd intercept is µs-scale and the AgentX hop is already in the ~50–200 µs estimate, so the transport figures above hold. SET keeps the full ~2–10 ms HTTP path — acceptable: SET is rare and not latency-sensitive (B optimizes reads only).

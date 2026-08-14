@@ -1,0 +1,2 @@
+- [Autonomous execution preference](feedback_autonomous_execution.md) — proceed on already-offered next steps without re-confirming
+- [Minimal intrusion for cross-cutting features](feedback_minimal_intrusion.md) — when rolling features (SNMP/etc.) across Moxa daemons, prefer designs with zero changes to existing code

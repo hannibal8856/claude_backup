@@ -1,0 +1,9 @@
+{
+  "id": "2",
+  "subject": "把 fiber_check_event(.602.7.1.2.1.6.x)搬到 framework AgentX 路徑",
+  "description": "**完成(2026-08-12)。已建置、燒錄 `2026_0812_1136`、四項驗收全過。ADR-0029。**\n\n| repo | commit | 內容 |\n|---|---|---|\n| `3rdparty_net_snmp` | `d4e35b8` | `net_mx_event_port.h` 加 group `.6` 的 8 筆 entry(80 → 88) |\n| `plugin_moxa_fiber_check` | `f9164c3` | `fiber_check_event.conf` 的 dlmod 行註解掉 |\n| `moxabuild` | `3f94a11` | ADR-0029 |\n\n兩個 code repo 都在 `snmp-plan-E`,**未 push**。\n\n## 驗收結果\n\n- **完整性**:欄位 73 → **74**;新出現只有 `.6.3.1.1`×12,消失 0 個;\n  「walk 有但 map 沒有」7 → 0。map 宣告 88,未回應 14(`.10`/`.11`,既有缺口)\n- **服務者**:`fwdcheck.sh PEER=app_moxa_framew` → net TARGET / net POSITIVE = **91%**,\n  SERVED BY framework;兩次獨立重現\n- **SET**:`.6.3.1.2.3` 真寫真讀 + 還原;index 欄正確 `notWritable`\n- **dlmod**:啟用 33 → **32**\n- **效能**:walk 1.270s / 294 vb / 9 輪 —— **新基準,非 before/after**\n  (搬遷前未用同協定量過,真正單一變數對照需兩次燒錄)\n\n## 本輪修掉的兩個 harness 缺陷\n\n1. 跨 package header 不觸發 `lib_moxa_ies_auto_mibs` 重編,且錯的 `.so` 會通過檢查\n   → memory `project_cross_package_header_no_rebuild`\n2. `fwdcheck.sh` 的 `TARGET/NEGATIVE` 判準不會隨 N 改善 → 改為扣背景後比 TARGET/POSITIVE\n\n## 遺留(不屬於本任務)\n\n- evtPort 的 `.10`/`.11`(`ringProtectEvent`)共 **14 欄宣告但無人服務**,既有缺口\n- `plugin_moxa_system_information` 的 `status_system_information.conf` dlmod 仍載入;\n  且 `snmpd_system_information.conf` 停用後那六個 OID **不在 framework map 裡**,\n  `.conf` 註解宣稱 framework 擁有是**錯的**,去向未確認",
+  "activeForm": "Assessing fiber_check_event dlmod migration",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

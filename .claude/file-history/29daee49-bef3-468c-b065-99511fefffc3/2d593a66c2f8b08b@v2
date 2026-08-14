@@ -1,0 +1,34 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_mxFiberCheck_c
+#define _IES_AUTO_MIBS_FLAGS_net_mxFiberCheck_c
+
+/*
+ * mxFiberCheck has one table in each layer. The config table is reached the
+ * usual way (/api/v1/setting/data/<uri>), but the status table lives under
+ * /api/v1/status/, so its entries carry IES_FLAG_SNMP_URI_STATUS and the
+ * framework routes their reads to the status layer instead. Same mechanism as
+ * ies_auto_mibs_setup_net_mx_device_io.c.
+ */
+
+ies_handle_t
+ies_auto_mibs_setup_entry_flags_net_mxFiberCheck
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "fiberCheckStatus/monitor/portTable/") )
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+    }
+
+    return IES_NOERR;
+}
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_mxFiberCheck_c

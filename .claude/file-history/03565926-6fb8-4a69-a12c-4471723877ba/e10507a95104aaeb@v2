@@ -1,0 +1,23 @@
+#!/usr/bin/expect -f
+# Usage: dutroot.exp "<cmd1>" "<cmd2>" ...  -- runs as root on the DUT.
+# root's login shell is zsh; do not sync on a plain "# " prompt, use markers.
+set timeout 60
+log_user 1
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no admin@192.168.127.253
+expect -re {[Pp]assword:} { send "moxa\r" }
+expect -re {\$ $}
+send "su\r"
+expect -re {[Pp]assword:}
+sleep 2
+send "moxa\r"
+sleep 3
+set n 0
+foreach c $argv {
+    incr n
+    send "$c ; echo MRK$n\_EN\"\"D\r"
+    expect { -re "MRK$n\_END" {} timeout { puts "\n***TIMEOUT cmd $n" } }
+}
+send "exit\r"
+sleep 1
+send "exit\r"
+expect eof

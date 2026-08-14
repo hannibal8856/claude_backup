@@ -1,0 +1,91 @@
+.bvt:
+  # Currently we use default docker image on the RDVM runner, no neeed to specify image here.
+  # image: $SRE_DEPENDENCY_PROXY_GITLAB_IMAGE_PREFIX/moxa/sw/sre/share/runner-img/docker-git:latest
+  # Use RDVM runner instead of autoscale runner for safe SSH connection to testbed.
+  # Runner tag from pipeline variables: default in autobuild_config_prefill_global_var.yml;
+  # override in product autobuild_config.yml. Do not set BVT_RUNNER_TAG here — job variables
+  # would override the product and force every project onto the same RDVM.
+  tags:
+    - $BVT_RUNNER_TAG
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 1h50m     # Leave 10 mins for after script operation
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 10m # Change after script timeout from 5m (default) to 10m
+    # Per-job report directory on the testbed host (relative to the SSH user's home).
+    # Keeps concurrent runs of different models from overwriting each other.
+    BVT_REMOTE_REPORT_DIR: "report/ci-${CI_JOB_ID}"
+  before_script:
+    # Skip this stage if FWR_FORCE_BUILD is false AND no new changes
+    - |
+      if [ "${FWR_FORCE_BUILD}" == "false" ] && [ ! -s "$FWR_CHANGE_LOG_FILE" ]; then
+        echo "${LOG_INFO}No new changes today, skip BVT stage.${LOG_END}"
+        exit 3
+      fi
+    # Get BVT parameters
+    # Model name is case insensitive
+    - BVT_FWR_URL=$(sed -n 's/^SCM_URL=//p' "$FWR_PIPELINE_INFO_FILE" | head -n 1)
+    - BVT_PRODUCT_MODEL=$(echo "$BVT_FWR_URL" | sed -n 's#.*[Ff][Ww][Rr]_\([^_]*\)_v.*#\1#p' | head -n 1)
+    # Export BVT parameters as environment variables for ssh command
+    - export BVT_PRODUCT_MODEL=${BVT_PRODUCT_MODEL}
+    - export BVT_FWR_URL=${BVT_FWR_URL}
+  script:
+    - |
+      echo "${LOG_INFO}Start BVT${LOG_END}"
+      echo "${LOG_INFO}BVT parameters:${LOG_END}"
+      echo "Product model = ${BVT_PRODUCT_MODEL}"
+      echo "SCM Firmware URL = ${BVT_FWR_URL}"
+    - eval "$(ssh-agent -s)"
+    - chmod 600 "$BVT_TESTBED_SSH_PRIVATE_KEY"
+    - ssh-add "$BVT_TESTBED_SSH_PRIVATE_KEY"
+    - exit_code=0
+    - ssh -o StrictHostKeyChecking=no ${BVT_TESTBED_SSH_USERNAME}@${BVT_TESTBED_SSH_IP} "BVT_REPORT_DIR=\$HOME/${BVT_REMOTE_REPORT_DIR} bash ./run_bvt.sh $BVT_PRODUCT_MODEL $BVT_FWR_URL" || exit_code=$?
+    # Pull the report back before acting on the exit code: a failed run is exactly
+    # the case where the report matters most.
+    - |
+      if scp -r -o StrictHostKeyChecking=no \
+          ${BVT_TESTBED_SSH_USERNAME}@${BVT_TESTBED_SSH_IP}:${BVT_REMOTE_REPORT_DIR} ./report; then
+        echo "${LOG_INFO}BVT report fetched to ./report${LOG_END}"
+        ls -R ./report
+      else
+        echo "${LOG_ERR}No BVT report at ${BVT_REMOTE_REPORT_DIR} on the testbed.${LOG_END}"
+      fi
+    - |
+      if [ "${exit_code}" -ne "0" ]; then
+        echo "${LOG_ERR}BVT failed, please refer to test log for details. (exit_code=${exit_code})${LOG_END}"
+        exit 1
+      fi
+      echo "${LOG_INFO}BVT succeed.${LOG_END}"
+  after_script:
+    # after_script runs in a new shell; ssh-agent is gone, use -i to specify key file directly
+    - ssh -i "$BVT_TESTBED_SSH_PRIVATE_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no
+        ${BVT_TESTBED_SSH_USERNAME}@${BVT_TESTBED_SSH_IP} "rm -rf \$HOME/${BVT_REMOTE_REPORT_DIR}" || true
+
+.bvt_upload_report:
+  image: $SRE_DEPENDENCY_PROXY_GITLAB_IMAGE_PREFIX/moxa/sw/sre/share/runner-img/docker-scm:latest
+  before_script:
+    # Skip when the upstream bvt job produced no report (e.g. it was skipped).
+    - |
+      if [ ! -d "report" ] || [ -z "$(ls -A report 2>/dev/null)" ]; then
+        echo "${LOG_INFO}No BVT report found, skip report upload.${LOG_END}"
+        exit 3
+      fi
+  script:
+    # Upload as a sibling of the firmware tar produced by build-code:upload, i.e.
+    #   .../<BUILD_VER>/<IMG_FILE_NAME>__<PIPELINE_REASON>.tar            (firmware)
+    #   .../<BUILD_VER>/<IMG_FILE_NAME>__<PIPELINE_REASON>_BVT_REPORT.tar (this job)
+    # The tag is derived from SCM_URL so it can never drift from upload_artifact.yml.
+    - |
+      set -e
+      if [ ! -s "$FWR_PIPELINE_INFO_FILE" ]; then
+        echo "ERROR: ${FWR_PIPELINE_INFO_FILE} missing or empty; cannot derive the SCM path."
+        exit 1
+      fi
+      SCM_URL=$(sed -n 's/^SCM_URL=//p' "$FWR_PIPELINE_INFO_FILE" | head -n 1)
+      SCM_URL_PREFIX="https://scm.moxa.com/${CI_PROJECT_PATH}/"
+      SCM_TAG="${SCM_URL#${SCM_URL_PREFIX}}"
+      if [ "${SCM_TAG}" = "${SCM_URL}" ]; then
+        echo "ERROR: SCM_URL '${SCM_URL}' does not start with '${SCM_URL_PREFIX}'."
+        exit 1
+      fi
+      SCM_TAG="${SCM_TAG%.tar}_BVT_REPORT"
+      echo "${LOG_INFO}Upload report/ to https://scm.moxa.com/${CI_PROJECT_PATH}/${SCM_TAG}.tar${LOG_END}"
+      scm upload --local-path report/ --scm-path "${CI_PROJECT_PATH}" "${SCM_TAG}"

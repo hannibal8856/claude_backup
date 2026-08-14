@@ -1,0 +1,37 @@
+選了 AgentX 之後最大的收穫: (1) subagent只需要提供OID GET handler, 不用費心管理GETNEXT (2) GET / SET 的分流
+
+原本的設計是自己寫路由 —— 在 ies-auto-mibs 攔下 GET,再轉發給 framework subagent。這段程式碼確實實作完成並上機驗證了,結果發現:
+
+它從未被執行過。 debug trace 完全空白,空表與有資料時皆然。
+
+原因是 net-snmp 本來就會依註冊能力自動分流:
+
+註冊者    註冊能力    自然承接
+framework subagent    以 table_iterator 註冊為唯讀    GET / GETNEXT / GETBULK
+ies-auto-mibs    保留既有的可寫註冊    SET
+
+GET 類請求落到唯讀表;SET 因為唯讀表「吃不下」,自然落到可寫註冊。真正要做的事只有一件:把 framework 註冊成唯讀。 分流由平台完成,不需要任何清單、閘門或轉發程式碼 —— 那段自己寫的 forward 邏輯經判定為死碼,已移除。
+
+已於 DUT 驗證:snmpwalk 由 framework 服務、snmpset 造成 config 檔實際改動,兩者同時成立。
+
+這件事帶來三個好處:
+
+程式碼更少 —— 熱路徑上少一層自己維護的路由判斷。
+行為更可預測 —— 分流規則是 net-snmp 的既有語意,不是我們發明的規則,不會出現自訂邏輯與平台行為互相打架的情況。
+驗證更便宜 —— 不必為「路由有沒有選對」設計測試,只需確認註冊能力設定正確。
+->
+選了 AgentX 之後最大的收穫: subagent只需要提供OID GET handler, 不用費心管理GETNEXT
+原因是 net-snmp 本來就會依註冊能力自動分流:
+
+註冊者    註冊能力    自然承接
+ISS subagent    使用ISS原生註冊    GET / GETNEXT / GETBULK
+framework subagent    以 table_iterator 註冊為唯讀    GET / GETNEXT / GETBULK
+ies-auto-mibs    保留既有的可寫註冊    SET
+
+已於 DUT 驗證:snmpwalk 由 framework 服務、snmpset 造成 config 檔實際改動,兩者同時成立。
+
+這件事帶來三個好處:
+
+程式碼更少 —— 熱路徑上少一層自己維護的路由判斷。
+行為更可預測 —— 分流規則是 net-snmp 的既有語意,不是我們發明的規則,不會出現自訂邏輯與平台行為互相打架的情況。
+驗證更便宜 —— 不必為「路由有沒有選對」設計測試,只需確認註冊能力設定正確。

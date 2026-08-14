@@ -1,0 +1,52 @@
+/*
+ * lib_moxa_snmp_agentx — FRR-style AgentX subagent wrapper on net-snmp.
+ *
+ * Encapsulates the net-snmp boilerplate (AGENT_ROLE / AGENT_X_SOCKET / init_agent
+ * / init_snmp / select-process loop) so any process can act as an AgentX subagent
+ * connecting to the snmpd master at tcp:127.0.0.1:705.
+ *
+ * GET/SET only — no trap API. Traps are out-of-band (app events -> MQTT ->
+ * trap_notification -> /bin/snmptrap).
+ *
+ * Clean-room; design reference only was FRR lib/agentx.c (not copied).
+ */
+#ifndef LIB_MOXA_SNMP_AGENTX_H
+#define LIB_MOXA_SNMP_AGENTX_H
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Exported even though the library builds with -fvisibility=hidden. */
+#define MOXA_AGENTX_API __attribute__((visibility("default")))
+
+/* Initialize the calling process as an AgentX subagent (connects to the snmpd
+ * master at tcp:127.0.0.1:705). Call once before any MoxaAgentX_Register*.
+ * Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_Init(const char *daemon_name);
+
+/* Register one scalar OID with a net-snmp node handler.
+ * mode = HANDLER_CAN_RONLY / HANDLER_CAN_RWRITE. Returns MIB_REGISTERED_OK (0)
+ * on success. */
+MOXA_AGENTX_API int  MoxaAgentX_RegisterScalar(const char *descr,
+                                               const oid *o, size_t olen,
+                                               int mode,
+                                               Netsnmp_Node_Handler *handler);
+
+/* Spawn a dedicated OS thread that runs the AgentX select/process loop.
+ * Does NOT use any async runtime; safe to call from a tokio process (the loop
+ * lives on its own thread). Returns 0 on success. */
+MOXA_AGENTX_API int  MoxaAgentX_RunInThread(void);
+
+/* Stop the loop and shut net-snmp down. */
+MOXA_AGENTX_API void MoxaAgentX_Shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIB_MOXA_SNMP_AGENTX_H */

@@ -1,0 +1,50 @@
+#!/bin/bash
+# EDS moxa stage B:post-build.sh — 把舊 clippy gate 換成 NOS 新版 + 補 exit_code=0
+set -u
+EM=$HOME/edsg4000/buildroot/moxa/board/net/common/post-build.sh
+NOSM=/home/moxa/sda2/home/moxa/NOS_v6.0_develop/buildroot/moxa/board/net/common/post-build.sh
+[ -f "$EM" ] && [ -f "$NOSM" ] || { echo "ABORT: 檔案缺"; exit 1; }
+cp "$EM" /tmp/eds_postbuild.bak
+
+python3 - "$EM" "$NOSM" <<'PY'
+import sys
+em,nosm=sys.argv[1],sys.argv[2]
+E=open(em).read().split("\n"); N=open(nosm).read().split("\n")
+
+def clippy_block(lines):
+    # 找 'if [ "${RUST_CLIPPY_SCAN_CONFIG}" == "true" ]; then' 到配對 fi(depth)
+    start=next(i for i,l in enumerate(lines) if l.strip().startswith('if [ "${RUST_CLIPPY_SCAN_CONFIG}" == "true" ]; then'))
+    depth=0
+    for j in range(start,len(lines)):
+        s=lines[j].strip()
+        if s.startswith('if ') or s=='if': depth+=1
+        # 注意:單行 if ...; then 也算一層;結尾 fi 減一
+        if s=='fi' or s.endswith('; fi'):
+            depth-=1
+            if depth==0: return start,j
+    raise RuntimeError("no matching fi")
+
+es,ee=clippy_block(E); ns,ne=clippy_block(N)
+newE=E[:es]+N[ns:ne+1]+E[ee+1:]
+
+# 補 exit_code=0 在 check_rust_pkg_br_dependency 那行之前(若前一非空行不是 exit_code=0)
+out=[]
+for i,l in enumerate(newE):
+    if 'check_rust_pkg_br_dependency.py' in l and l.strip().startswith('python3'):
+        # 往回看最近非空行
+        k=len(out)-1
+        while k>=0 and out[k].strip()=='': k-=1
+        if k<0 or out[k].strip()!='exit_code=0':
+            out.append('exit_code=0')
+    out.append(l)
+open(em,"w").write("\n".join(out))
+print("clippy block 替換: EDS", es+1,"-",ee+1, " ← NOS", ns+1,"-",ne+1)
+PY
+
+echo "--- 驗證 ---"
+echo "新 gate(not referenced): $(grep -c 'not referenced by any application' "$EM")  (應>=1)"
+echo "舊 gate(PKG_NOT_SCANNED): $(grep -c 'PKG_NOT_SCANNED' "$EM")  (應=0)"
+echo "exit_code=0: $(grep -c '^exit_code=0' "$EM")  (應>=1)"
+echo "unbound 行保留: $(grep -c 'unbound' "$EM")  (應=5)"
+echo "結尾 exit 0 保留: $(grep -c '^exit 0' "$EM")"
+echo "bash -n: $(bash -n "$EM" && echo OK || echo FAIL)"

@@ -1,0 +1,24 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/dl] (2023.02.11_develop) 18:24 $ run_in_docker.sh "make lib_moxa_snmp_agentx-rebuild lib_moxa_rust_snmp_agentx-rebuild app_moxa_framework-rebuild rust_moxa_build-rebuild"
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_rsynced
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_staging_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_target_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_images_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_host_installed
+rm -f /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_built
+>>> lib_moxa_snmp_agentx custom Syncing from source dir ./dl/lib_moxa_snmp_agentx
+rsync -au --chmod=u=rwX,go=rX  --exclude .svn --exclude .git --exclude .hg --exclude .bzr --exclude CVS ./dl/lib_moxa_snmp_agentx/ /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom
+>>> lib_moxa_snmp_agentx custom Building
+PATH="/home/moxa/mds4xgl3/buildroot/output/host/bin:/home/moxa/mds4xgl3/buildroot/output/host/sbin:/home/moxa/.local/bin:/home/moxa/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin":/home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/bin /usr/bin/make -j9 -C /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom CC=/home/moxa/mds4xgl3/buildroot/output/host/bin/arm-linux-gnueabihf-gcc
+make[1]: Entering directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom'
+In file included from /home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/include/net-snmp/agent/all_helpers.h:28:0,
+                 from /home/moxa/mds4xgl3/buildroot/output/host/arm-buildroot-linux-gnueabihf/sysroot/usr/include/net-snmp/agent/net-snmp-agent-includes.h:19,
+                 from /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/include/lib_moxa_snmp_agentx.h:18,
+                 from /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/src/agentx.c:5:
+/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/src/agentx.c: In function 'MoxaAgentX_RowAddIndex':
+/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/src/agentx.c:122:5: error: request for member 'indexes' in something not a structure or union
+     netsnmp_table_row_add_column((netsnmp_table_row *) row, asn_type,
+     ^
+make[1]: *** [Makefile:36: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/build/library/agentx.o] Error 1
+make[1]: Leaving directory '/home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom'
+make: *** [package/pkg-generic.mk:284: /home/moxa/mds4xgl3/buildroot/output/build/lib_moxa_snmp_agentx-custom/.stamp_built] Error 2

@@ -1,0 +1,198 @@
+# Handoff — Plan C GET-forward 自動推導(2026-08-08)
+
+接續 `~/session-doc-snmp-agentx-owned-delegation-2026-08-06.md`。
+本文件是**操作性交接**,不是說明文件:目的是讓新 session 不必重新推導就能繼續。
+
+---
+
+## TL;DR
+
+把 `mox_iss_get_forward_rules[]` 從**手列 12 條規則**改成**執行期自動推導**。
+功能全部通過,**效能不合格**(mxPort walk 慢 13.5%)。程式碼**尚未 commit**。
+下一步是把 forward 改成清單逐行 opt-in,讓效能回到基準線。
+
+---
+
+## 現況
+
+| 項目 | 狀態 |
+|---|---|
+| DUT `192.168.127.253` | **partition 1**,BUILD_TIME `2026_0808_0507`(自動推導版),功能正常 |
+| partition 2 | mainline 對照組 `2026_0805_2335`(護欄鎖定,勿覆蓋) |
+| `3rdparty_net_snmp` branch | `snmp-plan-E`,HEAD = `66a3071`(手列 probe 版,已 commit) |
+| working tree | **dirty** — `ies_auto_mibs.c` + `moxa_snmp_handle_util.c` 帶著自動推導版改動,**未 commit** |
+| 其餘 10 個 repo | clean |
+
+---
+
+## 已確立的事實(附證據強度)
+
+1. **既有 GET-forward 機制是健康的** —— 實測。ifTable 330 / ifXTable 285 完整走完,
+   `ifAdminStatus` 與 `ifAlias` 值與型別正確,pcap 證實兩者 GET 都產生 Get-PDU 送到 ISS。
+   `ifAdminStatus` 的 SET→GET 讀回一致(SET 走本地、GET 走 ISS 不會不同步)。
+
+2. **probe 必須用 pcap 驗證,不能用「GET 回得到值」** —— 實測,踩過。
+   in-master 也會回值。probe 若實際由 in-master 服務,`netsnmp_subtree_find()` 會回**本地**
+   subtree,`mox_snmp_forward_get_to_iss()` 仍回 0 當成功,把請求交給非 AgentX handler:
+   值型別錯(OCTET STRING → `INTEGER: 0`)、scalar 變 `noSuchInstance`、GETNEXT 在該欄
+   迴圈導致 `OID not increasing`,整棵 mxPort walk 從 193 塌成 13,而且 wire 上完全沒流量。
+
+3. **mxPort 的 RO 欄歸屬是分裂的** —— 實測(pcap)。
+   `portConfigTable` col 1 與 `portConfigLinkUpDelayTable` col 1 由 **in-master** 服務;
+   `portStatTable` col 1–5 與 `portStatLinkUpDelayTable` col 1–2 由 **ISS** 服務。
+   → `mxportdb/` 的委派實際上只有 status 側兩張表生效。
+
+4. **原因:合成的 index 欄** —— 讀程式碼得到,未下 instrumentation,但對 4 張表的預測全中。
+   `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()` 只對**沒被 skip 的 entry** 執行,
+   內部 `CreateIndexEntry()`(把最後一個 sub-id 設成 1)+ `RegisterToNetSNMP()`,
+   **在本地重新註冊該表的 col 1**。所以只要一張表還留著任何 RW 欄在本地,它的 index 欄
+   就會被搶回 in-master。旗標 `IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS` 是刻意設計,不是 bug。
+   這也解釋了「拆表後第 1 欄從連續 walk 消失」(同一 OID 上有兩個註冊)。
+
+5. **probe 不需要 instance,也不必和欄位同表** —— 實測。
+   裸欄位 OID、甚至表 entry OID 再上一層,都能解析到 subagent 的 registration。
+   ISS 用單一 `SNMPRegisterMibWithLock(&mxPortOID, &mxPortEntry, …)` 註冊整個 mxPort,
+   所以 portStat 的 probe 能涵蓋 portConfig 的欄位。
+
+6. **`iss_build` 不是「誰服務」** —— `BUILD_FROM_URI=0 / BUILD_FROM_ISS=1`,講的是
+   in-master 從哪裡取值。**mod_uri 前綴也不代表 ISS 擁有**(`fsladb/` 橫跨
+   `.8691.603.1.2` in-master 與 `.2076.63` ISS)。委派候選唯一可靠的篩選是
+   「ISS 有沒有宣告涵蓋該 subtree 的 OID root」。
+
+---
+
+## 未 commit 的改動(自動推導版)
+
+Patch:`~/mxport-getfwd-v3-autoprobe.patch`(17KB,兩檔)。
+若 working tree 已被清掉,`patch -p0` 套回 HEAD `66a3071` 即可。
+
+改了五處:
+
+| 位置 | 內容 |
+|---|---|
+| `ies_auto_mibs.c:~176` | 前置宣告 `mox_snmp_probe_note_shadowed`(`util.c` 在 185 行被 `#include`) |
+| `ies_auto_mibs.c:3062–3180` | 刪掉手列規則表(struct + 12 OID 陣列 + 12 條規則 + 查表函式),換成 probe 候選表 |
+| `mox_snmp_forward_get_to_iss()` | 簽章改成 `(probe_oid, probe_oid_len, reqinfo, request)` |
+| GET 路徑(`MODE_IS_GET` 分支) | `if (RW) { idx = prefix_idx(entry); probe = probe_for_entry(entry, idx); forward(probe); }` |
+| `mox_snmp_entry_is_agentx_owned()` | 拆成 `agentx_prefix_idx()` + 薄層;skip 分支加 `probe_note_delegated()` |
+| `moxa_snmp_handle_util.c` | 合成 index 註冊成功後呼叫 `probe_note_shadowed()` |
+
+**probe 選擇規則**:候選 = 被 skip 的 entry;扣掉被合成 index 搶回的;
+挑選時**同表優先,退回同前綴**。兩半都必要 —— `ifmibdb/` 一個前綴橫跨 ifTable 與 ifXTable
+兩個不同 registration;而 `mxportdb/portConfigTable/` 自己沒有合格候選(唯一 RO 欄被合成搶回)。
+
+---
+
+## 驗收結果
+
+| 標準 | 結果 |
+|---|---|
+| 完整性 | **通過** — mxPort 193 / ifTable 330 / ifXTable 285 / dot3 594,無一減少 |
+| probe 推導正確性 | **通過** — 4/4 group 的 RW GET 都有 Get-PDU,含 ifTable vs ifXTable 分流 |
+| **效能** | **不通過** — mxPort 0.788s vs 基準 0.694s(**+13.5%**) |
+| dot3 效能 | **無法判定** — 缺 before 數字 |
+
+---
+
+## 下一步(三選一,依重要性)
+
+### 1. 實作逐行 opt-in(推薦先做)
+
+問題在政策不在實作:自動推導讓「委派 group 裡的**每一個** RW 欄」都 forward,
+但 mxPort 的 RW 欄本地讀取本來就快,forward 純粹加成本。而且它**意外新啟用了 `stdethdb/`
+(dot3)的 forward** —— 手列版完全沒有 forward dot3 的任何欄位。
+
+設計:`agentx_owned.list` 每行可帶旗標。
+
+```
+ifmibdb/      +getfwd
+stdethdb/
+mxportdb/
+```
+
+- 只有帶 `+getfwd` 的行啟用 RW GET forwarding,其餘只做 RO skip。
+- 實作約 20 行:`mox_snmp_load_agentx_owned_list()` 多解析一個 token 存進
+  `gAgentXOwnedGetFwd[i]`;GET 路徑在 `probe_for_entry()` 之前多一個
+  `if (!gAgentXOwnedGetFwd[prefix_idx]) 不 forward`。
+- **等價性**:原本手列的 4 條規則**全部都在 `ifmibdb/` 底下**
+  (`ifAdminStatus` 在 ifTable,`ifLinkUpDownTrapEnable`/`ifPromiscuousMode`/`ifAlias`
+  在 ifXTable)。所以只給 `ifmibdb/` 加旗標,行為即與出貨版等價,效能應回到 0.694s。
+
+### 2. 補 dot3 的 before 耗時
+
+燒 `~/swu/FWR_MDS-G4000-L3-4XGS_v7.0_2026_0808_0336.swu`(手列版,dot3 未 forward),
+量 `.1.3.6.1.2.1.10.7` 的 walk 耗時。不用重 build,一輪約 10 分鐘。
+自動推導版量到 1.61–1.69s。
+
+### 3. commit
+
+建議**做完 opt-in 再一起 commit**,否則主線會留一個已知慢 13.5% 的版本。
+
+---
+
+## 驗收配方(每次改 code 都要跑)
+
+兩條硬標準(使用者 2026-08-08 明示):
+**① 對 mainline 的完整性不能少;② 效能不能比原本 `agentx_owned.list` 版本差。**
+
+```bash
+D=192.168.127.253
+# 完整性(注意:| wc -l 會被 shell hook 過濾,要先寫檔再數)
+for o in .1.3.6.1.4.1.8691.603.1.1 .1.3.6.1.2.1.10.7 .1.3.6.1.2.1.2.2 .1.3.6.1.2.1.31.1.1; do
+  /usr/bin/snmpwalk -v2c -c public -On -t 5 $D $o > /tmp/w.txt; echo "$o $(grep -c . /tmp/w.txt)"
+done
+# 效能 + PC 端 pcap
+bash ~/mds4xgl3/tools/walkmeasure.sh <label> 5
+# AgentX:每個受測 RW 欄都要看到 Get-PDU
+expect -f ~/mds4xgl3/tools/dutroot.exp "rm -f /tmp/x.pcap; tcpdump -i lo -s0 -U -w /tmp/x.pcap port 705 2>/dev/null & TD=\$!; sleep 40; kill \$TD"
+# 取回後:tshark -r x.pcap -Y "frame.number==N" -V | grep 'Object Identifier:'
+```
+
+### 基準線
+
+| image | mxPort | 中位數 |
+|---|---|---|
+| mainline `2026_0805_2335` | 154 | 0.757s |
+| planE RO-only `2026_0806_1730` ← **效能基準** | 193 | **0.694s** |
+| 手列 probe `2026_0808_0336` | 193 | 0.772s |
+| 自動推導 `2026_0808_0507` | 193 | 0.788s |
+
+其他:ifTable 330、ifXTable 285、dot3 594(planE 側)。
+**mainline 側的 ifTable / ifXTable / dot3 數字尚未量過**,下次 DUT 在 p2 時補。
+
+---
+
+## 產出索引
+
+| 類別 | 位置 |
+|---|---|
+| 工具(量測、DUT ssh runner、取 pcap) | `~/mds4xgl3/tools/` — `walkmeasure.sh`、`dutroot.exp`、`getpcap.exp`、`iss_roots.txt` |
+| pcap(13 份) | `~/pcap/`,格式 `<YYYY-MM-DD>_<主題>_<planE\|mainline>_<BUILD_TIME>[_<變體>].pcap` |
+| .swu(3 份) | `~/swu/` — `0807_1842`(壞的)、`0808_0336`(手列)、`0808_0507`(自動推導) |
+| patch | `~/mxport-getfwd-v3-autoprobe.patch`(當前未 commit 改動)<br>`~/mxport-rw-getfwd-v2-portstat-probe.patch`(= commit `66a3071`)<br>`~/mxport-rw-getfwd-FAILED-2026-08-07.patch`(壞 probe 版,只留紀錄) |
+| memory | 五則,新 session 會自動載入 |
+
+---
+
+## 環境陷阱(踩過的)
+
+- **建置序列必須含 `make 3rdparty_net_snmp-rebuild`** —— `ies_auto_mibs.c` 由它編,
+  session doc Appendix D 漏了這步,照那個序列建 C 改動**不會進 image**(build 仍 exit 0)。
+  完整 12 package 序列見 memory `project_build_seq_needs_3rdparty_net_snmp`。
+- **`git diff` 被 alias 導到 meld**,產出的 patch 是空的。用 `git cat-file -p HEAD:<path>` + `diff -u`。
+- **`make` 會刪掉 `output/images/` 舊的 .swu**,要保留先 `cp` 到 `~/swu/`。
+- **`| wc -l` 等管線會被 shell hook 過濾**,結果不可信;先寫檔再 `grep -c .`。
+- DUT 沒有 `timeout` 指令;背景 tcpdump 要用 `& TD=$!; sleep N; kill $TD`。
+- DUT 重開機後 sshd 會短暫 refuse;`expect` 送 ssh 密碼太快會被拒(要 sleep)。
+- ssh 後 `su` 成功但 prompt 仍是 `$`(root 是 zsh),不要同步在 `# `。
+- 驗證改動有沒有進 binary:掃 `.so` 的 OID 位元組時要挑**只存在於新程式碼**的常數
+  (欄位 OID 本身在 `net_*db.h` 也有,會偽陽性)。
+
+---
+
+## 護欄(不因授權放寬)
+
+- 燒錄一律**從 mainline(p2)那側**跑,`--protect 2` 與
+  `--control-build 2026_0805_2335` 維持開啟,寫入 partition 1。
+- 燒錄前一定先跑 stage 1(不帶 `--flash`)並確認
+  `will WRITE: partition 1` + `control: running the expected control group`。

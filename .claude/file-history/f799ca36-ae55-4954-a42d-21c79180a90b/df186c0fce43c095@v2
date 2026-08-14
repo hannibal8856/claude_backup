@@ -1,0 +1,25 @@
+/*
+ * lib_moxa_ies_auto_mibs — mapping table (data).
+ *
+ * B0 seed: one trivial test scalar so ies_map_lookup_by_oid() can be exercised.
+ * Real config OID rows (extracted from 3rdparty_net_snmp/ies-auto-mibs/net_*.h
+ * + plugin OID defs) are appended in B1 (plan Task 8).
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+
+/* .1.3.6.1.4.1.8691.99.1 : Moxa enterprise test scalar (B0 only). */
+static const moxa_oid oid_moxa_test[] = { 1, 3, 6, 1, 4, 1, 8691, 99, 1 };
+
+const struct ies_map_entry g_ies_map_table[] = {
+    {
+        .oid       = oid_moxa_test,
+        .oid_len   = sizeof(oid_moxa_test) / sizeof(oid_moxa_test[0]),
+        .uri       = "test/trivial",
+        .uri_index = "",
+        .val_type  = 2,     /* placeholder INTEGER; unused by the B0 handler */
+        .mode      = 0x01,  /* HANDLER_CAN_RONLY */
+    },
+};
+
+const size_t g_ies_map_table_len =
+    sizeof(g_ies_map_table) / sizeof(g_ies_map_table[0]);

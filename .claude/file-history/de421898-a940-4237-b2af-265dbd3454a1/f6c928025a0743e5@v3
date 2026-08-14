@@ -1,0 +1,16 @@
+menuconfig BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX
+    bool "lib_moxa_snmp_agentx"
+    select BR2_PACKAGE_3RDPARTY_NET_SNMP
+    help
+        AgentX subagent shim for app_moxa_framework. Links libnetsnmpagent
+        and libnetsnmp only, so libnetsnmpmibs stays out of the framework
+        process.
+
+if BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX
+config BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX_URL
+    string "URL"
+    default "git@gitlab.com:moxa/sw/switch/personal/oscarmh.tu.switch/lib_moxa_snmp_agentx.git"
+config BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX_REV
+    string "Revision"
+    default "snmp-plan-E2"
+endif

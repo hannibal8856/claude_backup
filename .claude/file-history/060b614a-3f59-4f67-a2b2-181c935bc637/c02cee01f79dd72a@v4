@@ -1,0 +1,278 @@
+# SNMP GET 效能優化 —— 導入 AgentX
+
+> 狀態:草稿 v1 | 最後更新:2026-08-07
+
+---
+
+## 問題
+
+### 1. SNMP 讀取效能不足,最壞情況出現秒級延遲
+
+一般查詢已經超出驗收標準,而**一旦單一 GET 跨越兩張表,成本會再翻一倍**,惡化到接近秒的等級。
+
+| 情境 | 實測 | 來源 |
+|---|---|---|
+| 一般 GET(13 個 mxPort OID) | p50 **264.4 ms**、p100 **301.1 ms** | NOS 7 mainline |
+| 單一 GET 帶 1–3 個 `ifTable` OID | **~600 ms** | 北交控案例,NOS v5.x 優化前 |
+| 單一 GET **跨 `ifTable` + `ifXTable`** | **~1200 ms** | 北交控案例,NOS v5.x 優化前 |
+| `fiberCheckStatTx/RxPower`(28 埠) | 15 ms,最大 **122 ms** | 北交控案例,走 dlmod |
+
+> 註:北交控三列量測於 NOS v5.x 優化前,與第一列的 NOS 7 不是同一基準,不可直接相減;此處用來說明**問題的量級與形態**。
+
+兩個案例分別暴露了不同形態的問題:
+
+- **跨表是放大器。** 同一張 `ifTable` 內取 1–3 個 OID 約 600 ms;只要同一個 GET 同時碰到 `ifTable` 與 `ifXTable`,就翻倍到約 1200 ms。而客戶的監控需求(埠流量 + 埠頻寬)天生就會跨這兩張表 —— 也就是**最常見的查詢正好落在最慢的路徑上**。
+- **成本常常不在 SNMP 本身。** fiber check 為了在 RxPower 邊界判斷該顯示實值或 "N/A",需要每個埠的 link status,而它的作法是向 ISS 取回**整張 28 列的 `ifTable`**;事實上該資訊本來就在 fiber_check daemon 自己手上。這類「為了一個欄位而拉一整張表」的取法,無法靠傳輸層優化解決。
+
+### 2. SNMP 處理方式分歧,維護成本高於功能本身
+
+目前一個 SNMP GET 會走哪條路,是由 MIB entry 上的旗標決定,而不是由統一的架構決定 —— 實際上存在**四種各自獨立的處理方式**,彼此的快取、錯誤處理與走訪邏輯都不共用。
+
+造成的具體負擔:
+
+- **行為不一致**:同一顆 OID 的延遲取決於它落在哪一種處理方式,效能問題無法用單一手段收斂。
+- **共通機制得重複實作**:例如表格走訪(GETNEXT)在其中一條路上是自行實作的,net-snmp 既有的 table helper 完全沒有被使用。
+- **改一處要驗四處**:新增或修改一個 MIB,必須確認它落在哪一種處理方式,以及是否影響其他方式的行為。
+
+> 四種處理方式的細節與 OID 對應請見 **Original Architecture** 與 **Appendix B**。
+
+<!-- 候選的第三點(待你決定要不要放):
+     「效能問題的根因過去曾被誤判,缺乏可重複的量測方法」
+     —— 這點偏流程面,放進「問題」會稀釋前兩點的力道,
+        建議改放 Maintenance 或當作 Appendix D 的註腳。 -->
+
+---
+
+## 先講結果
+
+**mxPort MIB,單一 GET 帶 13 個 OID,連續 100 次,量測 wire time。**
+
+| 指標 | Before(NOS 7 mainline) | After(導入 AgentX) | 改善 |
+|---|---|---|---|
+| 平均 | 267.2 ms | **15.4 ms** | **−94.2%** |
+| 最壞情況 | 301.1 ms | **48.8 ms** | **−83.8%** |
+| **超過 50 ms 的比例** | **100 / 100 = 100%** | **0 / 100 = 0%** | **完全達標** |
+
+最後一列是驗收標準本身:改善前**每一次**查詢都超標,改善後**沒有任何一次**超標。
+
+### 附帶效益:可見的 OID 數量增加
+
+委派給 ISS 之後,ISS 補上了原本未實作的欄位:
+
+| MIB | Before | After | 變化 |
+|---|---|---|---|
+| EtherLike-MIB `.10.7` | 348 | 576 | **+65.5%** |
+| mxPort.mib `.603.1.1` | 151 | 189 | **+25.2%** |
+
+### 一個已知退步的案例(如實揭露)
+
+`mx_device_io` 搬到 framework subagent 後:
+
+| 指標 | Before(in-master) | After(framework) | 變化 |
+|---|---|---|---|
+| 平均 | 117.0 ms | 417.7 ms | **+257%** |
+| 最壞情況 | 153.5 ms | 10134.5 ms | **惡化 66 倍** |
+| 超過 50 ms 的比例 | 100% | 100% | 未改善 |
+
+兩個原因,都已定位:
+
+1. **本來就不該期待加速。** 這支 MIB 的成本在 status plugin,不在傳輸層 —— `plugin_moxa_io` 完全不快取,每次讀都重讀硬體(單次約 43 ms)。AgentX 拿掉的 HTTP hop 只佔 117 ms 中的數 ms。
+2. **最壞情況的惡化來自一個未解問題。** 每一輪的**第一次**請求會 stall 約 10 秒,可重複重現。因為只影響第一次,中位數完全看不出來(113.3 → 112.9 ms),但平均與最壞值會被它主導。**此問題已列為最優先待解項目**,見 Next。
+
+> 這個案例的價值在於證明**搬移是安全的**(值逐字正確、SET 未受影響),而不是證明它快。Phase 4 的試點必須挑成本真的落在被移除路徑上的 MIB。
+
+---
+
+## 目標與限制
+
+### 目標
+
+- 
+- 
+- 
+
+### 限制
+
+- 
+- 
+
+> **已有素材**:GET p100 < 50 ms(北交控)/ 統一架構 / 相容 framework / ISS 不可改 / wire 行為不可變
+
+---
+
+## 方案與取捨
+
+<!-- 一段話講「為什麼是這個」,比較表推到 Appendix A -->
+
+> **已有素材**:SNMP Proxy vs 專用 socket vs AgentX;AgentX 下再分 Plan C / D / E
+
+---
+
+## Original Architecture
+
+<!-- 主要用圖。關鍵點才貼程式碼(show muscle)。不強調過去缺點 -->
+
+### 四條路(圖)
+
+```
+[ 圖待放 —— 素材庫已有 ASCII 版 ]
+```
+
+### 關鍵點(程式碼)
+
+> **已有素材**:各路徑進入點 file:line 已查妥 / GETNEXT 裸註冊那段程式碼
+
+---
+
+## Enhanced Architecture
+
+### 架構圖
+
+```
+[ 圖待放 —— 素材庫已有 ASCII 版 ]
+```
+
+### 機制一:agentx_owned.list(零程式碼委派)
+
+### 機制二:framework 自建 subagent
+
+### Functional check
+
+> **已有素材**:`mox_snmp_entry_is_agentx_owned()` 程式碼 / missing=0 surplus=0 / ISS 1391 OID 未受干擾
+
+---
+
+## Comparison
+
+### Code Size
+
+### Performance
+
+### Maintenance
+
+> **已有素材**:既有 81,407 行 C vs 新增約 2,820 行 / 三個委派案例的 +228 / +26 / −12
+> **待補**:binary 尺寸(flash 佔用)
+
+---
+
+### FAQ
+
+> **貼上 Confluence 後**:每則答案請用 Expand macro 收起來 —— 在編輯器打 `/expand`,標題填問題,內容貼答案。下方的 `<details>` 標籤是給 Markdown 檢視用的,Confluence 不會渲染,轉完後可刪。
+
+<details>
+<summary><b>Q1:RO 與 RW 的處理路徑是怎麼分開的?</b></summary>
+
+**分流發生在註冊階段,不是每個請求進來才判斷。** 開機時每個 MIB entry 決定「要不要在 in-master 註冊自己」,之後 snmpd 就照註冊結果自動分派。
+
+**RO —— 不註冊,讓 snmpd 直接分派給 ISS**
+
+URI 前綴命中 `agentx_owned.list` 的唯讀 entry,**跳過本地註冊**。該 OID 在 in-master 沒有登記,snmpd master 便以 longest-prefix-match 把它路由到已註冊該範圍的 ISS AgentX subagent。請求**完全不進入 in-master 的處理邏輯**。
+
+**RW —— 一律註冊,一律先進 in-master**
+
+```c
+/* ies_auto_mibs.c:3404 */
+if (entry->mode & HANDLER_CAN_SET)
+    return 0;              /* RW → 永不委派 */
+```
+
+可寫 entry 無論前綴是否命中都保留本地註冊,因此 snmpd 會把它交給 in-master 的 `mox_snmp_handle_entry()`,再由該函式依 PDU 模式決定後續:
+
+| PDU 模式 | in-master 的處理 |
+|---|---|
+| `MODE_IS_GET` | 走本地讀取路徑取值 |
+| `MODE_SET_RESERVE1` | 相依性檢查 |
+| `MODE_SET_COMMIT` | 轉交 framework 寫入 |
+
+**為什麼 RW 不能一起委派**
+
+SET 必須留在 in-master:寫入要經過 framework 的 config layer,並在 net-snmp 的 4-phase commit 框架下做相依性檢查與回復。把 RW 交給 ISS 等於放棄這條寫入路徑。
+
+**兩個要注意的後果**
+
+1. **RW 欄的 GET 也留在本地。** 因為分流看的是 entry 屬性而非 PDU 種類,一個 RW 欄不會「GET 走 ISS、SET 走本地」。目前僅有四個 ifTable / ifXTable 欄位以額外的轉發規則(`ies_auto_mibs.c:3099`)例外處理。
+2. **一張表可能被拆成兩邊。** RO 欄在 ISS、RW 欄在 in-master。若 RW 欄剛好是該表的**第一欄**,從祖先 OID 連續 walk 會跳過它 —— 定點 walk 與 exact GET 不受影響。詳見 Maintenance。
+
+</details>
+
+<details>
+<summary><b>Q2:為什麼不用 SNMP Proxy?</b></summary>
+
+**簡答:proxy 省不掉 round-trip,而 AgentX 的優勢來自 transport,不是來自「一次拿多筆」。**
+
+早期推論是「AgentX 用 GETBULK 一次 round-trip 拿 N 個 varbind,所以快 5–10 倍」。**對照 net-snmp 5.9.3 原始碼後確認此推論錯誤:**
+
+```c
+/* agent/mibgroup/agentx/master.c:475-477 */
+case MODE_GETBULK:
+    pdu = snmp_pdu_create(AGENTX_MSG_GETNEXT);   /* 不是 GETBULK */
+    break;                                        /* WWWXXX  ← 原始碼自註 TODO */
+```
+
+- agentx master **沒有實作 GETBULK 轉發**,wire 上送出的是 `AGENTX_MSG_GETNEXT`。
+- 因此 **proxy 與 agentx master 的 master→backend round-trip 數完全相同**,都是 `max-repetitions` 次。
+- AgentX 仍比 proxy 快,但原因是 **transport(AF_UNIX/TCP 比 UDP loopback 快 2–3 倍)+ wire 格式簡單**,預期差距 2–3 倍,不是 5–10 倍。
+
+**選 AgentX 的真正理由是架構面**:ISS 已經是 AgentX subagent,snmpd 原生支援,不需額外的 UDP listener 與 community 對映。
+
+</details>
+
+---
+
+## Test
+
+### Functional Test
+
+### Stress Test
+
+> **已有素材**:Functional 的五步驟方法論、四個通過案例、兩個否決案例
+> **待補**:Stress Test 完全沒有資料
+
+---
+
+## Maintenance
+
+> **已有素材**:拆表→第 1 欄消失 / AgentX ping 同步阻塞(interval 30s)/ 快取單一 slot / 候選篩選改以 walk 耗時為首要條件
+
+---
+
+## Next
+
+- 
+- 
+- 
+
+> **已有素材**:未解的 10 秒 stall / 35 支候選重新排序 / Phase 4 試點需重選 / plugin_moxa_io 快取 / AgentX round-trip 107 ms
+
+---
+
+## Appendix
+
+### Appendix A —— 方案比較表
+
+### Appendix B —— OID 與四條路的對應
+
+> **待補**:目前只有總數(iss1 約 2,134 / iss0 約 646),缺逐 MIB 明細
+
+### Appendix C —— 量測方法
+
+**報告格式(統一)**:所有效能對照一律呈現三個數字 —— **平均**、**最壞情況**、**超過 50 ms 的次數佔比**。
+
+不使用中位數作為對外數字:中位數會掩蓋尾端問題。`mx_device_io` 即為實例 —— 中位數 113.3 → 112.9 ms 看似持平,但平均 117.0 → 417.7 ms、最壞 153.5 → 10134.5 ms,實為退步。
+
+**量測條件**:
+
+- 100 回合,每回合一個帶 N 個 OID 的 GET
+- **wire time**,以 `snmp.request_id` 配對 request / response;不採用 client 端 wall clock(含 `snmpget` 自身約 3.2 ms 啟動成本,非裝置成本)
+- varbind 數量由 capture 驗證,不採信命令列參數
+- 控制變因:同一台 DUT、同一份 running config、同一組 OID、同一台 host、無其他 SNMP 流量
+
+**工具與原始資料**:
+
+- `tools/mxportdb_latency.sh`、`tools/mx_device_io_latency.sh`
+- pcap:`~/pcap/`
+- walk 收集:`~/WORK/SNMP_50ms/snmpwalk/`,納入版控
+
+### Appendix D —— ADR 索引
+
+### Appendix E —— 圖的 Mermaid 原始碼(可選)

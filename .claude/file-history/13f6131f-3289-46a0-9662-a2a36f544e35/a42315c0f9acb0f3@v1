@@ -1,0 +1,4 @@
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are NEVER skipped (SET stays on framework). Add a MIB = add a prefix here.
+ifmibdb/

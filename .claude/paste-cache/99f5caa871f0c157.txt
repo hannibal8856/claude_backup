@@ -1,0 +1,19 @@
+$ ls -l /var/log/messages /moxa/permanent/moxalog/
+ls: /var/log/messages: No such file or directory
+/moxa/permanent/moxalog/:
+total 2024
+-rw-r--r--    1 root     root        155632 May  4 12:49 app_moxa_framework.log
+-rw-r--r--    1 root     root       1118425 May  4 10:00 app_moxa_framework.log.1
+-rw-r--r--    1 root     root             4 May  4 12:48 boot_count
+-rw-------    1 root     root        105897 May  4 12:48 kern.log
+-rw-------    1 root     root         55062 May  4 12:52 kern.log.1
+-rw-------    1 root     root        109161 May  4 12:48 moxa.debug
+-rw-------    1 root     root         70283 May  4 12:50 moxa.debug.1
+-rw-r--r--    1 root     root        410096 May  4 12:59 moxa.log
+-rw-r--r--    1 root     root           160 May  4 12:59 moxa.log.hash
+-rw-r--r--    1 root     root             4 Jul 13  2022 moxa_logrotate.status
+drwx-wx--x    2 root     root          4096 May  4 09:00 nginx
+drwxr-xr-x    2 root     root          4096 May  4 12:48 startup_journal
+$ grep -i "moxa: AgentX" /var/log/messages /moxa/permanent/moxalog/*
+grep: /var/log/messages: No such file or directory
+$ 

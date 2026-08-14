@@ -1,0 +1,155 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_mxPsmsdb
+#define _IES_AUTO_MIBS_FLAGS_net_mxPsmsdb
+
+
+
+/**
+ * @brief function body for set mxpsmsdb/psmsConfigPortTable/psmsConfigPortLimit
+
+ * @param[in]    reqinfo     netsnmp register handle
+ * @param[in]    request     netsnmp request
+ * @param[in]    entry       moxa snmp entry
+
+ * @returns      0 means success, others fail.
+ */
+int32_t setEntryValue_mxpsmsdb_psmsConfigPortTable_psmsConfigPortLimit( netsnmp_agent_request_info    *reqinfo,
+                                                                        netsnmp_request_info          *request,
+                                                                        struct ies_auto_mibs_entry    *entry   )
+{
+    int32_t  ret       = (-1);
+    int32_t  oidIndex  = 0;
+    char     uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0x0};
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &oidIndex) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't get oid index\n",
+            __func__, __LINE__ );
+        return (-1);
+    }
+
+    if ( moxaSnmpHandle_UtilLaCheckPortChannel(oidIndex) != LA_NORMAL_PORT )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d only normal port is allow to set, portIndex('%d')\n",
+            __func__, __LINE__, oidIndex);
+        return (-1);
+    }
+
+    snprintf(uriPath, sizeof(uriPath),
+        MOXA_SNMP_URI_CONFIG_PATH(MXCFG_GRP_mxpsec_addressTable) "/"
+        MXCFG_FILTER MXCFG_KEY_addressPortNum "=%d",
+        MXCFG_INTERNAL_PORT_INDEX(oidIndex));
+
+    if ( moxaSnmpHandle_UtilCfgDelURIConfig(uriPath) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't clear %s\n",
+            __func__, __LINE__, MXCFG_KEY_addressPortNum);
+        return (-1);
+    }
+
+    if ( setEntryValue_mibTableEntry(reqinfo, request, entry,
+            MXCFG_GRP_mxpsec_portTable,
+            MXCFG_INTERNAL_PORT_INDEX(oidIndex),
+            MXCFG_KEY_portLimit,
+            MOXA_SNMP_JSON_NUMBER) != 0 )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d can't set %s\n",
+            __func__, __LINE__, MXCFG_KEY_portLimit );
+        return (-1);
+    }
+
+    return 0;
+}
+
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_net_mxPsmsdb
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxpsmsdb/psmsConfigEnable") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri      , IES_MAX_URI,       "mxpsec/enable");
+        snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "0");
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxpsmsdb/psmsConfigMode") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri      , IES_MAX_URI,       "mxpsec/mode");
+        snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "0");
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_CONFIG_CHAIN, entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxpsmsdb/psmsConfigPortTable/") ) 
+    {
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigPortEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            snprintf(entry->mod_uri,       IES_MAX_URI,       "mxpsec/portTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "portEnable");
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigPortLimit") ) 
+        {
+            if ( moxaSnmpHandle_RegEntrySetValue(entry, setEntryValue_mxpsmsdb_psmsConfigPortTable_psmsConfigPortLimit) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigDbFlush") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_FILTER_DEL, entry->flags);
+            snprintf(entry->mod_uri, IES_MAX_URI, "mxpsec/addressTable");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigPortSecurityAction") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            snprintf(entry->mod_uri,       IES_MAX_URI,       "mxpsec/portTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "portSecurityAction");
+        }
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxpsmsdb/psmsConfigAddressTable/") ) 
+    {
+
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_READ_CREATE_v2,    entry->flags);
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigAddressPortNum") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            snprintf(entry->mod_uri,       IES_MAX_URI,       "mxpsec/addressTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "addressPortNum");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "psmsConfigAddressRowStatus") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+            snprintf(entry->mod_uri,       IES_MAX_URI,       "mxpsec/addressTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "entryActive");
+        }
+    }
+
+    return IES_NOERR;
+}
+
+
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_stdvladb_c

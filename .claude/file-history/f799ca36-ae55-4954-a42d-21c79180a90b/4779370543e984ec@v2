@@ -1,0 +1,946 @@
+#include "lr.h"
+#include "cfa.h"
+#include "fssnmp.h"
+#include "ifmibwr.h"
+#include "ifmiblow.h"
+#include "ifmibdb.h"
+
+/* Plan C: with AgentX, SNMP ifAdminStatus SET lands here (not the framework
+ * ies-auto-mibs path), so mirror it into the Moxa config layer via the
+ * existing mxcfg helper (same one TurboRing/loop-protection already use). */
+extern INT4 PortSetAdminStatus2MxCfgAsync (UINT4 u4IfIndex, UINT4 u4AdminStatus);
+
+VOID
+RegisterIFMIB ()
+{
+    SNMPRegisterMibWithLock (&ifmibOID, &ifmibEntry, CfaLock, CfaUnlock,
+                             SNMP_MSR_TGR_TRUE);
+    SNMPAddSysorEntry (&ifmibOID, (const UINT1 *) "ifMIB");
+}
+
+INT4
+IfNumberGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+    UNUSED_PARAM (pMultiIndex);
+    return (nmhGetIfNumber (&pMultiData->i4_SLongValue));
+}
+
+INT4
+IfIndexGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    pMultiData->i4_SLongValue = pMultiIndex->pIndex[0].i4_SLongValue;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfDescrGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfDescr (pMultiIndex->pIndex[0].i4_SLongValue,
+                           pMultiData->pOctetStrValue));
+}
+
+INT4
+IfTypeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfType (pMultiIndex->pIndex[0].i4_SLongValue,
+                          &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfMtuGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfMtu (pMultiIndex->pIndex[0].i4_SLongValue,
+                         &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfSpeedGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfSpeed (pMultiIndex->pIndex[0].i4_SLongValue,
+                           &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfPhysAddressGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfPhysAddress (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 pMultiData->pOctetStrValue));
+}
+
+INT4
+IfAdminStatusTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                   tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfAdminStatus (pu4Error,
+                                    pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiData->i4_SLongValue));
+}
+
+INT4
+IfAdminStatusSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+    INT4 i4RetVal;
+
+    i4RetVal = nmhSetIfAdminStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiData->i4_SLongValue);
+
+    /* Plan C: push the SNMP-originated admin-status change into the Moxa
+     * config layer. Async (own detached thread) so the AgentX SET handler is
+     * not blocked on the HTTP PATCH round-trip. ifAdminStatus up(1)/down(2)
+     * map directly to CFA_IF_UP/CFA_IF_DOWN; PortSetAdminStatus2MxCfg builds
+     * the portTable URI as (ifIndex-1) and handles physical ports. */
+    if (i4RetVal == SNMP_SUCCESS)
+    {
+        PortSetAdminStatus2MxCfgAsync (pMultiIndex->pIndex[0].i4_SLongValue,
+                                       pMultiData->i4_SLongValue);
+    }
+
+    return i4RetVal;
+}
+
+INT4
+IfAdminStatusGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfAdminStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfOperStatusGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOperStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfLastChangeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfLastChange (pMultiIndex->pIndex[0].i4_SLongValue,
+                                &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInOctetsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInOctets (pMultiIndex->pIndex[0].i4_SLongValue,
+                              &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInNUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInNUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                  &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInDiscardsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInDiscards (pMultiIndex->pIndex[0].i4_SLongValue,
+                                &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInErrorsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInErrors (pMultiIndex->pIndex[0].i4_SLongValue,
+                              &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInUnknownProtosGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInUnknownProtos (pMultiIndex->pIndex[0].i4_SLongValue,
+                                     &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutOctetsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutOctets (pMultiIndex->pIndex[0].i4_SLongValue,
+                               &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                  &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutNUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutNUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                   &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutDiscardsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutDiscards (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutErrorsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutErrors (pMultiIndex->pIndex[0].i4_SLongValue,
+                               &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutQLenGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutQLen (pMultiIndex->pIndex[0].i4_SLongValue,
+                             &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfSpecificGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfSpecific (pMultiIndex->pIndex[0].i4_SLongValue,
+                              pMultiData->pOidValue));
+}
+
+INT4
+IfTableLastChangeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+    UNUSED_PARAM (pMultiIndex);
+    return (nmhGetIfTableLastChange (&pMultiData->u4_ULongValue));
+}
+
+INT4
+IfStackTableDep (UINT4 *pu4Error, tSnmpIndexList * pSnmpIndexList,
+                 tSNMP_VAR_BIND * pSnmpvarbinds)
+{
+    return (nmhDepv2IfStackTable (pu4Error, pSnmpIndexList, pSnmpvarbinds));
+}
+
+INT4
+IfRcvAddressTableDep (UINT4 *pu4Error, tSnmpIndexList * pSnmpIndexList,
+                      tSNMP_VAR_BIND * pSnmpvarbinds)
+{
+    return (nmhDepv2IfRcvAddressTable
+            (pu4Error, pSnmpIndexList, pSnmpvarbinds));
+}
+
+INT4
+IfStackLastChangeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+    UNUSED_PARAM (pMultiIndex);
+    return (nmhGetIfStackLastChange (&pMultiData->u4_ULongValue));
+}
+
+INT4
+IfNameGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfName (pMultiIndex->pIndex[0].i4_SLongValue,
+                          pMultiData->pOctetStrValue));
+}
+
+INT4
+IfInMulticastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInMulticastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                     &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfInBroadcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfInBroadcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                     &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutMulticastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutMulticastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                      &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfOutBroadcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfOutBroadcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                      &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfHCInOctetsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCInOctets (pMultiIndex->pIndex[0].i4_SLongValue,
+                                &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCInUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCInUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                   &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCInMulticastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCInMulticastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                       &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCInBroadcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCInBroadcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                       &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCOutOctetsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCOutOctets (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCOutUcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCOutUcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                    &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCOutMulticastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCOutMulticastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                        &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfHCOutBroadcastPktsGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHCOutBroadcastPkts (pMultiIndex->pIndex[0].i4_SLongValue,
+                                        &pMultiData->u8_Counter64Value));
+}
+
+INT4
+IfLinkUpDownTrapEnableTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                            tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfLinkUpDownTrapEnable (pu4Error,
+                                             pMultiIndex->pIndex[0].
+                                             i4_SLongValue,
+                                             pMultiData->i4_SLongValue));
+}
+
+INT4
+IfLinkUpDownTrapEnableSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfLinkUpDownTrapEnable (pMultiIndex->pIndex[0].i4_SLongValue,
+                                          pMultiData->i4_SLongValue));
+}
+
+INT4
+IfLinkUpDownTrapEnableGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfLinkUpDownTrapEnable (pMultiIndex->pIndex[0].i4_SLongValue,
+                                          &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfHighSpeedGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfHighSpeed (pMultiIndex->pIndex[0].i4_SLongValue,
+                               &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfPromiscuousModeTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                       tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfPromiscuousMode (pu4Error,
+                                        pMultiIndex->pIndex[0].i4_SLongValue,
+                                        pMultiData->i4_SLongValue));
+}
+
+INT4
+IfPromiscuousModeSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfPromiscuousMode (pMultiIndex->pIndex[0].i4_SLongValue,
+                                     pMultiData->i4_SLongValue));
+}
+
+INT4
+IfPromiscuousModeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfPromiscuousMode (pMultiIndex->pIndex[0].i4_SLongValue,
+                                     &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfConnectorPresentGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfConnectorPresent (pMultiIndex->pIndex[0].i4_SLongValue,
+                                      &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfAliasTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfAlias (pu4Error,
+                              pMultiIndex->pIndex[0].i4_SLongValue,
+                              pMultiData->pOctetStrValue));
+}
+
+INT4
+IfAliasSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfAlias (pMultiIndex->pIndex[0].i4_SLongValue,
+                           pMultiData->pOctetStrValue));
+}
+
+INT4
+IfAliasGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfAlias (pMultiIndex->pIndex[0].i4_SLongValue,
+                           pMultiData->pOctetStrValue));
+}
+
+INT4
+IfCounterDiscontinuityTimeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfXTable (pMultiIndex->pIndex[0].i4_SLongValue)
+        == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfCounterDiscontinuityTime
+            (pMultiIndex->pIndex[0].i4_SLongValue, &pMultiData->u4_ULongValue));
+}
+
+INT4
+IfStackHigherLayerGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfStackTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].i4_SLongValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    pMultiData->i4_SLongValue = pMultiIndex->pIndex[0].i4_SLongValue;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfStackLowerLayerGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfStackTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].i4_SLongValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    pMultiData->i4_SLongValue = pMultiIndex->pIndex[1].i4_SLongValue;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfStackStatusTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                   tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfStackStatus (pu4Error,
+                                    pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiIndex->pIndex[1].i4_SLongValue,
+                                    pMultiData->i4_SLongValue));
+}
+
+INT4
+IfStackStatusSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfStackStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 pMultiIndex->pIndex[1].i4_SLongValue,
+                                 pMultiData->i4_SLongValue));
+}
+
+INT4
+IfStackStatusGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfStackTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].i4_SLongValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfStackStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                 pMultiIndex->pIndex[1].i4_SLongValue,
+                                 &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressAddressGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfRcvAddressTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].pOctetStrValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    MEMCPY (pMultiData->pOctetStrValue->pu1_OctetList,
+            pMultiIndex->pIndex[1].pOctetStrValue->pu1_OctetList,
+            pMultiIndex->pIndex[1].pOctetStrValue->i4_Length);
+    pMultiData->pOctetStrValue->i4_Length =
+        pMultiIndex->pIndex[1].pOctetStrValue->i4_Length;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfRcvAddressStatusTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                        tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfRcvAddressStatus (pu4Error,
+                                         pMultiIndex->pIndex[0].i4_SLongValue,
+                                         pMultiIndex->pIndex[1].pOctetStrValue,
+                                         pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressStatusSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfRcvAddressStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                      pMultiIndex->pIndex[1].pOctetStrValue,
+                                      pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressStatusGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfRcvAddressTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].pOctetStrValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfRcvAddressStatus (pMultiIndex->pIndex[0].i4_SLongValue,
+                                      pMultiIndex->pIndex[1].pOctetStrValue,
+                                      &pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressTypeTest (UINT4 *pu4Error, tSnmpIndex * pMultiIndex,
+                      tRetVal * pMultiData)
+{
+
+    return (nmhTestv2IfRcvAddressType (pu4Error,
+                                       pMultiIndex->pIndex[0].i4_SLongValue,
+                                       pMultiIndex->pIndex[1].pOctetStrValue,
+                                       pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressTypeSet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    return (nmhSetIfRcvAddressType (pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiIndex->pIndex[1].pOctetStrValue,
+                                    pMultiData->i4_SLongValue));
+}
+
+INT4
+IfRcvAddressTypeGet (tSnmpIndex * pMultiIndex, tRetVal * pMultiData)
+{
+
+    if (nmhValidateIndexInstanceIfRcvAddressTable
+        (pMultiIndex->pIndex[0].i4_SLongValue,
+         pMultiIndex->pIndex[1].pOctetStrValue) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return (nmhGetIfRcvAddressType (pMultiIndex->pIndex[0].i4_SLongValue,
+                                    pMultiIndex->pIndex[1].pOctetStrValue,
+                                    &pMultiData->i4_SLongValue));
+}
+
+INT4
+GetNextIndexIfRcvAddressTable (tSnmpIndex * pFirstMultiIndex,
+                               tSnmpIndex * pNextMultiIndex)
+{
+    INT4                i4ifIndex;
+    tSNMP_OCTET_STRING_TYPE *p1ifRcvAddressAddress;
+    p1ifRcvAddressAddress = pNextMultiIndex->pIndex[1].pOctetStrValue;    /* not-accessible */
+    if (pFirstMultiIndex == NULL)
+    {
+        if (nmhGetFirstIndexIfRcvAddressTable (&i4ifIndex,
+                                               p1ifRcvAddressAddress)
+            == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    else
+    {
+        if (nmhGetNextIndexIfRcvAddressTable
+            (pFirstMultiIndex->pIndex[0].i4_SLongValue, &i4ifIndex,
+             pFirstMultiIndex->pIndex[1].pOctetStrValue,
+             p1ifRcvAddressAddress) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    pNextMultiIndex->pIndex[0].i4_SLongValue = i4ifIndex;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfXTableDep (UINT4 *pu4Error, tSnmpIndexList * pSnmpIndexList,
+             tSNMP_VAR_BIND * pSnmpvarbinds)
+{
+    return (nmhDepv2IfXTable (pu4Error, pSnmpIndexList, pSnmpvarbinds));
+}
+
+INT4
+GetNextIndexIfStackTable (tSnmpIndex * pFirstMultiIndex,
+                          tSnmpIndex * pNextMultiIndex)
+{
+    INT4                i4ifStackHigherLayer;
+    INT4                i4ifStackLowerLayer;
+    if (pFirstMultiIndex == NULL)
+    {
+        if (nmhGetFirstIndexIfStackTable (&i4ifStackHigherLayer,
+                                          &i4ifStackLowerLayer) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    else
+    {
+        if (nmhGetNextIndexIfStackTable
+            (pFirstMultiIndex->pIndex[0].i4_SLongValue, &i4ifStackHigherLayer,
+             pFirstMultiIndex->pIndex[1].i4_SLongValue,
+             &i4ifStackLowerLayer) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    pNextMultiIndex->pIndex[0].i4_SLongValue = i4ifStackHigherLayer;
+    pNextMultiIndex->pIndex[1].i4_SLongValue = i4ifStackLowerLayer;
+    return SNMP_SUCCESS;
+}
+
+INT4
+IfTableDep (UINT4 *pu4Error, tSnmpIndexList * pSnmpIndexList,
+            tSNMP_VAR_BIND * pSnmpvarbinds)
+{
+    return (nmhDepv2IfTable (pu4Error, pSnmpIndexList, pSnmpvarbinds));
+}
+
+INT4
+GetNextIndexIfXTable (tSnmpIndex * pFirstMultiIndex,
+                      tSnmpIndex * pNextMultiIndex)
+{
+    INT4                i4ifIndex;
+    if (pFirstMultiIndex == NULL)
+    {
+        if (nmhGetFirstIndexIfXTable (&i4ifIndex) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    else
+    {
+        if (nmhGetNextIndexIfXTable (pFirstMultiIndex->pIndex[0].i4_SLongValue,
+                                     &i4ifIndex) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    pNextMultiIndex->pIndex[0].i4_SLongValue = i4ifIndex;
+    return SNMP_SUCCESS;
+}
+
+INT4
+GetNextIndexIfTable (tSnmpIndex * pFirstMultiIndex,
+                     tSnmpIndex * pNextMultiIndex)
+{
+    INT4                i4ifIndex;
+    if (pFirstMultiIndex == NULL)
+    {
+        if (nmhGetFirstIndexIfTable (&i4ifIndex) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    else
+    {
+        if (nmhGetNextIndexIfTable (pFirstMultiIndex->pIndex[0].i4_SLongValue,
+                                    &i4ifIndex) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    pNextMultiIndex->pIndex[0].i4_SLongValue = i4ifIndex;
+    return SNMP_SUCCESS;
+}

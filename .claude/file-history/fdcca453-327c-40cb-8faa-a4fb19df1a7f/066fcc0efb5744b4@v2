@@ -1,0 +1,320 @@
+# Plan E PoC (trustAccess) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 用 trustAccess 一個群組,驗證 Plan E 的核心機制 —— in-master 與 framework AgentX subagent **併存註冊同一顆 iss_build==0 OID**,in-master 贏 wire(SET 留 in-master 原生原子),GET 由 in-master 前送到 framework(快)。**只驗機制**,forward 閘門(list vs flag)PoC 過後再定。
+
+**Architecture:** trustAccess 加進 framework 的 `g_reuse_srcs[]`(framework 註冊+GET 服務),但**保留** in-master 的 `MOX_SNMP_INIT_ENTRY`(不像 Plan D 註解掉)→ 刻意 dual registration。framework 註冊給較低優先權(priority 數值較大),in-master 預設 127 贏 wire。in-master 在 `mox_snmp_handle_entry` 的 `MODE_IS_GET` 分支,對 trustAccess trustedIp 表(硬寫 OID 前綴,最窄 blast radius)呼叫新增的 `mox_snmp_forward_get_to_framework()`,迭代該 OID 的 subtree、挑 handler 非自身(`mox_snmp_handle_entry`)的 framework 註冊前送。
+
+**Tech Stack:** net-snmp 5.9.3 (master agentx + ies-auto-mibs dlmod, C)、app_moxa_framework AgentX subagent (Rust)、lib_moxa_ies_auto_mibs / lib_moxa_rust_ies_auto_mibs (C+Rust 對映)、buildroot。
+
+## Global Constraints
+
+- Codebase root: `/home/moxa/mds4xgl3/buildroot/dl`;branch `2023.02.11_develop`。
+- **無 unit-test 框架**:每個 task 的「測試」= (a) build 過 + (b) grep/結構檢查 + (c) 上 DUT snmpwalk/snmpset/`show snmp agentx statistics` 行為。
+- Build order(既有慣例):`lib_moxa_ies_auto_mibs` → `lib_moxa_rust_ies_auto_mibs` → `app_moxa_framework` 與 `3rdparty_net_snmp` → final `make`。
+- **PoC scope**:只碰 trustAccess trustedIp 表(`.1.3.6.1.4.1.8691.602.1.4.1.2`)。forward 閘門用**最窄硬寫 OID 前綴**,不動 agentx_owned.list、不加通用 flag 判斷。
+- **Plan E 關鍵不變量**:trustAccess `MOX_SNMP_INIT_ENTRY` **保持 active**(in-master 續持有 → SET 留 in-master);這是與 Plan D「註解 INIT_ENTRY 交接」的分野(supersede ADR-0001 #4 / ADR-0002,見 ADR-0003)。
+- 治理:`~/mds4xgl3/.adr/ADR-0003`(Proposed)。PoC 通過才轉 Accepted 並(先問 user)標 ADR-0001/0002 Superseded。
+- Commit 訊息前綴用 `Plan E PoC:`;結尾照 repo 慣例。
+
+---
+
+### Task 1: framework subagent 註冊 + GET 服務 trustAccess(保留 in-master INIT_ENTRY)
+
+**Files:**
+- Modify: `lib_moxa_ies_auto_mibs/src/mapping_reuse.c`(加 include + `g_reuse_srcs[]` 一列)
+- Verify only(不改): `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c:352`(trustAccess INIT_ENTRY 必須維持 active)
+
+**Interfaces:**
+- Consumes: `mxSysTrustAccess_MibEntry[]`(`net_mx_trustAccess.h`,5 entries,`.1.3.6.1.4.1.8691.602.1.4.*`,含 trustedIp 表 + rowStatus 欄)。既有分類器 `is_index_table()` / rowStatus→`IES_COL_ROWSTATUS`(ADR-0001,mxTrap 同款)。
+- Produces: framework `all_oids()` 含 trustAccess 4 顆 column OID;framework `handle_get` 能對其回 config 值。
+
+- [ ] **Step 1: 加 header include**
+
+在 `mapping_reuse.c:46`(`net_mx_trap_notification.h` include 之後)加:
+```c
+#include "net_mx_trustAccess.h"     /* mxSysTrustAccess_MibEntry[] (index-table + RowStatus) */
+```
+
+- [ ] **Step 2: 把 trustAccess 加進 g_reuse_srcs[](保留 INIT_ENTRY,加註解說明)**
+
+在 `mapping_reuse.c` 的 `g_reuse_srcs[]`(現行 line 97 `REUSE_SRC(mxTrap_MibEntry, NULL)` 之後、`}` 之前)加:
+```c
+    /* Plan E (ADR-0003): trustAccess is dual-registered — framework serves GET
+     * here, but in-master KEEPS MOX_SNMP_INIT_ENTRY(mxSysTrustAccess_MibEntry)
+     * so SET (incl. trustedIp RowStatus create/destroy) stays in-master and wins
+     * the wire by priority. Do NOT comment out its INIT_ENTRY. RowStatus col in
+     * framework is GET-only (active/notInService); framework SET is never hit. */
+    REUSE_SRC(mxSysTrustAccess_MibEntry, NULL),
+```
+
+- [ ] **Step 3: 確認 in-master INIT_ENTRY 未被動到**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -n "MOX_SNMP_INIT_ENTRY(mxSysTrustAccess_MibEntry)" 3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c
+```
+Expected: line 352 一行,**無** `/* */` 包住(in-master 續持有)。
+
+- [ ] **Step 4: 結構驗證**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -n "net_mx_trustAccess.h\|mxSysTrustAccess_MibEntry" lib_moxa_ies_auto_mibs/src/mapping_reuse.c
+```
+Expected: include 一行 + `REUSE_SRC(mxSysTrustAccess_MibEntry, NULL)` 一行。
+
+- [ ] **Step 5: Build(lib → rust → framework)**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot
+make lib_moxa_ies_auto_mibs-rebuild lib_moxa_rust_ies_auto_mibs-rebuild app_moxa_framework-rebuild 2>&1 | tail -20
+```
+Expected: 三個 package build 過,無 error。
+
+- [ ] **Step 6: Commit**
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+git -C lib_moxa_ies_auto_mibs add src/mapping_reuse.c
+git -C lib_moxa_ies_auto_mibs commit -m "Plan E PoC: framework serves trustAccess GET via g_reuse_srcs (keep in-master INIT_ENTRY)"
+```
+
+---
+
+### Task 2: framework AgentX 註冊給較低優先權(in-master 贏 wire、驗 dual registration 併存)
+
+**Files:**
+- Modify: `lib_moxa_snmp_agentx/src/agentx.c`(`MoxaAgentX_RegisterInstance`,註冊前設 `reg->priority`)
+
+**Interfaces:**
+- Consumes: `netsnmp_handler_registration *reg`(`netsnmp_create_handler_registration` 產出;有 `int priority` 欄,預設 `DEFAULT_MIB_PRIORITY`=127)。
+- Produces: framework 所有 instance 註冊 priority=200(> in-master 127 → 較低優先權);in-master 贏 wire,framework 為同 OID 的 sibling subtree。
+
+> 為何全域設 200 安全:其餘 g_reuse_srcs 群組(mxTrap/email/…)INIT_ENTRY 已註解 → framework 單獨註冊,priority 值無競爭者、無影響。只有 trustAccess 是 dual,200 讓 in-master(127)贏。Plan C 的 ISS dual 是「不同 OID region」(欄 vs 群組),非同 region 重複,不受此影響。
+
+- [ ] **Step 1: 設 framework 註冊 priority**
+
+在 `lib_moxa_snmp_agentx/src/agentx.c` 的 `MoxaAgentX_RegisterInstance`,於 `netsnmp_create_handler_registration(...)` 成功後、`netsnmp_register_instance(reg)` 之前加:
+```c
+    /* Plan E (ADR-0003): lower precedence than in-master (default 127) so the
+     * in-master ies-auto-mibs registration wins the wire (SET stays in-master);
+     * framework is the sibling subtree that in-master forwards GET to. */
+    reg->priority = 200;
+```
+
+- [ ] **Step 2: 結構驗證**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -n "reg->priority = 200\|netsnmp_register_instance" lib_moxa_snmp_agentx/src/agentx.c
+```
+Expected: `reg->priority = 200` 在 `netsnmp_register_instance` 之前。
+
+- [ ] **Step 3: Build**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot
+make lib_moxa_snmp_agentx-rebuild app_moxa_framework-rebuild 3rdparty_net_snmp-rebuild 2>&1 | tail -20
+make 2>&1 | tail -20
+```
+Expected: build + final image 過。
+
+- [ ] **Step 4: DUT 驗證 —— dual registration 併存(RISK #1)**
+
+燒錄開機。DUT(telnet 6023 或 shell)+ 管理機:
+```bash
+# a. framework subagent 連上 master
+#    DUT: show snmp agentx statistics → Register>0、Rx/Tx 遞增
+# b. 兩個註冊都在(in-master + framework),net-snmp 未判 DUPLICATE 拒絕:
+#    管理機:
+snmpwalk -v2c -c public <dut> .1.3.6.1.4.1.8691.602.1.4.1.2   # trustedIp 表可走(有值)
+#    DUT dmesg/snmpd log:不應出現 "duplicate registration" 對 8691.602.1.4.1.2 的 error
+```
+Expected: trustedIp walk 有回值;無 duplicate-registration 錯誤 → **RISK #1 通過**(net-snmp 依 priority 併存同 OID 兩註冊)。
+
+- [ ] **Step 5: DUT 驗證 —— wire SET 落 in-master(rowStatus 原子)**
+```bash
+# 建一列 trustedIp(createAndGo)+ 設 IP/mask,再 destroy:
+snmpset -v2c -c private <dut> \
+  .1.3.6.1.4.1.8691.602.1.4.1.2.1.4.<idx> i 4        # rowStatus createAndGo
+snmpset -v2c -c private <dut> \
+  .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.<idx> a 192.168.1.5   # ipAddress
+#    確認 config layer 反映(/api/v1/.../trustedAccess/trustedIp/<idx-1>/...)
+snmpset -v2c -c private <dut> \
+  .1.3.6.1.4.1.8691.602.1.4.1.2.1.4.<idx> i 6        # rowStatus destroy
+```
+Expected: createAndGo/destroy 成功且原子(config 正確增減一列)→ 證明 wire SET 由 **in-master**(priority 127 贏)處理,非 framework。若失敗/非原子 → priority 沒讓 in-master 贏,需調整(見 §Risks)。
+
+- [ ] **Step 6: Commit**
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+git -C lib_moxa_snmp_agentx add src/agentx.c
+git -C lib_moxa_snmp_agentx commit -m "Plan E PoC: framework AgentX register priority 200 (in-master wins wire)"
+```
+
+---
+
+### Task 3: in-master GET 前送 framework(迭代 subtree 挑非自身 handler)
+
+**Files:**
+- Modify: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`(新增 `mox_snmp_forward_get_to_framework()` + `MODE_IS_GET` 分支插入)
+
+**Interfaces:**
+- Consumes: `netsnmp_subtree_find()` / `netsnmp_subtree_find_next()`(`agent_registry.h`);`netsnmp_subtree` 有 `->next`(sibling 串)、`->reginfo`;`reginfo->handler->access_method`(＝註冊時的 node handler,in-master 是 `mox_snmp_handle_entry`)。既有 `mox_snmp_forward_get_to_iss()`(`ies_auto_mibs.c:3144`)為同型範本。
+- Produces: 對 trustedIp 表 column 的 GET,前送 framework 並回 `SNMP_ERR_NOERROR`;framework 未連 → 回 -1,caller fall through 到既有 REST 慢路徑。
+
+- [ ] **Step 1: 加硬寫 trustedIp OID 前綴 + 前送函式**
+
+在 `ies_auto_mibs.c` 的 `mox_snmp_forward_get_to_iss()` 定義之後(現行 line ~3168 `}` 之後)插入:
+```c
+/* Plan E PoC (ADR-0003): forward a trustedIp-table GET to the framework AgentX
+ * subagent. Unlike the ISS path (probe OID), here in-master AND framework
+ * dual-register the SAME OID, so we locate framework's registration by iterating
+ * the subtrees covering this OID and picking the one whose handler is NOT our own
+ * (mox_snmp_handle_entry). in-master wins the wire (priority 127 < framework 200);
+ * this only runs for GET. Returns 0 if forwarded, -1 if framework not present. */
+static const oid mox_trustedip_prefix[] = { 1,3,6,1,4,1,8691,602,1,4,1,2 };
+#define MOX_TRUSTEDIP_PREFIX_LEN ((int)(sizeof(mox_trustedip_prefix)/sizeof(oid)))
+
+static int
+mox_snmp_entry_is_trustedip(struct ies_auto_mibs_entry *entry)
+{
+    int i;
+    if ( entry->oid_len < MOX_TRUSTEDIP_PREFIX_LEN )
+    {
+        return 0;
+    }
+    for ( i = 0; i < MOX_TRUSTEDIP_PREFIX_LEN; i++ )
+    {
+        if ( (oid) entry->oid_list[i] != mox_trustedip_prefix[i] )
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+mox_snmp_forward_get_to_framework(struct ies_auto_mibs_entry *entry,
+                                  netsnmp_agent_request_info *reqinfo,
+                                  netsnmp_request_info       *request)
+{
+    netsnmp_subtree      *sub;
+    netsnmp_request_info *saved_next;
+
+    /* Walk every subtree registered at this exact OID; dual registration links
+     * same-region different-priority subtrees via ->next. Pick the framework one
+     * (handler != our own). */
+    sub = netsnmp_subtree_find(entry->oid_list, entry->oid_len, NULL, NULL);
+    while ( sub != NULL )
+    {
+        if ( sub->reginfo != NULL && sub->reginfo->handler != NULL &&
+             sub->reginfo->handler->access_method != mox_snmp_handle_entry )
+        {
+            saved_next    = request->next;
+            request->next = NULL;
+            (void) netsnmp_call_handlers(sub->reginfo, reqinfo, request);
+            request->next = saved_next;
+            return 0;
+        }
+        sub = sub->next;
+    }
+    return -1;                           /* framework subagent not present */
+}
+```
+> RISK #2 的唯一未定點:同 OID、不同 priority 的兩 subtree 是否掛在 `->next`。若 PoC 發現不是,改用迴圈內 `netsnmp_subtree_find_next(sub->start_a, sub->start_len, sub, NULL)` 續找(Step 4 以 gdb/log 核實後定案)。
+
+- [ ] **Step 2: 在 MODE_IS_GET 插入前送(trustedIp 專用,ISS 區塊之後)**
+
+在 `mox_snmp_handle_entry` 的 `MODE_IS_GET` 分支,現行 Plan C ISS 前送區塊(`ies_auto_mibs.c:3238-3250`)**之後**、`moxaSnmpHandle_ChkEntryGetValue(entry)`(line 3252)**之前**插入:
+```c
+        /* Plan E PoC (ADR-0003): trustedIp-table GET → framework AgentX (fast);
+         * SET stays in-master. Narrow hardcoded gate (PoC only). */
+        if ( mox_snmp_entry_is_trustedip(entry) )
+        {
+            if ( mox_snmp_forward_get_to_framework(entry, reqinfo, request) == 0 )
+            {
+                return SNMP_ERR_NOERROR;
+            }
+            /* framework unavailable → fall through to local REST path */
+        }
+```
+
+- [ ] **Step 3: 結構驗證 + Build**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -n "mox_snmp_forward_get_to_framework\|mox_snmp_entry_is_trustedip\|mox_trustedip_prefix" 3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c
+cd /home/moxa/mds4xgl3/buildroot
+make 3rdparty_net_snmp-rebuild 2>&1 | tail -20
+make 2>&1 | tail -20
+```
+Expected: 三個符號都在;build + image 過。
+
+- [ ] **Step 4: DUT 驗證 —— GET 前送 framework(RISK #2)**
+
+燒錄開機。管理機 + DUT:
+```bash
+# a. 前後對照 framework subagent 的 Rx Get 統計
+#    DUT: show snmp agentx statistics   (記下 Rx Get/GetNext)
+snmpwalk -v2c -c public <dut> .1.3.6.1.4.1.8691.602.1.4.1.2   # trustedIp 表
+#    DUT: show snmp agentx statistics   → Rx Get/GetNext 應增加(GET 前送 framework)
+# b. 值正確(與 config 一致)
+# c. 延遲對照(前送應快於 REST ~600ms)
+for i in $(seq 1 30); do /usr/bin/time -f "%e" \
+  snmpget -v2c -c public <dut> .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.<idx> \
+  >/dev/null 2>>/tmp/te.txt; done
+sort -n /tmp/te.txt | awk '{a[NR]=$1} END{print "P50",a[int(NR*.5)]}'
+```
+Expected: (a) framework Rx Get 增加 →前送成立;(b) 值正確;(c) P50 明顯低於 REST 慢路徑 → **RISK #2 通過**。若 framework Rx 沒動 → subtree 迭代沒找到 framework 註冊,依 Step 1 註記改 `netsnmp_subtree_find_next` 重試。
+
+- [ ] **Step 5: Commit**
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+git -C 3rdparty_net_snmp add ies-auto-mibs/ies_auto_mibs.c
+git -C 3rdparty_net_snmp commit -m "Plan E PoC: forward trustedIp GET to framework AgentX (iterate subtree, non-self handler)"
+```
+
+---
+
+### Task 4: PoC 收斂 —— go/no-go + ADR-0003 更新
+
+**Files:**
+- Modify: `~/mds4xgl3/.adr/ADR-0003-iss0-get-forward-framework-set-in-master.md`(記 PoC 結果)
+
+- [ ] **Step 1: 彙整三風險結果**
+
+對照(來自 Task 2/3 DUT):
+- RISK #1 dual registration 併存(priority):____(pass/fail + 佐證)
+- RISK #2 subtree 迭代找到 framework 前送:____(pass/fail;用 `->next` 或 `find_next`)
+- RISK #3 framework 全註冊/GET 服務成本:____(trustAccess 註冊筆數、啟動/記憶體觀察)
+
+- [ ] **Step 2: 決策**
+
+- 全 pass → Plan E 機制成立。下一步(**另開 generalization plan**):(a) 決定 forward 閘門(agentx_owned.list 顯式 vs iss_build+mode 隱式,見設計 §2);(b) 把前送從硬寫 trustedIp 前綴推廣到全 iss_build==0;(c) framework 全 iss_build==0 群組加 g_reuse_srcs。
+- 有 fail → 記錄失敗點,回設計檢討(priority 模型 / subtree API / 改回 Plan D 對該類表)。
+
+- [ ] **Step 3: 更新 ADR-0003**
+
+把 PoC 結果寫進 ADR-0003 的 Consequences 末段(status 維持 Proposed;全推並穩定後才轉 Accepted、並先問 user 才標 ADR-0001/0002 Superseded)。
+
+- [ ] **Step 4: Commit(ADR 不進 package repo)**
+
+ADR 在 `~/mds4xgl3/.adr/`,依 adr skill 預設不 commit(除非 user 要求)。回報 PoC 結果與檔路徑給 user。
+
+---
+
+## Self-Review notes
+- Spec §1 目標(GET 快/SET in-master/一致性)→ Task 1(framework GET)+ Task 2(SET 留 in-master)+ Task 3(前送)全覆蓋。
+- Spec §6 三風險 → Task 2 Step4(RISK1)、Task 3 Step4(RISK2)、Task 4 Step1(RISK3)逐一驗。
+- Spec §4.3「保留/還原 INIT_ENTRY」→ 本 PoC trustAccess INIT_ENTRY 本就 active,Task 1 Step3 明確驗它未被動;Plan D 已註解的群組不在 PoC 範圍。
+- 閘門(list vs flag)刻意延後 → 對齊 user「先只驗機制,閘門之後再定」;PoC 用最窄硬寫 OID 前綴限制 blast radius 至 trustedIp 表。
+- 型別一致:`mox_snmp_forward_get_to_framework` / `mox_snmp_entry_is_trustedip` / `mox_trustedip_prefix` 在 Task 3 定義且只在該檔用;`netsnmp_subtree` / `access_method` 為 net-snmp 既有;範本 `mox_snmp_forward_get_to_iss` 同檔既有。
+- 未定點僅一處(subtree 同 OID 不同 priority 是否掛 `->next`),明列於 Task 3 Step1 並給 `netsnmp_subtree_find_next` 備援 → 屬 PoC 要驗的事,非 placeholder。

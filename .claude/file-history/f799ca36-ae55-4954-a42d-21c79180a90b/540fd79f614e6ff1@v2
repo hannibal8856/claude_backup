@@ -1,0 +1,10 @@
+[package]
+name = "lib_moxa_rust_ies_auto_mibs"
+version = "0.1.0"
+edition = "2021"
+
+# Pure FFI over the C lib `lib_moxa_ies_auto_mibs` (libmoxaiesautomibs.so).
+# Library crate: compiles to an rlib without resolving the C symbols (resolved
+# when the final binary links), so it type-checks with a plain `cargo build`.
+
+[dependencies]

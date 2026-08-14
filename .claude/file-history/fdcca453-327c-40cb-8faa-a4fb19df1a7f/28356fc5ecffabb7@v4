@@ -1,0 +1,3690 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+
+#ifndef _IES_AUTO_MIBS_C_
+#define _IES_AUTO_MIBS_C_
+
+/* According to earlier standards */
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <time.h>               /* clock_getres */
+
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+#include <dlfcn.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+
+#include <stdlib.h>         /* malloc  */
+#include <sys/sysinfo.h>    /* sysinfo */
+
+#include <sys/mman.h>
+
+#include "queue.h"
+#include "ies_common.h"
+#include "ies_auto_mibs_handle.h"
+#include "ies_auto_mibs_read_create.h"
+#include "ies_auto_mibs_handle_table.h"
+
+#include "ies_auto_mibs.h"
+#include "ies_auto_mibs_handle_file_buffer.h"
+
+#include "lib_moxa_framework_uri/lib_moxa_framework_uri.h"
+#include "parson/parson.h"
+
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_system/lib_moxa_system_product_id_def.h"
+#include "libmoxa_util/util_shell_cmd.h"
+#include "libmoxa_util/util_debug.h"
+
+#include "moxa_snmp_const.h"
+#include "moxa_snmp_const_la.h"
+#include "moxa_snmp_const_vlan.h"
+#include "moxa_snmp_const_qos.h"
+#include "moxa_snmp_const_psec.h"
+#include "moxa_snmp_const_turboChain.h"
+#include "moxa_snmp_read_create.h"
+#include "moxa_snmp_handle_util.h"
+#include "moxa_snmp_handle_util_la.h"
+#include "moxa_snmp_handle_util_vlan.h"
+#include "moxa_snmp_handle_util_turboChain.h"
+#include "moxa_snmp_handle_util_pre_config.h"
+#include "moxa_snmp_handle_entry_dependency_check.h"
+#include "moxa_snmp_handle_entry_get_value.h"
+#include "moxa_snmp_handle_entry_set_value.h"
+
+
+/* In-process replacement for /sbin/ies_uri_handle_client --type read.
+ * The implementation lives in libies_uri_handle_hook.so (built by
+ * app_moxa_iss_10_1_0/code/uri_ctrl_hook). We dlopen() at runtime
+ * instead of link-time to avoid a circular buildroot dependency
+ * (3rdparty_net_snmp <- iss <- dhcpsnp <- lib_moxa_snmp_plugin <- 3rdparty_net_snmp). */
+typedef ies_handle_t (*pfn_ies_uri_handle_read_t)(const unsigned char *uri,
+                                                    const unsigned char *fname);
+typedef ies_handle_t (*pfn_IssSnmpURI_readRemapper_t)(unsigned char *uriString,
+                                                       unsigned char *iputFile,
+                                                       unsigned char *oputFile);
+
+static pfn_ies_uri_handle_read_t     g_ies_uri_handle_read     = NULL;
+static pfn_IssSnmpURI_readRemapper_t g_IssSnmpURI_readRemapper = NULL;
+static int                            g_uri_hook_load_state    = 0; /* 0=untried 1=ok -1=failed */
+
+static int
+mox_snmp_uri_hook_load(void)
+{
+    void *h;
+
+    if ( g_uri_hook_load_state != 0 )
+    {
+        return g_uri_hook_load_state;
+    }
+
+    h = dlopen("libies_uri_handle_hook.so", RTLD_LAZY | RTLD_GLOBAL);
+    if ( NULL == h )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP,
+            "dlopen(libies_uri_handle_hook.so) failed: %s\n", dlerror());
+        g_uri_hook_load_state = -1;
+        return -1;
+    }
+
+    g_ies_uri_handle_read =
+        (pfn_ies_uri_handle_read_t) dlsym(h, "ies_uri_handle_read");
+    g_IssSnmpURI_readRemapper =
+        (pfn_IssSnmpURI_readRemapper_t) dlsym(h, "IssSnmpURI_readRemapper");
+
+    if ( NULL == g_ies_uri_handle_read || NULL == g_IssSnmpURI_readRemapper )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP,
+            "dlsym failed: ies_uri_handle_read=%p IssSnmpURI_readRemapper=%p\n",
+            (void *)g_ies_uri_handle_read, (void *)g_IssSnmpURI_readRemapper);
+        g_uri_hook_load_state = -1;
+        return -1;
+    }
+
+    g_uri_hook_load_state = 1;
+    return 1;
+}
+
+
+int
+mox_snmp_handle_entry
+(
+    netsnmp_mib_handler                   *handler,
+    netsnmp_handler_registration          *reginfo,
+    netsnmp_agent_request_info            *reqinfo,
+    netsnmp_request_info                  *request
+);
+
+ies_handle_t
+mox_snmp_init_entry
+(
+    struct ies_auto_mibs_entry *entry_array, 
+    int                         entry_array_len
+);
+
+ies_handle_t
+entry_handle_check_value_file
+(
+    char                        fname[IES_MAX_FILE], 
+    struct ies_auto_mibs_entry *entry
+);
+
+int
+mox_snmp_flask_handle_result
+(
+    struct LibFrameworkUri_Handle *uri_handle,
+    JSON_Value                    *json_val,
+    int                            ret
+);
+
+#define MAX_BUF_REGINFO  20480
+#define MAX_TOKEN_NUM    6  // max rwuser (5) + original toekn (1)
+#define RWUSER_NAME_SIZE 33 // username max length is 32
+#define TOKEN_SIZE       512
+
+char flask_server_ip    []                 = "127.0.0.1";
+char security_token     [512]              = {0x0};
+char security_tokens[MAX_TOKEN_NUM][TOKEN_SIZE] = {{0x0}};
+char rwuser_list[MAX_TOKEN_NUM-1][RWUSER_NAME_SIZE] = {{0x0}};  // Record rwuser
+
+netsnmp_handler_registration *buf_reginfo        [MAX_BUF_REGINFO]  = {0x0};
+int      cnt_reginfo;
+
+int                      gMaxPortInDevice = 28;
+int                      gMaxPortChannel  = 14;
+int                      gMaxPortNumber   = 28 + 14;
+int                      gMaxDaysOfWeek   = 7;
+int                      gMaxPortMirrorTable = 7;
+int                      gMaxPortMirrorTablePortList = 64;
+uint32_t                 gProductId;
+uint32_t                 aMaxPortNumPtr;
+
+struct snmp_table_snapshot gSnmpTblSnapShot;
+struct fileBuffer_fileCtrl gfileBufCtrlBlock;
+
+#include "ies_auto_mibs_handle_parson_wrap.c"
+#include "ies_auto_mibs_handle_iss_remap_table.c"
+#include "ies_auto_mibs_handle_iss_remap_merge_table.c"
+#include "ies_auto_mibs_handle_system_command.c"
+#include "ies_auto_mibs_handle_generate_sys_objectID.c"
+#include "ies_auto_mibs_handle_uri_fixed_value.c"
+#include "ies_auto_mibs_generate_iss_remap_table.c"
+#include "moxa_snmp_handle_util.c"
+#include "moxa_snmp_handle_util_vlan.c"
+#include "moxa_snmp_handle_util_la.c"
+#include "moxa_snmp_handle_util_turboChain.c"
+#include "moxa_snmp_handle_util_pre_config.c"
+#include "moxa_snmp_handle_entry_dependency_check.c"
+#include "moxa_snmp_handle_entry_get_value.c"
+#include "moxa_snmp_handle_entry_set_value.c"
+#include "moxa_snmp_handle_event.c"
+
+/*-------------------------------------------------------------------+
+ * Function           : IS_SCALAR_ENTRY
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+IS_SCALAR_ENTRY
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+    return ( 0 == entry->oid_index ) ? IES_NOERR : IES_ERR;
+}
+
+
+/*-------------------------------------------------------------------+
+   Function Name   : util_timeDiff
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+void util_timeDiff
+(
+    char            *msg,
+    struct timespec *timeBefore, 
+    struct timespec *timeAfter
+) 
+{
+  struct timespec    timeTemp;
+  if ((timeAfter->tv_nsec - timeBefore->tv_nsec) < 0 ) 
+  {
+    timeTemp.tv_sec  = timeAfter->tv_sec  - timeBefore->tv_sec  - 1 ;
+    timeTemp.tv_nsec = timeAfter->tv_nsec - timeBefore->tv_nsec + 1000000000;
+  } 
+  else 
+  {
+    timeTemp.tv_sec  = timeAfter->tv_sec  - timeBefore->tv_sec;
+    timeTemp.tv_nsec = timeAfter->tv_nsec - timeBefore->tv_nsec;
+  }
+
+  LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%-20s:\'%02ld\'  \'%09ld\' \n", msg, 
+    timeTemp.tv_sec , timeTemp.tv_nsec);
+
+  return;
+}
+
+
+/*-------------------------------------------------------------------+
+   Function Name   : util_table_snapshot_reset
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+ies_handle_t 
+util_table_snapshot_reset(void) 
+{
+    if ( strlen(gSnmpTblSnapShot.fname) >= 1 )
+    {
+        unlink(gSnmpTblSnapShot.fname);
+    }
+    memset(&gSnmpTblSnapShot, 0, sizeof(gSnmpTblSnapShot));
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+   Function Name   : util_table_snapshot_setup
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+ies_handle_t 
+util_table_snapshot_setup(char *fname, struct ies_auto_mibs_entry *entry)
+{
+    snprintf(gSnmpTblSnapShot.fname, sizeof(gSnmpTblSnapShot.fname), "%s", fname);
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &gSnmpTblSnapShot.timeTemp) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &gSnmpTblSnapShot.time_lastUpdate) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != fileBuffer_init(
+        &gfileBufCtrlBlock, fname, entry->oid_list, entry->oid_len - 1 ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gSnmpTblSnapShot.fname \'%d\'  \'%s\' \n", 
+        __func__, __LINE__, strlen(gSnmpTblSnapShot.fname) , gSnmpTblSnapShot.fname);
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d                  fname \'%d\'  \'%s\' \n", 
+        __func__, __LINE__, strlen(fname) , fname);
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilStoken_update_security_token
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilStoken_update_security_token(void)
+{
+    ies_handle_t  ret = 0;
+    FILE         *fp  = NULL;
+    FILE         *fp_token = NULL;
+    char          security_token_file[64]  = {0x0};
+    char          line[128] = {0};
+    char          username[RWUSER_NAME_SIZE] = {0};
+    // Token username is the original username prefixed with "snmp."
+    char          token_username[RWUSER_NAME_SIZE+5] = {0};
+    int           rwuser_count = 0;
+
+    snprintf(security_token_file, sizeof(security_token_file), 
+        "%s/s_token", AUTO_MIB_PATH);
+    unlink(security_token_file);
+
+    if ( 0 != LibUtil_CreateToken("snmp", "snmp", security_token_file) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    fp = fopen(security_token_file, "r");
+    if ( NULL == fp ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if (NULL == fgets(security_tokens[0], TOKEN_SIZE, fp) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        ret = IES_ERR;
+    }
+
+    fclose(fp);
+
+    if ( IES_ERR == ret ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    // Create new token for snmpv3 rwuser
+    fp = fopen(SNMPD_CONFIG_FILE, "r");
+    if (NULL == fp)
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (sscanf(line, "rwuser %s", username))
+        {
+            if (rwuser_count >= MAX_TOKEN_NUM - 1)
+            {
+                break;
+            }
+
+            snprintf(rwuser_list[rwuser_count], RWUSER_NAME_SIZE, username);
+
+            // Create token for rwuser
+            snprintf(security_token_file, sizeof(security_token_file), "%s/%s.s_token",
+                     AUTO_MIB_PATH, username);
+            unlink(security_token_file);
+
+            // Prefix the username with "snmp."
+            snprintf(token_username, sizeof(token_username), "snmp.%s", username);
+            if (0 != LibUtil_CreateToken(token_username, "snmp", security_token_file))
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                fclose(fp);
+                return IES_ERR;
+            }
+
+            // Restore token to token array
+            fp_token = fopen(security_token_file, "r");
+            if ( NULL == fp_token ) 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                fclose(fp);
+                return IES_ERR;
+            }
+            if (NULL == fgets(security_tokens[rwuser_count + 1], TOKEN_SIZE, fp_token) ) 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                ret = IES_ERR;
+            }
+            fclose(fp_token);
+
+            rwuser_count++;
+        }
+    }
+
+    fclose(fp); // snmpd.conf
+
+    if ( IES_ERR == ret ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilStoken_delete_security_token
+ *
+ * Description        : Delete token
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t
+utilStoken_delete_security_token(void)
+{
+    if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+        "/usr/sbin/app_moxa_token_module "
+        " -d -s snmp") )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilSNMP_get_oid_from_oidstr
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+int 
+utilSNMP_get_oid_from_oidstr
+(
+    char *oid_str, 
+    int   oid_str_len, 
+    oid   tmp_oid[MAX_OID_LEN]
+)
+{
+    char *oid_str_buf;
+    int   oid_str_index;
+    int   oid_num_index;
+
+    oid_str_index = 0;
+    for ( oid_num_index = 0; 
+          oid_num_index < MAX_OID_LEN; 
+          oid_num_index++) 
+    {
+
+        oid_str_buf = &oid_str[oid_str_index];
+        while (1) 
+        {
+            if (',' == oid_str[oid_str_index]) 
+            {
+                break;
+            }
+            if ('.' == oid_str[oid_str_index]) 
+            {
+                break;
+            }            
+            oid_str_index++;
+            if (oid_str_index >= oid_str_len) 
+            {
+                break;
+            }
+        }
+        oid_str[oid_str_index] = ' ';
+        tmp_oid[oid_num_index] = atoi(oid_str_buf);
+
+        oid_str_index++;
+        if (oid_str_index >= oid_str_len) 
+        {
+            break;
+        }
+    }
+    oid_num_index++;
+    return oid_num_index;
+}
+
+
+/*-------------------------------------------------------------------+
+   Function Name   : ies_uri_snmp_sprintf
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+int ies_uri_snmp_sprintf
+(
+    char   *buf, 
+    int     buf_len, 
+    int    *buf_pos, 
+    char   *fmt, 
+    ...
+)
+{
+
+    char   *buf_index;
+    int     total_len;
+    int     len;
+    va_list ap;
+
+    total_len = buf_len - *buf_pos;
+    buf_index = &buf[*buf_pos];
+
+    va_start(ap, fmt);
+    len = vsnprintf(buf_index, total_len, fmt, ap);
+    va_end(ap);
+
+    total_len -= len;
+    if (total_len > 0 ) 
+    {
+        *buf_pos += len;
+        return IES_NOERR;
+    }
+    return IES_ERR;
+}
+
+/*-------------------------------------------------------------------+
+   Function Name   : ies_uri_snmp_dump_oid2
+   Description     : 
+
+   Note            : 
++-------------------------------------------------------------------*/
+void utilSNMP_dump_oid
+(
+    char *msg, 
+    oid  *oid_buf,
+    int oid_len
+)
+{
+
+    int i = 0;
+    char oid_str[IES_MAX_OID] = {0x0};
+    int  oid_str_len          = 0;
+
+    if ( NULL == msg ) 
+    {
+        msg = "utilSNMP_dump_oid";
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s: oid len = \'%d\'\n", msg, oid_len);
+    oid_str_len = 0;
+    while ( i < oid_len ) 
+    {
+        ies_uri_snmp_sprintf((char *)oid_str, IES_MAX_OID, &oid_str_len, "%2.2d-", (unsigned int)oid_buf[i]);
+        i++;
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s\n", oid_str);
+}
+
+
+/*-------------------------------------------------------------------+
+   Function Name   : utilSNMP_fgets
+   Description     : 
+
+   cos fgets will stop when there is '\n' in read string.
+   but oid value like sysDesc will contain '\n' in oid value.
+   so, we need to improve fgets to make it overcome the '\n' issue.
+
++-------------------------------------------------------------------*/
+char * 
+utilSNMP_fgets
+(
+    char                         *file_buf,
+    int                           file_buf_size,
+    FILE                         *fp,
+    struct ies_auto_mibs_entry   *entry
+)
+{
+#define MAX_READ_COUNT  (8)
+    char tmp[IES_MAX_FILE_BUF] = {0x0};
+    int  i = 0, len = 0;
+    int  file_buf_idx = 0;
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI("stdsnmdb/sysDescr", entry->uri) )
+    {
+        for ( i = 0; i < MAX_READ_COUNT; i++ )
+        {
+            memset(tmp, 0, sizeof(tmp));
+            if ( NULL == fgets(tmp, sizeof(tmp), fp) ) 
+            {
+                return NULL;
+            }
+            if ( '#' == tmp[0] )
+            {
+                continue;
+            }
+            len = strlen(tmp);
+            len -= 2;
+            if ( IES_NOERR != ies_uri_snmp_sprintf(file_buf, file_buf_size, &file_buf_idx, "%s", tmp ) )
+            {
+                return NULL;
+            }
+            if ( '\'' == tmp[len] )
+            {
+                return file_buf;
+            }
+        }
+        return NULL;
+    }
+
+    return fgets(file_buf, file_buf_size, fp);
+
+#undef MAX_READ_COUNT
+}
+
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilSNMP_setOCT_to_bEntry
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilSNMP_setOCT_to_bEntry
+(
+    netsnmp_request_info           *request,
+    struct bits_entry              *bEntry,
+    int                             maxBitEntry
+)
+{
+#define CHECK_SNMP_BITS_ENABLE(index, indexBuff)   ( ((indexBuff)[(index)/8]) & ( 0x01 << ( 8 - (( index % 8 ) + 1)) ) )
+    char *buf;
+    int  i;
+
+    if ( maxBitEntry > ( request->requestvb->val_len * 8 ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    buf = request->requestvb->val.string;
+    for ( i = 0; i < maxBitEntry; i++ ) 
+    {
+        if ( CHECK_SNMP_BITS_ENABLE(i, buf) ) 
+        {
+            bEntry[i].enable = IES_SNMP_BITS_ENABLE;
+        } 
+        else 
+        {
+            bEntry[i].enable = IES_SNMP_BITS_DISABLE;
+        }
+    }
+    return IES_NOERR;
+#undef CHECK_SNMP_BITS_ENABLE
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilSNMP_setOCT_to_bEntry
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilSNMP_setOCT_to_portEntry
+(
+    netsnmp_request_info           *request,
+    struct uriPort_entry           *uri_port_entry,
+    int                             maxBitEntry
+)
+{
+#define CHECK_SNMP_BITS_ENABLE(index, indexBuff)   ( ((indexBuff)[(index)/8]) & ( 0x01 << ( 8 - (( index % 8 ) + 1)) ) )
+    char *buf;
+    int  i;
+    
+    if ( maxBitEntry > ( request->requestvb->val_len * 8 ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d maxBitEntry %d  request->requestvb->val_len %d\n", __func__, __LINE__, maxBitEntry, request->requestvb->val_len);
+        return IES_ERR;
+    }
+
+    buf = request->requestvb->val.string;
+    for ( i = 0; i < maxBitEntry; i++ ) 
+    {
+        if ( CHECK_SNMP_BITS_ENABLE(i, buf) ) 
+        {
+            uri_port_entry[i].enable = IES_SNMP_BITS_ENABLE;
+        } 
+        else 
+        {
+            uri_port_entry[i].enable = IES_SNMP_BITS_DISABLE;
+        }
+    }
+    return IES_NOERR;
+#undef CHECK_SNMP_BITS_ENABLE
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilSNMP_setOCT_to_daysEntry
+ *
+ * Description        :
+
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilSNMP_setOCT_to_daysEntry
+(
+    netsnmp_request_info           *request,
+    struct uriDaysOfWeek_entry     *uri_days_entry,
+    int                             maxBitEntry
+)
+{
+#define CHECK_SNMP_BITS_ENABLE(index, indexBuff)   ( ((indexBuff)[(index)/8]) & ( 0x01 << ( 8 - (( index % 8 ) + 1)) ) )
+    char *buf;
+    int  i;
+
+    if ( maxBitEntry > ( request->requestvb->val_len * 8 ) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    buf = request->requestvb->val.string;
+    for ( i = 0; i < maxBitEntry; i++ )
+    {
+        if ( CHECK_SNMP_BITS_ENABLE(i, buf) )
+        {
+            uri_days_entry[i].enable = IES_SNMP_BITS_ENABLE;
+        }
+        else
+        {
+            uri_days_entry[i].enable = IES_SNMP_BITS_DISABLE;
+        }
+    }
+    return IES_NOERR;
+#undef CHECK_SNMP_BITS_ENABLE
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilSNMP_setOCT_to_hexValue
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilSNMP_setOCT_to_hexValue
+(
+    netsnmp_request_info *request,
+    char                 *oct_char_ret
+)
+{
+    char                  oct_char, oct_char_tmp;
+
+    memcpy(&oct_char, request->requestvb->val.string, 1);
+    oct_char_tmp = 0;
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d oct_char = %2x\n", __func__, __LINE__, oct_char);
+    if ( 0x80 & oct_char ) 
+    {
+        oct_char_tmp |= 0x01;
+    }
+    if ( 0x40 & oct_char ) 
+    {
+        oct_char_tmp |= 0x02;
+    }
+    if ( 0x20 & oct_char ) 
+    {
+        oct_char_tmp |= 0x04;
+    }
+    if ( 0x10 & oct_char ) 
+    {
+        oct_char_tmp |= 0x08;
+    }
+    if ( 0x08 & oct_char ) 
+    {
+        oct_char_tmp |= 0x10;
+    }
+    if ( 0x04 & oct_char ) 
+    {
+        oct_char_tmp |= 0x20;
+    }
+    if ( 0x02 & oct_char ) 
+    {
+        oct_char_tmp |= 0x40;
+    }
+    if ( 0x01 & oct_char ) 
+    {
+        oct_char_tmp |= 0x80;
+    }
+    *oct_char_ret = oct_char_tmp;
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_array_count
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_array_count
+(
+    char *uri_string,
+    int  *ret_count
+)
+{
+    ies_handle_t ret = IES_ERR;
+
+    struct LibFrameworkUri_Handle *uri_handle = NULL;
+    
+    char         uri_path[IES_MAX_URI] = {0x0};
+    JSON_Object *json_obj    = NULL;
+    JSON_Value  *json_val    = NULL;
+    JSON_Array  *json_array  = NULL;
+    int          count = 0;
+    
+    uri_handle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+    if ( NULL == uri_handle ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    snprintf(uri_path, sizeof(uri_path), IES_URI_CONFIG_PATH("/%s"), uri_string);
+    ret = LibFrameworkUri_GetUri(uri_handle, uri_path, security_token, &json_val);
+    if ( 0 != ret ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    json_array = json_value_get_array(json_val);
+    if( NULL == json_array ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    count = json_array_get_count(json_array);
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s: array_size_of('%s') -> %d\n", 
+        __func__, uri_string, count);
+    *ret_count = count;
+    ret = IES_NOERR;
+out:
+    if ( NULL != json_val ) 
+    {
+        json_value_free(json_val);
+        json_val = NULL;
+    }
+
+    if ( NULL != uri_handle ) 
+    {
+        LibFrameworkUri_ReleaseHandle(uri_handle);
+    }
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_dump_json_val
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_dump_json_val
+(
+    char        *message,
+    JSON_Value  *json_val_debug
+)
+{
+    char        *json_val_debug_string = NULL;
+
+    json_val_debug_string = json_serialize_to_string(json_val_debug);
+    if ( NULL == json_val_debug_string ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s \'%s\'\n", message, json_val_debug_string);
+    json_free_serialized_string(json_val_debug_string);
+    return IES_NOERR;
+
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_generate_json_portBitMAP
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_generate_json_portBitMAP
+(
+    JSON_Value           **json_val_portBitMAP,
+    struct uriPort_entry  *pEntry,
+    int                    maxBitEntry
+)
+{
+
+    JSON_Value         *json_value_port = NULL;
+    JSON_Array         *json_array_port = NULL;
+    ies_handle_t        ret             = IES_ERR;
+    int                 enable          = 0;
+    int                 i;
+
+    json_value_port = json_value_init_array();
+    if ( NULL == json_value_port ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    json_array_port = json_value_get_array(json_value_port);
+    if ( NULL == json_array_port ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    for ( i = 0; i < maxBitEntry; i++ ) 
+    {
+        enable = ( IES_SNMP_BITS_ENABLE == pEntry[i].enable ) ? 1 : 0;
+        json_array_append_boolean(json_array_port, enable);
+    }
+    ret = IES_NOERR;
+out:
+    if ( NULL != json_value_port ) 
+    {
+        *json_val_portBitMAP = json_value_port;
+    } 
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_generate_json_daysOfWeek
+ *
+ * Description        :
+
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_generate_json_daysOfWeek
+(
+    JSON_Value                       **json_val_dayofWeek,
+    struct uriDaysOfWeek_entry        *days_entry,
+    int                                maxBitEntry
+)
+{
+
+    JSON_Value         *json_value_port = NULL;
+    JSON_Array         *json_array_port = NULL;
+    ies_handle_t        ret             = IES_ERR;
+    int                 enable          = 0;
+    int                 i;
+
+    json_value_port = json_value_init_array();
+    if ( NULL == json_value_port )
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    json_array_port = json_value_get_array(json_value_port);
+    if ( NULL == json_array_port )
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    for ( i = 0; i < maxBitEntry; i++ )
+    {
+        enable = ( IES_SNMP_BITS_ENABLE == days_entry[i].enable ) ? 1 : 0;
+        json_array_append_boolean(json_array_port, enable);
+    }
+    ret = IES_NOERR;
+out:
+    if ( NULL != json_value_port )
+    {
+        *json_val_dayofWeek = json_value_port;
+    }
+    return ret;
+}
+
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_bEntry_from_uri
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_bEntry_from_uri
+(
+    JSON_Object        *json_obj,
+    struct bits_entry  *bEntry_buf,
+    char               *uri_name
+)
+{
+    JSON_Array         *json_array_port  = NULL;
+    struct bits_entry  *bEntry           = NULL;
+    ies_handle_t        ret              = IES_ERR;
+    int                 count, i;
+    int                 json_data_boolen = 0;
+
+
+
+    json_array_port = json_object_dotget_array (json_obj, uri_name);
+    if ( NULL == json_array_port ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+    count = json_array_get_count(json_array_port);
+    for ( i = 0; i < count; i++ ) 
+    {
+
+        json_data_boolen = json_array_get_boolean( json_array_port, i );
+        if ( -1 == json_data_boolen ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            goto out;
+        }
+        bEntry         = &bEntry_buf[i];
+        bEntry->enable = ( 1 == json_data_boolen ) ? 
+            IES_SNMP_BITS_ENABLE : IES_SNMP_BITS_DISABLE;
+    }
+    ret = IES_NOERR;
+out:
+        
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_portEntry_from_uri
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_portEntry_from_uri
+(
+    JSON_Object           *json_obj,
+    struct uriPort_entry  *uri_port_entry_buf,
+    char                  *uri_name
+)
+{
+    JSON_Array            *json_array_port  = NULL;
+    struct uriPort_entry  *port_entry       = NULL;
+    ies_handle_t           ret              = IES_ERR;
+    int                    json_data_boolen = 0;
+    int                    count, i;
+
+    json_array_port = json_object_dotget_array (json_obj, uri_name);
+    if ( NULL == json_array_port ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+    count = json_array_get_count(json_array_port);
+    for ( i = 0; i < count; i++ ) 
+    {
+
+        json_data_boolen = json_array_get_boolean( json_array_port, i );
+        if ( -1 == json_data_boolen ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            goto out;
+        }
+        port_entry = &uri_port_entry_buf[i];
+        port_entry->enable = ( 1 == json_data_boolen ) ? 
+            IES_SNMP_BITS_ENABLE : IES_SNMP_BITS_DISABLE;
+    }
+
+    ret = IES_NOERR;
+out:
+        
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_portEntry_from_uri
+ *
+ * Description        :
+
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_set_portEntry_to_uri
+(
+    JSON_Object           *json_obj,
+    struct uriPort_entry  *uri_port_entry_buf,
+    char                  *uri_name
+)
+{
+    JSON_Array            *json_array_port  = NULL;
+    struct uriPort_entry  *port_entry       = NULL;
+    ies_handle_t           ret              = IES_ERR;
+    int                    json_data_boolen = 0;
+    int                    count, i;
+
+    json_array_port = json_object_dotget_array (json_obj, uri_name);
+    if ( NULL == json_array_port ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+    count = json_array_get_count(json_array_port);
+    for ( i = 0; i < count; i++ ) 
+    {
+
+        json_data_boolen = json_array_get_boolean( json_array_port, i );
+        if ( -1 == json_data_boolen ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            goto out;
+        }
+        port_entry = &uri_port_entry_buf[i];
+        port_entry->enable = ( 1 == json_data_boolen ) ? 
+            IES_SNMP_BITS_ENABLE : IES_SNMP_BITS_DISABLE;
+    }
+
+    ret = IES_NOERR;
+out:
+
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_daysEntry_from_uri
+ *
+ * Description        :
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_daysEntry_from_uri
+(
+    JSON_Object                 *json_obj,
+    struct uriDaysOfWeek_entry  *uri_days_entry_buf,
+    char                        *uri_name
+)
+{
+    JSON_Array                  *json_array_port  = NULL;
+    struct uriDaysOfWeek_entry  *days_entry       = NULL;
+    ies_handle_t                 ret              = IES_ERR;
+    int                          json_data_boolen = 0;
+    int                          count, i;
+
+    json_array_port = json_object_dotget_array (json_obj, uri_name);
+    if ( NULL == json_array_port )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+    count = json_array_get_count(json_array_port);
+    for ( i = 0; i < count; i++ )
+    {
+
+        json_data_boolen = json_array_get_boolean( json_array_port, i );
+        if ( -1 == json_data_boolen )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            goto out;
+        }
+        days_entry = &uri_days_entry_buf[i];
+        days_entry->enable = ( 1 == json_data_boolen ) ?
+            IES_SNMP_BITS_ENABLE : IES_SNMP_BITS_DISABLE;
+    }
+
+    ret = IES_NOERR;
+out:
+
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_set_interface_entry_to_json_obj
+ *
+ * Description        :
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_set_interface_entry_to_json_obj
+(
+    JSON_Object                 *json_obj,
+    char                        *uri_name,
+    struct uriIface_entry       *uri_interface_entry
+)
+{
+
+    ies_handle_t                 ret                = IES_ERR;
+    JSON_Value                  *json_val_interface = NULL;
+    JSON_Object                 *json_obj_interface = NULL;
+
+    json_val_interface = json_value_init_object();
+    if ( NULL == json_val_interface ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    json_obj_interface = json_value_get_object(json_val_interface);
+    if ( NULL == json_obj_interface ) 
+    {
+
+         LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+         goto out;
+    }
+
+    if ( JSONSuccess != json_object_dotset_number(json_obj_interface, "iftype", uri_interface_entry->iftype) )
+    {
+         LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+
+    if ( JSONSuccess != json_object_dotset_number(json_obj_interface, "index", uri_interface_entry->index) )
+    {
+         LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+         goto out;
+    }
+
+    if ( JSONSuccess != json_object_dotset_value(json_obj, uri_name, json_val_interface) )
+    {
+         LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+         goto out;
+    }
+
+    ret = IES_NOERR;
+out:
+
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_interface_entry_from_json_obj
+ *
+ * Description        :
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_interface_entry_from_json_obj
+(
+    JSON_Object                 *json_obj,
+    struct uriIface_entry       *uri_interface_entry
+)
+{
+
+    ies_handle_t                 ret = IES_ERR;
+
+    uri_interface_entry->iftype = json_object_dotget_number(json_obj, "iftype");
+    uri_interface_entry->index  = json_object_dotget_number(json_obj, "index");
+
+    ret = IES_NOERR;
+out:
+
+    return ret;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilURI_get_interface_entry_from_port
+ *
+ * Description        :
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilURI_get_interface_entry_from_port
+(
+    int                          port,
+    struct uriIface_entry       *uri_interface_entry
+)
+{
+
+    ies_handle_t                 ret    = IES_ERR;
+    ies_snmp_uri_port_interface  iftype = IES_SNMP_URI_PORT_PHYSICAL;
+    int                          index;
+    int                          minPortInDevice;
+    int                          maxPortInDevice;
+    int                          maxPortNumber;
+
+
+    minPortInDevice = 1;
+    maxPortInDevice = gMaxPortInDevice;
+    maxPortNumber   = gMaxPortInDevice + gMaxPortChannel;
+    index           = port;
+
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d index = %d\n", __func__, __LINE__, index);
+    if ( index >= minPortInDevice && index <= maxPortInDevice )
+    {
+        iftype = IES_SNMP_URI_PORT_PHYSICAL;
+    }
+    else 
+    if ( index > maxPortInDevice && index <= maxPortNumber )
+    {
+        index  -= gMaxPortInDevice;
+        iftype  = IES_SNMP_URI_PORT_PORTCHANNEL;
+    }
+    else 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        goto out;
+    }
+    index                       = index - 1;
+    uri_interface_entry->index  = index;
+    uri_interface_entry->iftype = iftype;
+    ret = IES_NOERR;
+out:
+
+    return ret;
+}
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilString_strchr
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+char * 
+utilString_strchr
+(
+    char *buf, 
+    int   buf_len, 
+    char  token
+)
+{
+    char *end = buf + buf_len;
+
+    while( buf < end )
+    {
+        if( token == *buf )
+        {
+            return buf;
+        }
+        buf++;
+    }
+    return NULL;
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : utilString_bitValue_for2OCT
+ *
+ * Description        : for BIT Operation 
+        
+
++-------------------------------------------------------------------*/
+char
+utilString_bitValue_for2OCT
+(
+    char *buf, 
+    int   buf_len
+)
+{
+    char *end = buf + buf_len;
+    char retToken = 0;
+    int  count = 0;
+    char tmp;
+
+    while ( buf < end ) 
+    {
+        if ( *buf >= '0' && *buf <= '9' ) 
+        {
+            count = *buf - '0';
+        } 
+        else 
+        if ( *buf >= 'a' && *buf <= 'f' ) 
+        {
+            count = *buf - 'a' + 10;
+        } 
+        else 
+        if ( *buf >= 'A' && *buf <= 'F' ) 
+        {
+            count = *buf - 'A' + 10;
+        } 
+        else 
+        {
+            count = 0;
+        }
+        retToken  = ( ( retToken << 4 ) & 0xf0 );
+        retToken |= ( count & 0x0f );
+        buf++;
+    }
+    return retToken;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : utilString_strIPv4
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+utilString_strIPv4
+(
+    const char   *buf, 
+    int           len, 
+    unsigned int *retVal
+)
+{
+    unsigned int val, tmp;
+    char *end;
+    int i;
+
+    val = 0;
+    end = (char *)buf + len;
+    if ( '\'' == *buf ) {
+        buf++; // skip 1st '\''
+    }
+    if ( '\"' == *buf ) {
+        buf++; // skip 1st '"'
+    }
+    for ( i = 0; i < 4; i++ ) 
+    {
+        tmp   = 0;
+        val <<= 8;
+        while ( buf < end )
+        {
+            if ( *buf >= '0' && *buf <= '9' ) 
+            {
+                tmp *= 10;
+                tmp += *buf - '0';
+            } 
+            else 
+            if ( '.' == *buf || 
+                '\'' == *buf || 
+                '"' == *buf ||
+                '-'  == *buf ) 
+            {
+                buf++;
+                break;
+            } 
+            else 
+            {
+                // should no go here !!
+                return IES_ERR;
+            }
+            buf++;
+        }
+        if ( tmp > 0xff ) 
+        {
+            return IES_ERR;
+        }
+        val |= tmp;
+    }
+    
+    *retVal = ntohl(val);
+    return IES_NOERR;
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_remove_file
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+void 
+entry_handle_remove_file
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+    char                        fname[IES_MAX_FILE];
+    char                        file_uri[IES_MAX_FILE];
+    char                       *tmp = NULL;
+
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_COMMAND, entry->flags) ) 
+    {
+        return;
+    }
+
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_TBL, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_mibs_handle_iss_remap_table_fname_and_file_uri(entry, fname, file_uri) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            return;
+        }
+    } 
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_MERGE_TABLE, entry->flags) )
+    {
+        if ( IES_NOERR != ies_mibs_handle_iss_remap_merge_table_fname_and_file_uri(entry, fname, file_uri) )
+        {
+
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            return ;
+        }
+    }
+    else 
+    {
+        snprintf(file_uri, IES_MAX_FILE, "%s", entry->uri);
+        while ( 1 ) 
+        {
+            tmp = utilString_strchr(file_uri, strlen(file_uri), '/');
+            if ( NULL == tmp ) 
+            {
+                break;
+            } 
+            *tmp = '_';
+        }
+        if ( IES_NOERR == IS_SCALAR_ENTRY(entry) ) 
+        {
+            snprintf(fname, IES_MAX_FILE, "%s/%s_ent", AUTO_MIB_PATH, file_uri);
+        } 
+        else 
+        {
+            snprintf(fname, IES_MAX_FILE, "%s/%stbl",   AUTO_MIB_PATH, file_uri);
+        }
+    }
+    unlink(fname);
+
+    return;
+}
+
+/**
+ * @brief handle transfer object-id-string to oid
+
+ * @param[in]    buf           object-id-string buffer
+ * @param[in]    bufLen        object-id-string buffer len
+ * @param[out]   retOID        return oid buffer
+ * @param[out]   retOIDLen     return oid buffer len
+ * @param[in]    retOIDLenMax  return oid buffer max len
+
+ * @returns      0 means success, others fail.
+ */
+int32_t moxaSnmpHandle_UtilSnmp_ObjectIDStringToOID( const char     *buf,
+                                                     const uint32_t  bufLen,
+                                                     oid            *retOID,
+                                                     uint32_t       *retOIDLen,
+                                                     const uint32_t  retOIDLenMax )
+{
+    char     *end           = buf + bufLen;
+    char     *token         = NULL;
+    uint32_t  oidBufIndex   = 0;
+    char      tmpOidStr[32] = {0x0};
+    uint32_t  tmpOidStrLen  = 0;
+
+    LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%s@%d : %s(%d) \n",
+        __func__, __LINE__, buf, bufLen);
+
+    for ( token = (char *) buf; buf <= end; buf++ )
+    {
+        if ( *buf == ',' || *buf == '.' || *buf == '\'' || *buf == '\0' )
+        {
+            tmpOidStrLen = buf - token;
+            if ( tmpOidStrLen >= sizeof(tmpOidStr) )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : tmpOidStrLen(%d) exceed max(%d)\n",
+                    __func__, __LINE__, tmpOidStrLen, sizeof(tmpOidStr));
+                return (-1);
+            }
+            memset(tmpOidStr, 0, sizeof(tmpOidStr));
+            memcpy(tmpOidStr, token, tmpOidStrLen);
+            tmpOidStr[tmpOidStrLen] = '\0';
+            token = buf + 1;
+            retOID[oidBufIndex] = atoi(tmpOidStr);
+            oidBufIndex++;
+            if ( oidBufIndex >= retOIDLenMax )
+            {
+                LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : oidBufIndex(%d) exceed retOIDLenMax %d\n",
+                    __func__, __LINE__, oidBufIndex, retOIDLenMax);
+                return (-1);
+            }
+        }
+    }
+    *retOIDLen = oidBufIndex;
+
+    return 0;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : get_value_from_file
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+get_value_from_file
+(
+    oid                         file_oid [MAX_OID_LEN],
+    int                         file_oid_len,
+    char                       *file_val_str,
+    netsnmp_agent_request_info *reqinfo,
+    netsnmp_request_info       *request,
+    struct ies_auto_mibs_entry *entry
+)
+{
+#define MAX_BIN_VALUE   (IES_MAX_SNMP_VALUE / 2)
+    u32                         u32_value;
+    struct counter64            c64_value;
+    char                        oct_value;
+    char                        mac_addr[6];
+    char                        bin_value[MAX_BIN_VALUE];
+    int                         bin_value_len;
+    oid                         oid_value[MAX_OID_LEN];
+    size_t                      oid_value_len;
+    char                        *tmp = NULL;
+    int                         i;
+    ies_handle_t                ret = IES_ERR;
+
+    /**
+      dump 
+        # request oid
+        # entry   oid
+        # entry   value type
+     */
+
+    switch(entry->val_type) 
+    {
+        case SNMP_DATA_TYPE_INTEGER32:
+        // case SNMP_DATA_TYPE_INTEGER: same as SNMP_DATA_TYPE_INTEGER32
+            u32_value = atoi(file_val_str);
+            snmp_set_var_typed_value(request->requestvb, ASN_INTEGER,
+                (u_char *)&u32_value, sizeof(u32_value)); 
+            break;
+        case SNMP_DATA_TYPE_TIME_TICKS:
+            u32_value = atoi(file_val_str);
+            snmp_set_var_typed_value(request->requestvb, ASN_TIMETICKS,
+                (u_char *)&u32_value, sizeof(u32_value)); 
+            break;
+        case SNMP_DATA_TYPE_GAUGE32:
+        //case SNMP_DATA_TYPE_GAUGE:
+        //case SNMP_DATA_TYPE_UNSIGNED32:
+            u32_value = atoi(file_val_str);
+            snmp_set_var_typed_value(request->requestvb, ASN_GAUGE,
+                (u_char *)&u32_value, sizeof(u32_value)); 
+            break;
+        case SNMP_DATA_TYPE_COUNTER32: 
+        //case SNMP_DATA_TYPE_COUNTER: same as SNMP_DATA_TYPE_COUNTER32
+            u32_value = strtoul(file_val_str, NULL, 10);
+            snmp_set_var_typed_value(request->requestvb, ASN_COUNTER,
+                (u_char *)&u32_value, sizeof(u32_value)); 
+            break;
+        case SNMP_DATA_TYPE_IP_ADDR_PRIM:
+            if ( 0 == strncmp(file_val_str, "\"\"", 2) ) {
+                u32_value = 0;
+            } else {
+                utilString_strIPv4(file_val_str, strlen(file_val_str), &u32_value);
+            }
+            snmp_set_var_typed_value(request->requestvb, ASN_IPADDRESS,
+                (u_char *)&u32_value, sizeof(u32_value));
+            break;
+        case SNMP_DATA_TYPE_MAC_ADDRESS:
+            tmp = utilString_strchr(file_val_str, strlen(file_val_str), '\'');
+            if ( NULL != tmp ) 
+            {
+                *tmp = '\0';
+            }
+            for (i = 0, tmp = file_val_str; i < 6; i++) 
+            {
+                mac_addr[i] = utilString_bitValue_for2OCT(tmp, 2);
+                tmp += 2;
+                if ( ':' == *tmp )
+                {
+                    tmp++;
+                }
+            }
+            snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                (u_char *)mac_addr, 6);
+            break;
+        case SNMP_DATA_TYPE_OCTET_PRIM:
+        case SNMP_DATA_TYPE_OPAQUE:
+            tmp = utilString_strchr(file_val_str, strlen(file_val_str), '\'');
+            if ( NULL != tmp ) 
+            {
+                *tmp = '\0';
+            }
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_BIT_2OCT, entry->flags) ) 
+            {
+                oct_value = utilString_bitValue_for2OCT(file_val_str, 2);
+                snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                    (u_char *)&oct_value, 1);
+            }
+            else 
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags) ||
+                 IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_PBMP,          entry->flags) ||
+                 IES_URI_SNMP_OCT_STRING_HEX == entry->oct_type )
+            {
+                bin_value_len = strlen(file_val_str) / 2;
+                if ( bin_value_len >= MAX_BIN_VALUE ) 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d bin: %d max: %d\n", __func__, __LINE__, bin_value_len, MAX_BIN_VALUE);
+                    return IES_ERR;
+                }
+                for ( i = 0; i < bin_value_len; i++ ) 
+                {
+                    bin_value[i] = utilString_bitValue_for2OCT(&file_val_str[i * 2], 2);
+                }
+                snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                    (u_char *)bin_value, bin_value_len);
+            }
+            else 
+            {
+                snmp_set_var_typed_value( request->requestvb, ASN_OCTET_STR,
+                    (u_char *)file_val_str, strlen(file_val_str));
+            }
+            break;
+        case SNMP_DATA_TYPE_OBJECT_ID:
+
+            memset(oid_value, 0, sizeof(oid_value));
+            if ( moxaSnmpHandle_UtilSnmp_ObjectIDStringToOID(
+                        (const char *)     file_val_str,
+                        (const uint32_t )  strlen(file_val_str),
+                                           oid_value,
+                        ( uint32_t * )    &oid_value_len,
+                        (const uint32_t )  MAX_OID_LEN ) != 0 )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%% %s@%d parsing objIDString('%s') Error \n",
+                    __func__, __LINE__, file_val_str );
+                return IES_ERR;
+            }
+
+            memset(request->requestvb, 0, sizeof(netsnmp_variable_list));
+            snmp_set_var_typed_value( request->requestvb, ASN_OBJECT_ID,
+                    (const u_char *)oid_value, oid_value_len * sizeof(oid));
+            break;
+        case SNMP_DATA_TYPE_COUNTER64:
+            tmp = utilString_strchr(file_val_str, strlen(file_val_str), '\'');
+            if ( NULL != tmp ) 
+            {
+                *tmp = '\0';
+            }
+            if ( moxaSnmpHandle_UtilStringToCount64Value(file_val_str, strlen(file_val_str), &c64_value) != 0 )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d bin: %s\n", __func__, __LINE__, file_val_str);
+                return IES_ERR;
+            }
+            snmp_set_var_typed_value(request->requestvb, ASN_COUNTER64, (u_char *)&c64_value, sizeof(c64_value));
+            break;
+        case SNMP_DATA_TYPE_NULL:
+        case SNMP_DATA_TYPE_SEQUENCE:
+        case SNMP_DATA_TYPE_IMP_OCTET_PRIM:
+        case SNMP_DATA_TYPE_IMP_OBJECT_ID:
+        case SNMP_DATA_TYPE_ROW_STATUS:
+        default:
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d %d\n", __func__, __LINE__, entry->val_type);
+            return IES_ERR;
+    }
+    snmp_set_var_objid(request->requestvb, file_oid, file_oid_len);
+    return IES_NOERR;
+#undef MAX_BIN_VALUE
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_update_result
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+entry_handle_update_result
+(
+    netsnmp_agent_request_info *reqinfo,
+    netsnmp_request_info       *request,
+    ies_handle_done_t          done,
+    FILE                       *fp 
+)
+{
+
+    if ( NULL != fp ) 
+    {
+        fclose(fp);
+    }
+
+    if ( DONE_FOR_NO_ERROR == done ) 
+    {
+        netsnmp_set_request_error(reqinfo, request, SNMP_ERR_NOERROR);
+        return IES_NOERR;
+    } 
+    else 
+    if ( DONE_FOR_NO_SUCH_NAME == done ) 
+    {
+        netsnmp_set_request_error(reqinfo, request, SNMP_ERR_NOSUCHNAME);
+        return IES_NOERR;
+    } 
+    // else 
+    // if ( DONE_FOR_BAD_VALUE == done )  {
+        netsnmp_set_request_error(reqinfo, request, SNMP_ERR_BADVALUE);
+        return IES_ERR;
+    //}
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_exception
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+entry_handle_exception
+(
+    oid                          *req_oid,
+    int                           req_oid_len,
+    netsnmp_handler_registration *reginfo,
+    netsnmp_agent_request_info   *reqinfo,
+    netsnmp_request_info         *request,
+    FILE                         *fp,
+    struct ies_auto_mibs_entry   *entry
+)
+{
+    netsnmp_subtree              *next_subtree = NULL;
+    ies_handle_done_t             done;
+    int                           ret;
+
+    if ( NULL != fp ) 
+    {
+        fclose(fp);
+    }
+
+    // get next entry
+    next_subtree = netsnmp_subtree_find_prev( req_oid, req_oid_len, NULL, NULL );
+    while( next_subtree && 
+           snmp_oid_compare(next_subtree->name_a, 
+             next_subtree->namelen, 
+             reginfo->rootoid, 
+             reginfo->rootoid_len) <= 0 ) 
+    {
+        next_subtree = next_subtree->next;
+    }
+
+    if ( next_subtree ) 
+    {
+        snmp_set_var_objid( request->requestvb, next_subtree->name_a, next_subtree->namelen );
+        next_subtree->reginfo->handler->flags |= MIB_HANDLER_AUTO_NEXT_OVERRIDE_ONCE;
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d MIB_HANDLER_AUTO_NEXT_OVERRIDE_ONCE \n", __func__, __LINE__);
+        ret = netsnmp_call_handlers( next_subtree->reginfo, reqinfo, request );
+        request->processed = 1;
+        done = ( SNMP_ERR_NOERROR == ret ) ? DONE_FOR_NO_ERROR : DONE_FOR_BAD_VALUE;
+        return entry_handle_update_result(reqinfo, request, done, NULL);
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+    return entry_handle_update_result(reqinfo, request, DONE_FOR_NO_SUCH_NAME, NULL);
+
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_get_value_from_file
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+entry_handle_get_value_from_file
+(
+    netsnmp_handler_registration *reginfo,
+    netsnmp_agent_request_info   *reqinfo,
+    netsnmp_request_info         *request, 
+    struct ies_auto_mibs_entry   *entry,
+    FILE                         *fp, 
+    ies_table_handle_t            type
+)
+{
+
+    char                          file_buf [IES_MAX_FILE_BUF] = {0x0};
+    oid                           file_oid [MAX_OID_LEN]      = {0x0};
+    int                           file_oid_len;
+    char                         *file_oid_str                = NULL;
+    char                         *file_val_str                = NULL;
+    oid                          *req_oid;
+    int                           req_oid_len;
+    ies_handle_done_t             done                        = DONE_FOR_BAD_VALUE;
+    ies_handle_t                  ret                         = IES_ERR;
+    int                           next, i;
+
+    
+    next         = 0;
+    req_oid      = (oid  *)request->requestvb->name;
+    req_oid_len  = request->requestvb->name_length;
+
+    if ( IES_NOERR == IS_SCALAR_ENTRY(entry) )
+    {
+        while ( 1 )
+        {
+            memset(file_buf, 0, sizeof(file_buf));
+            memset(file_oid, 0, sizeof(file_oid));
+            file_oid_len = 0;
+            if ( NULL == utilSNMP_fgets(file_buf, sizeof(file_buf), fp, entry) ) 
+            {
+                return entry_handle_exception(req_oid, req_oid_len, reginfo, reqinfo, request, fp, entry);
+            }
+            
+            if ( '#' == file_buf[0] )
+            {
+                continue;
+            }
+
+            file_oid_str = file_buf;
+            file_val_str = utilString_strchr(file_buf, sizeof(file_buf), '=');
+            if ( NULL == file_val_str ) 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return entry_handle_update_result(reqinfo, request, done, fp);
+            }
+            *file_val_str = '\0';
+            file_val_str += 2;
+            
+            file_oid_len = utilSNMP_get_oid_from_oidstr(file_oid_str, strlen(file_oid_str), file_oid);
+            if ( IES_AUTO_MIBS_TBL_GET == type ) 
+            {
+                if ( ( req_oid_len == file_oid_len ) &&
+                     ( 0 == memcmp(req_oid, file_oid, req_oid_len * sizeof(oid)) ) ) 
+                {
+                    if ( IES_NOERR != get_value_from_file(file_oid, file_oid_len, 
+                            file_val_str, reqinfo, request, entry)  ) 
+                    {
+                        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    } 
+                    else 
+                    {
+                        done = DONE_FOR_NO_ERROR;
+                    }
+                    return entry_handle_update_result(reqinfo, request, done, fp);
+                }
+                else
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    break;
+                }
+            } 
+            else
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                break;
+            }
+        }
+    }
+    else
+    {
+        utilSNMP_dump_oid("entry_handle_get_value_from_req_oid", req_oid, req_oid_len);
+        ret = fileBuffer_get_oidEntry(
+            &gfileBufCtrlBlock, 
+            req_oid, req_oid_len,
+            file_oid, &file_oid_len, file_buf,
+            ( IES_AUTO_MIBS_TBL_GET == type ) ? FILE_BUF_GET_CURR_ENTRY : FILE_BUF_GET_NEXT_ENTRY );
+        if ( ret == IES_ERR )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+            return entry_handle_exception(req_oid, req_oid_len, reginfo, reqinfo, request, fp, entry);
+        }
+        else
+        if ( ret == IES_ERR_NOT_FOUND )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+            return entry_handle_exception(req_oid, req_oid_len, reginfo, reqinfo, request, fp, entry);
+        }
+        else
+        if ( ret == IES_NOERR )
+        {
+            utilSNMP_dump_oid("entry_handle_get_value_from_file_oid", file_oid, file_oid_len);
+            if ( IES_NOERR != get_value_from_file(file_oid, file_oid_len, file_buf, reqinfo, request, entry)  )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                done = DONE_FOR_BAD_VALUE;
+            }
+            else
+            {
+                done = DONE_FOR_NO_ERROR;
+            }
+            return entry_handle_update_result(reqinfo, request, done, fp);
+        }
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    return entry_handle_update_result(reqinfo, request, done, fp);
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_check_value_file
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+entry_handle_check_value_file
+(
+    char                        fname[IES_MAX_FILE], 
+    struct ies_auto_mibs_entry *entry
+)
+{
+#define MAX_TABLE_TIMEOUT   ( 800 * 1000 * 1000 )
+#define MAX_TABLE_TIMELAST  ( 200 * 1000 * 1000 )
+    struct timespec file_time_now;
+    struct timespec file_time_tmp;
+    struct timespec file_time_tmp_last;
+    FILE *fp = NULL;
+    char file_buf[64];
+    char *tmp;
+    ies_handle_t ret = IES_ERR;
+
+    fp = fopen(fname, "r");
+    if ( NULL == fp ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d regen for no fopen\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( NULL == fgets(file_buf, sizeof(file_buf), fp) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d regen for no fgets\n", __func__, __LINE__);
+        fclose(fp);
+        return IES_ERR;
+    }
+    fclose(fp);
+
+    if ( IES_NOERR == IS_SCALAR_ENTRY(entry) )
+    {
+        return IES_ERR;
+    }
+    if ( strlen(gSnmpTblSnapShot.fname) != strlen(fname) )
+    {
+        return IES_ERR;
+    }
+    if ( 0 != strncmp(gSnmpTblSnapShot.fname, fname, strlen(fname)) )
+    {
+        return IES_ERR;
+    }
+
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &file_time_now) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ((file_time_now.tv_nsec - gSnmpTblSnapShot.time_lastUpdate.tv_nsec) < 0 ) 
+    {
+      file_time_tmp_last.tv_sec  = file_time_now.tv_sec  - gSnmpTblSnapShot.time_lastUpdate.tv_sec  - 1 ;
+      file_time_tmp_last.tv_nsec = file_time_now.tv_nsec - gSnmpTblSnapShot.time_lastUpdate.tv_nsec + 1000000000;
+    } 
+    else 
+    {
+      file_time_tmp_last.tv_sec  = file_time_now.tv_sec  - gSnmpTblSnapShot.time_lastUpdate.tv_sec;
+      file_time_tmp_last.tv_nsec = file_time_now.tv_nsec - gSnmpTblSnapShot.time_lastUpdate.tv_nsec;
+    }
+
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &gSnmpTblSnapShot.time_lastUpdate) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ((file_time_now.tv_nsec - gSnmpTblSnapShot.timeTemp.tv_nsec) < 0 ) 
+    {
+      file_time_tmp.tv_sec  = file_time_now.tv_sec  - gSnmpTblSnapShot.timeTemp.tv_sec  - 1 ;
+      file_time_tmp.tv_nsec = file_time_now.tv_nsec - gSnmpTblSnapShot.timeTemp.tv_nsec + 1000000000;
+    } 
+    else 
+    {
+      file_time_tmp.tv_sec  = file_time_now.tv_sec  - gSnmpTblSnapShot.timeTemp.tv_sec;
+      file_time_tmp.tv_nsec = file_time_now.tv_nsec - gSnmpTblSnapShot.timeTemp.tv_nsec;
+    }
+
+    if ( file_time_tmp_last.tv_sec >= 1 || file_time_tmp_last.tv_nsec >= MAX_TABLE_TIMELAST )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d MAX_TABLE_TIMELAST \'%02ld\'  \'%09ld\' \n", 
+            __func__, __LINE__, file_time_tmp_last.tv_sec , file_time_tmp_last.tv_nsec);
+        return IES_ERR;
+    } 
+    else
+    {
+        return IES_NOERR;
+    }
+    if ( file_time_tmp.tv_sec >= 1 || file_time_tmp.tv_nsec >= MAX_TABLE_TIMEOUT )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d MAX_TABLE_TIMEOUT \'%02ld\'  \'%09ld\' \n", 
+            __func__, __LINE__, file_time_tmp.tv_sec , file_time_tmp.tv_nsec);
+        return IES_ERR;
+    }
+    return IES_NOERR;
+#undef MAX_ENTRY_TIMEOUT
+#undef MAX_TABLE_TIMELAST
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : mox_snmp_iss_uri_read_inplace
+ *
+ * Description        :
+ *   In-process equivalent of:
+ *     /sbin/ies_uri_handle_client --type read --uri <uri> --file <fname>
+ *
+ *   Avoids fork+exec of /bin/sh and the helper binary (~25 ms on
+ *   ARM Cortex-A) by calling the same library functions directly.
++-------------------------------------------------------------------*/
+static ies_handle_t
+mox_snmp_iss_uri_read_inplace(const char *uri, const char *fname)
+{
+    unsigned char iputFile[IES_MAX_FILE];
+
+    /* If the hook .so is not available, fall back to the legacy
+     * fork+exec helper so we never regress vs. the old behaviour. */
+    if ( 1 != mox_snmp_uri_hook_load() )
+    {
+        if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0,
+                AUTO_MIB_CMD_URI_CTRL_CLIENT
+                " --type read "
+                " --uri  %s   "
+                " --file %s   ",
+                uri, fname) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            return IES_ERR;
+        }
+        return IES_NOERR;
+    }
+
+    snprintf((char *)iputFile, sizeof(iputFile), "%s_remap", fname);
+
+    if ( IES_NOERR != g_ies_uri_handle_read((const unsigned char *)uri, iputFile) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+#if defined(INCLUDE_MOXA_L3)
+        /* Workaround for OSPF virtNbrTable problem (mantis #6342);
+         * mirrors ies_uri_handle_client.c. */
+        if ( memcmp(uri, "fsmistdospfdb/", strlen("fsmistdospfdb/")) != 0 )
+        {
+            return IES_ERR;
+        }
+        /* fall through to remap */
+#else
+        return IES_ERR;
+#endif
+    }
+
+    if ( IES_NOERR != g_IssSnmpURI_readRemapper((unsigned char *)uri,
+                                                  iputFile,
+                                                  (unsigned char *)fname) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        unlink((const char *)iputFile);
+        return IES_ERR;
+    }
+
+    unlink((const char *)iputFile);
+    return IES_NOERR;
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_generate_iss_value_file
+ *
+ * Description        :
+
+
++-------------------------------------------------------------------*/
+ies_handle_t
+entry_handle_generate_iss_value_file
+(
+    struct ies_auto_mibs_entry   *entry, 
+    FILE                        **ret_fp
+)
+{
+
+    FILE                        *fp = NULL;
+    char                         fname[IES_MAX_FILE]     = {0x0};
+    char                         file_uri[IES_MAX_FILE]  = {0x0};
+    ies_handle_t                 ret;
+    char                        *tmp = NULL;
+    int                          len = 0;
+    struct timespec              timeBefore, timeAfter;
+    struct sysinfo               info;
+
+    FILE *fp2 = fopen("/run/util_debug/ggggggg", "a");
+    if (fp2 != NULL) {
+		fprintf(fp2, "OOXX! %s[%d] \n", __func__, __LINE__);
+		fclose(fp2);
+    }
+
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeBefore) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    }
+
+    sysinfo(&info);
+
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_TBL, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_mibs_handle_iss_remap_table_fname_and_file_uri(entry, fname, file_uri) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            return IES_ERR;
+        }
+    } 
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_MERGE_TABLE, entry->flags) )
+    {
+        if ( IES_NOERR != ies_mibs_handle_iss_remap_merge_table_fname_and_file_uri(entry, fname, file_uri) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            return IES_ERR;
+        }
+    }
+    else
+    {
+        snprintf(file_uri, IES_MAX_FILE, "%s", entry->uri);
+        while ( 1 ) 
+        {
+            tmp = utilString_strchr(file_uri, strlen(file_uri), '/');
+            if ( NULL == tmp ) 
+            {
+                break;
+            } 
+            *tmp = '_';
+        }
+        if ( IES_NOERR == IS_SCALAR_ENTRY(entry) ) 
+        {
+            snprintf(fname, IES_MAX_FILE, "%s/%s_ent", AUTO_MIB_PATH, file_uri);
+        } 
+        else 
+        {
+            snprintf(fname, IES_MAX_FILE, "%s/%stbl",   AUTO_MIB_PATH, file_uri);
+        }
+    }
+
+    if ( IES_NOERR != entry_handle_check_value_file(fname, entry) ) 
+    {
+
+        unlink(fname);
+        util_table_snapshot_reset();
+
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_GENERATE_SYS_OID, entry->flags) )
+        {
+            ret = ies_mibs_handle_generate_system_object_id(entry, fname);
+            if ( IES_NOERR != ret )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_TBL, entry->flags) )
+        {
+            if ( IES_NOERR != mox_snmp_iss_uri_read_inplace(entry->uri, fname) )
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d uri %s fname %s\n", __func__, __LINE__, entry->uri, fname);
+                return IES_ERR;
+            }
+
+            char fnameResult[IES_MAX_FILE] = {0x0};
+            sprintf(fnameResult, "%s_result", fname);
+            if ( 0 != generate_iss_remap_table(file_uri, fname, fnameResult, info.uptime ) )
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return IES_ERR;
+            }
+            unlink(fname);
+            rename(fnameResult, fname);
+        }
+        else
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_ISS_REMAP_MERGE_TABLE, entry->flags) )
+        {
+            if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+                "/sbin/generate_iss_snmp_merge_table "
+                " %s %s %ld %d", file_uri, fname, info.uptime, gMaxPortInDevice ) )
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return IES_ERR;
+            }
+        }
+        else
+        {
+            if ( IES_NOERR != mox_snmp_iss_uri_read_inplace(entry->uri, fname) )
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d uri %s fname %s\n", __func__, __LINE__, entry->uri, fname);
+                return IES_ERR;
+            }
+        }
+
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS, entry->flags) )
+        {
+            char oid_str[IES_MAX_OID] = {0x0};
+            int  oid_str_len          = 0;
+            int  i                    = 0;
+
+            while ( i < ( entry->oid_len - entry->oid_index) ) 
+            {
+                ies_uri_snmp_sprintf((char *)oid_str, IES_MAX_OID, &oid_str_len, "%d.", (unsigned int) entry->oid_list[i]);
+                i++;
+            }
+            if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+                "/bin/iss_snmp_makeup_index "
+                "%s %s_result %ld %s ", fname, fname, info.uptime, oid_str) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return IES_ERR;
+            }
+
+            unlink(fname);
+            {
+                char fnameSrc[IES_MAX_FILE + 8];
+                snprintf(fnameSrc, sizeof(fnameSrc), "%s_result", fname);
+                if ( 0 != rename(fnameSrc, fname) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    return IES_ERR;
+                }
+            }
+        }
+
+        if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeAfter) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        }
+
+        util_timeDiff("get_val_from_iss", &timeBefore, &timeAfter);
+        util_table_snapshot_setup(fname, entry);
+    }
+
+    fp = fopen(fname, "r");
+
+    if ( NULL == fp ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    *ret_fp = fp;
+    return IES_NOERR;
+}
+
+
+
+
+/*-------------------------------------------------------------------+
+ * Function           : entry_handle_generate_uri_value_file
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+entry_handle_generate_uri_value_file
+(
+    struct ies_auto_mibs_entry   *entry, 
+    FILE                        **ret_fp
+)
+{
+
+    struct LibFrameworkUri_Handle *uri_handle = NULL;
+    JSON_Value                    *json_val   = NULL;
+    char                          *val_str    = NULL;
+    char                          *json_val_str = NULL;
+    char                           uri_string[IES_MAX_URI] = {0x0};
+    char                           sys_cmd_buf[IES_MAX_SYS_BUF] = {0x0};
+    ies_handle_t                   ret;
+    char                          *tmp = NULL;
+    FILE                          *fp = NULL;
+    char                           fname[IES_MAX_FILE]    = {0x0};
+    char                           file_uri[IES_MAX_FILE] = {0x0};
+    int                            len = 0, i;
+    struct sysinfo                 info;
+    int                            uri_iface = 0;
+    char                           val_buf[MOXA_SNMP_MAX_STR_VALUE_LEN] = {0x0};
+
+    snprintf(file_uri, IES_MAX_FILE, "%s", entry->uri);
+    while ( 1 ) 
+    {
+        tmp = utilString_strchr(file_uri, strlen(file_uri), '/');
+        if ( NULL == tmp ) 
+        {
+            break;
+        } 
+        *tmp = '_';
+    }
+
+    if ( IES_NOERR == IS_SCALAR_ENTRY(entry) ) 
+    {
+        snprintf(fname, IES_MAX_FILE, "%s/%s_ent",  AUTO_MIB_PATH, file_uri);
+    } 
+    else 
+    {
+        snprintf(fname, IES_MAX_FILE, "%s/%stbl",   AUTO_MIB_PATH, file_uri);
+    }
+
+    if ( IES_NOERR != entry_handle_check_value_file(fname, entry) ) 
+    {
+
+        unlink(fname);
+        util_table_snapshot_reset();
+
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_FIXED_VALUE, entry->flags) )
+        {
+            ret = ies_auto_mibs_handle_uri_fixed_value(entry, sys_cmd_buf, IES_MAX_SYS_BUF);
+            if ( IES_NOERR != ret )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return IES_ERR;
+            }
+            val_str = sys_cmd_buf;
+        }
+        else
+        {
+            uri_handle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+            if ( NULL == uri_handle ) 
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return SNMP_ERR_BADVALUE;
+            }
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_TR2_REPLACE_URI, entry->flags) )
+            {
+                snprintf( uri_string, sizeof(uri_string), 
+                    IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_STATUS, entry->flags)  ? 
+                        IES_URI_STATUS_PATH("/%s") :  IES_URI_CONFIG_PATH("/%s"), 
+                    entry->mod_uri );
+            }
+            else
+            {
+                snprintf( uri_string, sizeof(uri_string), 
+                    IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_STATUS, entry->flags)  ? 
+                        IES_URI_STATUS_PATH("/%s") :  IES_URI_CONFIG_PATH("/%s"), 
+                    entry->uri );
+            }
+
+            if ( moxaSnmpHandle_UtilCfgGetURIConfigString( uri_string, val_buf, sizeof(val_buf) ) != 0 )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+            }
+            val_str = val_buf;
+        }
+
+        sysinfo(&info);
+        if ( IES_NOERR == IS_SCALAR_ENTRY(entry) ) 
+        {
+
+            fp = fopen(fname, "w+");
+            fprintf(fp, "# %ld\n", info.uptime);
+            for ( i = 0; i < entry->oid_len - 1; i ++) 
+            {
+                fprintf(fp, "%d.", (int) entry->oid_list[i]);
+            }
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags) )  
+            {
+                if ( 0 == strncmp( val_str, "true", strlen("true")) ) 
+                {
+                    fprintf(fp, "%d.0='1'\n", 
+                        (int) entry->oid_list[entry->oid_len - 1]);
+                } 
+                else 
+                if ( 0 == strncmp( val_str, "false", strlen("false"))  )
+                {
+                    fprintf(fp, "%d.0='2'\n", 
+                        (int) entry->oid_list[entry->oid_len - 1]);
+                } 
+                else 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+                }
+            } 
+            else
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_INTERFACE, entry->flags) )  
+            {
+                uri_iface = atoi(val_str);
+                fprintf(fp, "%d.0='%d'\n", 
+                    (int) entry->oid_list[entry->oid_len - 1], uri_iface + 1);
+            }
+            else
+            {
+                fprintf(fp, "%d.0='%s'\n", 
+                    (int) entry->oid_list[entry->oid_len - 1], val_str);
+            }
+
+            fclose(fp);
+        } 
+        else 
+        {
+
+            fp = fopen(fname, "w+");
+            if ( NULL == fp ) 
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d fname = %s\n", __func__, __LINE__, fname );
+                return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+            }
+            fprintf(fp, "%s", val_str);
+            fclose(fp);
+
+            if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+                "/sbin/generate_uri_snmp_table "
+                " %s %s %s_result %ld %d", entry->uri, fname, fname, info.uptime, gMaxPortInDevice) )
+            {
+
+                ret = IES_ERR;
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+            }
+
+            {
+                char fnameSrc[IES_MAX_FILE + 8];
+                snprintf(fnameSrc, sizeof(fnameSrc), "%s_result", fname);
+                if ( 0 != rename(fnameSrc, fname) )
+                {
+
+                    ret = IES_ERR;
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+                }
+            }
+            util_table_snapshot_setup(fname, entry);
+        }
+
+        if ( NULL != json_val ) 
+        {
+            json_value_free(json_val);
+            json_val = NULL;
+        }
+        LibFrameworkUri_ReleaseHandle(uri_handle);
+    }
+
+    fp = fopen(fname, "r");
+
+    if ( NULL == fp ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    *ret_fp = fp;
+    return IES_NOERR;
+}
+
+
+/*-------------------------------------------------------------------+
+ * Function           : mox_snmp_flask_handle_result
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+int 
+mox_snmp_flask_handle_result
+(
+    struct LibFrameworkUri_Handle *uri_handle,
+    JSON_Value                    *json_val,
+    int                            ret
+)
+{
+    if ( NULL != json_val ) 
+    {
+        json_value_free(json_val);
+        json_val = NULL;
+    }
+    LibFrameworkUri_ReleaseHandle(uri_handle);
+    return ( IES_NOERR == ret ) ? SNMP_ERR_NOERROR : SNMP_ERR_BADVALUE ;
+}
+
+#include "ies_auto_mibs_setup.c"
+#include "ies_auto_mibs_handle_command.c"
+#include "ies_auto_mibs_handle_read_create_v2.c"
+#include "ies_auto_mibs_handle_read_create_vRMON.c"
+#include "ies_auto_mibs_handle_table.c"
+#include "ies_auto_mibs_handle_uri_mod_by_index.c"
+#include "ies_auto_mibs_handle_oid_valid_by_index.c"
+#include "ies_auto_mibs_handle_la_replace_bit.c"
+#include "ies_auto_mibs_handle_uri_filter_del.c"
+#include "ies_auto_mibs_handle_set_replace_table_2entryArray.c"
+#include "ies_auto_mibs_handle_set_redundant_port.c"
+#include "ies_auto_mibs_handle_set_replace_table_2portsPbmp.c"
+#include "ies_auto_mibs_handle_set_mangement_vlan.c"
+#include "ies_auto_mibs_handle_set_uri_config_chain.c"
+#include "ies_auto_mibs_handle_set_change_value_scale.c"
+#include "ies_auto_mibs_handle_file_buffer.c"
+
+/*-------------------------------------------------------------------+
+ * Function           : mox_snmp_flask_handle_entry_set
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+int 
+mox_snmp_flask_handle_entry_set
+(
+    netsnmp_agent_request_info    *reqinfo,
+    netsnmp_request_info          *request,
+    struct ies_auto_mibs_entry    *entry
+)
+{
+    struct LibFrameworkUri_Handle *uri_handle = NULL;
+    JSON_Value                    *json_val   = NULL;
+    JSON_Value                    *json_ret   = NULL;
+    char                          *json_ret_string = NULL;
+    unsigned  char                *ip_str     = NULL;
+    unsigned  char                *mac_str    = NULL;
+    char                           uri_string[IES_MAX_URI]            = {0x0};
+    char                           val_string[IES_MAX_SNMP_VALUE]     = {0x0};
+    char                           val_string_set[IES_MAX_SNMP_VALUE] = {0x0};
+    int                            val_string_len                     = 0;
+    struct uriPort_entry           uri_port_entry[AUTO_MIB_MAX_DEV_PORT] = {0x0};
+    char                           oct_char_tmp;
+    int                            ret = IES_ERR;
+    oid                           *req_oid;
+    int                            req_oid_len;
+    oid                           *val_oid                        = NULL;
+    int                            val_oid_len                    = 0;
+    int                            val_oid_index                  = 0;
+    int                            index;
+    int                            req_val_len = 0;
+    int                            uri_iface;
+    int                            uri_number  = 0;
+    int                            i, count;
+    struct timespec                timeBefore;
+    struct timespec                timeAfter;
+
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeBefore) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    }
+
+    entry_handle_remove_file(entry);
+
+    uri_handle = LibFrameworkUri_CreateHandle(flask_server_ip, 80);
+    if ( NULL == uri_handle ) 
+    {
+
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return SNMP_ERR_BADVALUE;
+    }
+
+    req_oid     = (oid *)request->requestvb->name;
+    req_oid_len = request->requestvb->name_length;
+
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_READ_CREATE,       entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_READ_CREATE_v2,    entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_READ_CREATE_vRMON, entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_GENERAL_TABLE,     entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_COMMAND,       entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_LA_REPLACE_BIT,    entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_FILTER_DEL,    entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_SYSTEM_COMMAND,    entry->flags) ||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY_ARRAY, entry->flags )||
+         IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP,  entry->flags ) )
+    {
+        ;
+    } 
+    else 
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_MOD_BY_IDX, entry->flags) ) 
+    {
+        
+        if ( IES_NOERR != handle_uri_mod_by_idx_table( req_oid, req_oid_len, entry, uri_string ) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            LibFrameworkUri_ReleaseHandle(uri_handle);
+            return SNMP_ERR_BADVALUE;
+        }
+
+    } 
+    else 
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_OID_VALID_BY_IDX, entry->flags) ) 
+    {
+        
+        if ( IES_NOERR != handle_oid_valid_by_idx_table( (int *)req_oid, req_oid_len, entry, uri_string ) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            LibFrameworkUri_ReleaseHandle(uri_handle);
+            return SNMP_ERR_BADVALUE;
+        }
+
+    } 
+    else 
+    {
+        if ( 0 == entry->oid_index ||
+             IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY, entry->flags)) 
+        {
+
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY, entry->flags) ) 
+            {
+                index = req_oid[req_oid_len - 1];
+                if ( 1 != index ) 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    LibFrameworkUri_ReleaseHandle(uri_handle);
+                    return SNMP_ERR_BADVALUE;
+                }
+            }
+
+            snprintf(uri_string, sizeof(uri_string),
+                IES_URI_CONFIG_PATH("/%s"),
+                ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags) ) ? 
+                entry->mod_uri : entry->uri);
+
+        } 
+        else 
+        if ( 1 == entry->oid_index ) 
+        {
+            index = req_oid[req_oid_len - 1];
+            if ( index >= 1 ) 
+            {
+                index--;
+            } 
+            else 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                LibFrameworkUri_ReleaseHandle(uri_handle);
+                return SNMP_ERR_BADVALUE;
+            }
+
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags) ) 
+            {
+                snprintf(uri_string, sizeof(uri_string), 
+                    IES_URI_CONFIG_PATH("/%s%d/%s"), 
+                    entry->mod_uri, index, entry->mod_uri_index);
+            } 
+            else 
+            {
+                snprintf(uri_string, sizeof(uri_string), 
+                    IES_URI_CONFIG_PATH("/%s%d/%s"), 
+                    entry->uri, index, entry->uri_index);
+            }
+        } 
+        else 
+        {
+            /* no multi-index-table */
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+            LibFrameworkUri_ReleaseHandle(uri_handle);
+            return SNMP_ERR_BADVALUE;
+        }
+    }
+    switch(entry->val_type) 
+    {
+        case SNMP_DATA_TYPE_INTEGER32:
+        // case SNMP_DATA_TYPE_INTEGER: same as SNMP_DATA_TYPE_INTEGER32
+        case SNMP_DATA_TYPE_TIME_TICKS:
+        case SNMP_DATA_TYPE_COUNTER32: 
+        //case SNMP_DATA_TYPE_COUNTER: same as SNMP_DATA_TYPE_COUNTER32
+        case SNMP_DATA_TYPE_UNSIGNED32:
+        //case SNMP_DATA_TYPE_GAUGE32: same as SNMP_DATA_TYPE_UNSIGNED32
+        //case SNMP_DATA_TYPE_GAUGE:   same as SNMP_DATA_TYPE_UNSIGNED32
+            uri_number = 1;
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags) ) 
+            {
+                if ( 1 == *request->requestvb->val.integer ) 
+                {
+                    snprintf(val_string, sizeof(val_string), "true");
+                } 
+                else 
+                if ( 2 == *request->requestvb->val.integer )
+                {
+                    snprintf(val_string, sizeof(val_string), "false");
+                }
+                else
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    goto out;
+                }
+            }
+            else 
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_INTERFACE, entry->flags) ) 
+            {
+                memcpy(&uri_iface, request->requestvb->val.integer, sizeof(uri_iface));
+                snprintf(val_string, sizeof(val_string), "%d", uri_iface - 1);
+            }
+            else 
+            {
+                snprintf(val_string, sizeof(val_string), "%d", *request->requestvb->val.integer);
+            }
+            break; 
+        case SNMP_DATA_TYPE_IP_ADDR_PRIM:
+            ip_str = (unsigned char *) request->requestvb->val.string;
+            snprintf(val_string, sizeof(val_string), "%d.%d.%d.%d", ip_str[0], ip_str[1], ip_str[2], ip_str[3]);
+            break; 
+        case SNMP_DATA_TYPE_MAC_ADDRESS:
+            mac_str = (unsigned char *) request->requestvb->val.string;
+            snprintf(val_string, sizeof(val_string), "%2.2x:%2.2x:%2.2x:%2.2x:%2.2x:%2.2x", mac_str[0], mac_str[1], mac_str[2], mac_str[3], mac_str[4], mac_str[5]);
+            break; 
+        case SNMP_DATA_TYPE_OCTET_PRIM:
+        case SNMP_DATA_TYPE_OPAQUE:
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_BIT_VALUE, entry->flags) ||
+                 IES_FLAG_BITS_CHK(IES_FLAG_SNMP_LA_REPLACE_BIT,    entry->flags) ||
+                 IES_FLAG_BITS_CHK(IES_FLAG_SNMP_MANAGEMENT_VLAN,   entry->flags) ) 
+            {
+                break;
+            }
+            else
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_BIT_2OCT, entry->flags) ) 
+            {
+                if ( IES_NOERR != utilSNMP_setOCT_to_hexValue(request, &oct_char_tmp ) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                    goto out;
+                }
+                val_string_len = snprintf(val_string, sizeof(val_string), "%2.2x", oct_char_tmp);
+            } 
+            else 
+            if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_PBMP, entry->flags) ) 
+            {
+                count = sizeof(uri_port_entry) / sizeof(uri_port_entry[0]);
+                for ( i = 0; i < count; i++ )
+                {
+                    uri_port_entry[i].enable = IES_SNMP_BITS_DISABLE;
+                }
+                if ( IES_NOERR != utilSNMP_setOCT_to_portEntry( request, uri_port_entry, gMaxPortInDevice) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    goto out;
+                }
+                break; 
+            } 
+            else 
+            {
+                req_val_len  = request->requestvb->val_len;
+                if ( req_val_len >= IES_MAX_SNMP_VALUE - 10 /* just in case */ ) 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    goto out;
+                }
+                memcpy(&val_string[0], request->requestvb->val.string, req_val_len);
+                val_string_len = req_val_len; //  just val_string 
+                val_string[val_string_len] = '\0';
+            }
+            break; 
+        case SNMP_DATA_TYPE_OBJECT_ID:
+            val_oid        = request->requestvb->val.objid;
+            val_oid_len    = (request->requestvb->val_len) / 4;
+            val_string_len = 0;
+            for ( val_oid_index = 0; val_oid_index < val_oid_len; val_oid_index++ )
+            {
+                if ( IES_NOERR != ies_uri_snmp_sprintf((char *)val_string, IES_MAX_SNMP_VALUE,
+                    &val_string_len, "%d.", (unsigned int)val_oid[val_oid_index]) )
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                    goto out;
+                }
+            }
+            val_string_len --; // skip last `.`
+            val_string[val_string_len] = '\0';
+            break;
+        case SNMP_DATA_TYPE_COUNTER64:
+            /* not support yet */
+        case SNMP_DATA_TYPE_NULL:
+        case SNMP_DATA_TYPE_SEQUENCE:
+        case SNMP_DATA_TYPE_IMP_OCTET_PRIM:
+        case SNMP_DATA_TYPE_IMP_OBJECT_ID:
+        case SNMP_DATA_TYPE_ROW_STATUS:
+        default:
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d: not support yet !!\n", __func__, __LINE__);
+            goto out;
+    }
+
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_READ_CREATE_v2, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_for_readCreate_v2(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_READ_CREATE_vRMON, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_for_readCreate_vRMON(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_GENERAL_TABLE, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_table_set(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_COMMAND, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_for_command(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_LA_REPLACE_BIT, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_mibs_handle_set_la_replace_bit(reqinfo, request, entry) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_FILTER_DEL, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_uri_filter_del(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY_ARRAY, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_replace_table_2_entry_array(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_replace_table_2_portsPbmp(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_REDUNDANT_PORT, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_redundant_port(reqinfo, request, entry, val_string) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_MANAGEMENT_VLAN, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_management_vlan(reqinfo, request, entry, val_string) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_CONFIG_CHAIN, entry->flags) ) 
+    {
+        if ( IES_NOERR != ies_auto_mibs_handle_set_uri_config_chain(reqinfo, request, entry, val_string) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+    }
+    else
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d uri_string \'%s\'\n", __func__, __LINE__, uri_string);
+
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_CHANGE_VALUE_SCALE, entry->flags) ) 
+        {
+            if ( IES_NOERR != ies_auto_mibs_handle_set_change_value_scale(reqinfo, request, entry, val_string) ) 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                goto out;
+            }
+        }
+
+        if ( IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_PBMP, entry->flags) ) 
+        {
+            if ( IES_NOERR != utilURI_generate_json_portBitMAP(&json_val, uri_port_entry, gMaxPortInDevice) )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+                goto out;
+            }
+        }
+        else
+        {
+            if ( uri_number == 1 )
+            {
+                json_val = json_parse_string(val_string);
+            }
+            else
+            {
+                snprintf(val_string_set, sizeof(val_string_set), "\"%s\"", val_string);
+                json_val = json_parse_string(val_string_set);
+            }
+        }
+
+        if ( NULL == json_val ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+            goto out;
+        }
+        if ( 0 != LibFrameworkUri_PatchUri(uri_handle, 
+                uri_string, security_token, json_val, &json_ret) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d !!\n", __func__, __LINE__);
+            json_ret_string = json_serialize_to_string(json_ret);
+            if ( NULL != json_ret_string )
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "json_ret_string =  '%s'\n",
+                    json_ret_string );
+                json_free_serialized_string(json_ret_string);
+            }
+            goto out;
+        }
+    }
+    if ( IES_NOERR != event_handler_utilSNMP_set_running_to_startup_config_and_sleep(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__ );
+        goto out;
+    }
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeAfter) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    }
+    util_timeDiff("mib set patch uri", &timeBefore, &timeAfter);
+    ret = IES_NOERR;
+out:
+    if ( NULL != json_ret )
+    {
+        json_value_free(json_ret);
+        json_ret = NULL;
+    }
+    return mox_snmp_flask_handle_result(uri_handle, json_val, ret);
+}
+
+
+
+
+
+
+/* Plan C (agentx_owned.list): generic GET-forward table.
+ *
+ * Some columns are RW, so they stay registered locally (SET goes through the
+ * framework). But their GET via the ISS value-file path is slow (~600ms,
+ * ies_uri_handle) and, because a MIB walk bundles them with the RO columns in
+ * one multi-varbind GETNEXT, they drag the whole table walk. So we forward just
+ * the GET to the ISS AgentX subagent (fast), keeping SET local.
+ *
+ * Each rule pairs the RW column OID to intercept (col_oid) with a "probe" OID
+ * (probe_oid): a RO instance owned exclusively by ISS (skipped locally via
+ * agentx_owned.list) that lives in the SAME ISS AgentX registration as the
+ * column. The probe is what makes netsnmp_subtree_find() resolve to ISS's
+ * registration instead of our local one -- probing the column itself would find
+ * the local registration (the RW column is registered locally), not ISS.
+ *
+ * To add a future exception: define its column OID and a suitable probe OID,
+ * then append one row to mox_iss_get_forward_rules[]. */
+struct mox_iss_get_forward_rule
+{
+    const oid *col_oid;         /* RW column OID (no instance) to match on GET  */
+    int        col_oid_len;
+    const oid *probe_oid;       /* RO ISS-owned instance to locate ISS reginfo  */
+    int        probe_oid_len;
+};
+
+/* ifTable: probe with ifIndex.1 (RO), which locates ISS's interfaces-group
+ * (1.3.6.1.2.1.2) registration incl. ifAdminStatus. */
+static const oid mox_col_ifadminstatus[]      = { 1,3,6,1,2,1,2,2,1,7 };
+static const oid mox_probe_ifindex[]          = { 1,3,6,1,2,1,2,2,1,1,1 };
+/* ifXTable: probe with ifName.1 (RO), which locates ISS's ifXTable
+ * (1.3.6.1.2.1.31.1.1) registration incl. the RW columns below. */
+static const oid mox_col_iflinkupdowntrapen[] = { 1,3,6,1,2,1,31,1,1,1,14 };
+static const oid mox_col_ifpromiscuousmode[]  = { 1,3,6,1,2,1,31,1,1,1,16 };
+static const oid mox_col_ifalias[]            = { 1,3,6,1,2,1,31,1,1,1,18 };
+static const oid mox_probe_ifname[]           = { 1,3,6,1,2,1,31,1,1,1,1,1 };
+
+#define MOX_ISS_FWD_OIDLEN(a) ((int)(sizeof(a)/sizeof(oid)))
+static const struct mox_iss_get_forward_rule mox_iss_get_forward_rules[] =
+{
+    { mox_col_ifadminstatus,      MOX_ISS_FWD_OIDLEN(mox_col_ifadminstatus),
+      mox_probe_ifindex,          MOX_ISS_FWD_OIDLEN(mox_probe_ifindex)      },
+    { mox_col_iflinkupdowntrapen, MOX_ISS_FWD_OIDLEN(mox_col_iflinkupdowntrapen),
+      mox_probe_ifname,           MOX_ISS_FWD_OIDLEN(mox_probe_ifname)       },
+    { mox_col_ifpromiscuousmode,  MOX_ISS_FWD_OIDLEN(mox_col_ifpromiscuousmode),
+      mox_probe_ifname,           MOX_ISS_FWD_OIDLEN(mox_probe_ifname)       },
+    { mox_col_ifalias,            MOX_ISS_FWD_OIDLEN(mox_col_ifalias),
+      mox_probe_ifname,           MOX_ISS_FWD_OIDLEN(mox_probe_ifname)       },
+};
+
+static const struct mox_iss_get_forward_rule *
+mox_snmp_entry_iss_get_forward_rule (struct ies_auto_mibs_entry *entry)
+{
+    size_t r;
+    int    i;
+    for ( r = 0;
+          r < sizeof(mox_iss_get_forward_rules)/sizeof(mox_iss_get_forward_rules[0]);
+          r++ )
+    {
+        const struct mox_iss_get_forward_rule *rule = &mox_iss_get_forward_rules[r];
+        if ( entry->oid_len != rule->col_oid_len )
+        {
+            continue;
+        }
+        for ( i = 0; i < entry->oid_len; i++ )
+        {
+            if ( (oid) entry->oid_list[i] != rule->col_oid[i] )
+            {
+                break;
+            }
+        }
+        if ( i == entry->oid_len )
+        {
+            return rule;
+        }
+    }
+    return NULL;
+}
+
+/* Forward a single GET/GETNEXT request to the ISS AgentX subagent, bypassing
+ * the slow local ies_uri_handle path. agentx_master_handler marks the request
+ * delegated and sends it async; net-snmp fills the value when ISS replies.
+ * Returns 0 if handed to ISS, -1 if ISS is not registered (caller falls back). */
+static int
+mox_snmp_forward_get_to_iss (const struct mox_iss_get_forward_rule *rule,
+                             netsnmp_agent_request_info *reqinfo,
+                             netsnmp_request_info       *request)
+{
+    netsnmp_subtree      *iss_sub;
+    netsnmp_request_info *saved_next;
+
+    iss_sub = netsnmp_subtree_find(rule->probe_oid, rule->probe_oid_len,
+                                   NULL, NULL);
+    if ( iss_sub == NULL || iss_sub->reginfo == NULL ||
+         iss_sub->reginfo->handler == NULL )
+    {
+        return -1;                      /* ISS AgentX subagent not connected */
+    }
+
+    /* Forward only THIS request; detach siblings so netsnmp_call_handlers does
+     * not pull the rest of the chain (this handler is invoked per request). */
+    saved_next    = request->next;
+    request->next = NULL;
+    (void) netsnmp_call_handlers(iss_sub->reginfo, reqinfo, request);
+    request->next = saved_next;
+
+    return 0;
+}
+
+/* Plan E PoC (ADR-0003): forward a trustedIp-table GET to the framework AgentX
+ * subagent. Unlike the ISS path (probe OID), here in-master AND framework
+ * dual-register the SAME OID, so we locate framework's registration by iterating
+ * the subtrees covering this OID and picking the one whose handler is NOT our own
+ * (mox_snmp_handle_entry). in-master wins the wire (priority 127 < framework 200);
+ * this only runs for GET. Returns 0 if forwarded, -1 if framework not present. */
+static const oid mox_trustedip_prefix[] = { 1,3,6,1,4,1,8691,602,1,4,1,2 };
+#define MOX_TRUSTEDIP_PREFIX_LEN ((int)(sizeof(mox_trustedip_prefix)/sizeof(oid)))
+
+static int
+mox_snmp_entry_is_trustedip(struct ies_auto_mibs_entry *entry)
+{
+    int i;
+    if ( entry->oid_len < MOX_TRUSTEDIP_PREFIX_LEN )
+    {
+        return 0;
+    }
+    for ( i = 0; i < MOX_TRUSTEDIP_PREFIX_LEN; i++ )
+    {
+        if ( (oid) entry->oid_list[i] != mox_trustedip_prefix[i] )
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+mox_snmp_forward_get_to_framework(struct ies_auto_mibs_entry *entry,
+                                  netsnmp_agent_request_info *reqinfo,
+                                  netsnmp_request_info       *request)
+{
+    netsnmp_subtree      *sub;
+    netsnmp_subtree      *cand;
+    netsnmp_request_info *saved_next;
+
+    /* Same-region dual regs are linked via ->children (priority chain), NOT
+     * ->next (adjacent OID regions). Walking ->next can hit a foreign AgentX
+     * region and leave the request delegated forever. */
+    sub = netsnmp_subtree_find(entry->oid_list, entry->oid_len, NULL, NULL);
+    if ( sub == NULL )
+    {
+        return -1;
+    }
+    for ( cand = sub; cand != NULL; cand = cand->children )
+    {
+        if ( cand->reginfo != NULL && cand->reginfo->handler != NULL &&
+             cand->reginfo->handler->access_method != mox_snmp_handle_entry )
+        {
+            saved_next    = request->next;
+            request->next = NULL;
+            (void) netsnmp_call_handlers(cand->reginfo, reqinfo, request);
+            request->next = saved_next;
+            return 0;
+        }
+    }
+    return -1;                           /* framework subagent not present */
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : mox_snmp_handle_entry
+ *
+ * Description        :
+        all the get function from ISS, use file operation.
+        all function from framework use flask
+        all the set function , use flask
++-------------------------------------------------------------------*/
+int
+mox_snmp_handle_entry
+(
+    netsnmp_mib_handler                   *handler,
+    netsnmp_handler_registration          *reginfo,
+    netsnmp_agent_request_info            *reqinfo,
+    netsnmp_request_info                  *request 
+)
+{
+    struct ies_auto_mibs_entry             entry_buf;
+    struct ies_auto_mibs_entry            *entry = NULL;
+    FILE                                  *fp    = NULL;
+    int                                    ret;
+    struct timespec                        timeBefore;
+    struct timespec                        timeAfter;
+    char                                   snmp_username[RWUSER_NAME_SIZE] = {0};
+    int                                    token_cnt = 0;
+    
+    if ( request->processed )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+        return SNMP_ERR_NOERROR;
+    }
+    if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeBefore) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+    }
+
+    memset(&entry_buf, 0                   , sizeof(entry_buf));
+    memcpy(&entry_buf, reginfo->my_reg_void, sizeof(entry_buf));
+
+    entry = &entry_buf;
+
+    if ( IES_AUTO_MIBS_MAGIC_ENTRY != entry->magic ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s: Bad Magic \n", __func__);
+        return SNMP_ERR_NOSUCHNAME; 
+    }
+
+    // Default token for snmp v1, v2c and v3(read-only user)
+    snprintf(security_token, sizeof(security_token), "%s", security_tokens[0]);
+    // Identify SNMPv3 read-write username and use different token to access
+    if (reqinfo->asp->pdu->securityName)
+    {
+        snprintf(snmp_username, RWUSER_NAME_SIZE, reqinfo->asp->pdu->securityName);
+        // Search token array
+        for (token_cnt = 0; token_cnt < MAX_TOKEN_NUM - 1; token_cnt++) {
+            if (strncmp(snmp_username, rwuser_list[token_cnt], RWUSER_NAME_SIZE) == 0) {
+                memset(security_token, 0, sizeof(security_token));
+                snprintf(security_token, sizeof(security_token), "%s", security_tokens[token_cnt+1]);
+                break;
+            }
+        }
+    }
+
+    if ( MODE_IS_GET(reqinfo->mode) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d: entry %s \n",
+            __func__, __LINE__, entry->uri );
+
+        /* Plan C (agentx_owned.list): RW column GET → ISS AgentX (fast); SET stays local. */
+        {
+            const struct mox_iss_get_forward_rule *fwd_rule =
+                mox_snmp_entry_iss_get_forward_rule(entry);
+            if ( fwd_rule != NULL )
+            {
+                if ( mox_snmp_forward_get_to_iss(fwd_rule, reqinfo, request) == 0 )
+                {
+                    return SNMP_ERR_NOERROR;
+                }
+                /* ISS unavailable → fall through to the local (slow) path */
+            }
+        }
+
+        /* Plan E (ADR-0003, fix-1): trustedIp GET *and* GETNEXT → framework AgentX,
+         * now that framework registers the table as a table_data_set (net-snmp
+         * sequences GETNEXT/GETBULK — no longer weak). SET stays in-master.
+         * Narrow hardcoded gate (PoC only). */
+        if ( MODE_IS_GET(reqinfo->mode) && mox_snmp_entry_is_trustedip(entry) )
+        {
+            if ( mox_snmp_forward_get_to_framework(entry, reqinfo, request) == 0 )
+            {
+                return SNMP_ERR_NOERROR;
+            }
+            /* framework unavailable → fall through to local REST path */
+        }
+
+        if ( moxaSnmpHandle_ChkEntryGetValue(entry) == 0 )
+        {
+            if ( moxaSnmpHandle_ExeEntryGetValue(reqinfo, request, entry) == 0 )
+            {
+                return SNMP_ERR_NOERROR;
+            }
+            return SNMP_ERR_BADVALUE;
+        }
+
+        if ( moxaSnmpHandle_UtilMibEntryCheckFromUri(entry) )
+        {
+            if ( IES_NOERR != entry_handle_generate_uri_value_file(entry, &fp) ) 
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d \n", __func__, __LINE__);
+
+                if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeAfter) ) 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                }
+                util_timeDiff("mib get bad 2", &timeBefore, &timeAfter);
+                return SNMP_ERR_BADVALUE;
+            }
+        } 
+        else 
+        {
+            if ( IES_NOERR != entry_handle_generate_iss_value_file(entry, &fp) ) 
+            {
+
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d \n", __func__, __LINE__);
+
+                if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeAfter) ) 
+                {
+                    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+                }
+                util_timeDiff("mib get bad 3", &timeBefore, &timeAfter);
+                return SNMP_ERR_BADVALUE;
+            }
+        }
+
+        ret = entry_handle_get_value_from_file(
+            reginfo, reqinfo, request, entry, 
+            fp, ( MODE_GET == reqinfo->mode ) ? IES_AUTO_MIBS_TBL_GET : IES_AUTO_MIBS_TBL_GET_NEXT);
+
+        if ( IES_NOERR == IS_SCALAR_ENTRY(entry) ) 
+        {
+            entry_handle_remove_file(entry);
+        }
+
+        if ( 0 != clock_gettime(CLOCK_MONOTONIC, &timeAfter) ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        }
+
+        if ( IES_NOERR == ret ) 
+        {
+            util_timeDiff("mib_get_success", &timeBefore, &timeAfter);
+        } 
+        else 
+        {
+            util_timeDiff("mib get bad 4", &timeBefore, &timeAfter);
+        }
+        return ( IES_NOERR == ret ) ? SNMP_ERR_NOERROR : SNMP_ERR_BADVALUE;
+
+    } 
+    else 
+    if ( MODE_IS_SET(reqinfo->mode) ) 
+    {
+        if ( MODE_SET_COMMIT == reqinfo->mode ) 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d: entry %s \n",
+                __func__, __LINE__, entry->uri );
+            if ( moxaSnmpHandle_ChkEntrySetValue(entry) == 0 )
+            {
+                if ( moxaSnmpHandle_ExeEntrySetValue(reqinfo, request, entry) == 0 )
+                {
+                    return SNMP_ERR_NOERROR;
+                }
+                return SNMP_ERR_BADVALUE;
+            }
+            return mox_snmp_flask_handle_entry_set(reqinfo, request, entry);
+        }
+        else
+        if ( reqinfo->mode == MODE_SET_RESERVE1 )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d: entry %s \n",
+                __func__, __LINE__, entry->uri );
+            if ( moxaSnmpHandle_ChkEntryDep(entry) == 0 )
+            {
+                if ( moxaSnmpHandle_ExeEntryDep(reqinfo, request, entry) == 0 )
+                {
+                    return SNMP_ERR_NOERROR;
+                }
+                return SNMP_ERR_BADVALUE;
+            }
+        }
+        return SNMP_ERR_NOERROR;
+    }
+    // TBD: only support GET/SET for now !!
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d \n", __func__, __LINE__);
+    return SNMP_ERR_BADVALUE;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : mox_snmp_init_entry
+ *
+ * Description        :
+        register MIB entry into NetSNMP
+
++-------------------------------------------------------------------*/
+/* Plan C: agentx_owned.list — RO entries whose URI prefix matches are NOT
+ * registered locally, so snmpd master longest-prefix-routes them to the ISS
+ * AgentX subagent (fast GET). RW entries are always kept local (SET via
+ * framework). Empty/absent list = legacy (register everything). */
+#define AGENTX_OWNED_LIST_FILE   "/etc/moxa/netsnmp/agentx_owned.list"
+#define AGENTX_OWNED_MAX         (32)
+#define AGENTX_OWNED_PREFIX_LEN  (64)
+static char gAgentXOwnedPrefix[AGENTX_OWNED_MAX][AGENTX_OWNED_PREFIX_LEN];
+static int  gAgentXOwnedCount  = 0;
+static int  gAgentXOwnedLoaded = 0;
+
+static void mox_snmp_load_agentx_owned_list(void)
+{
+    FILE *fp;
+    char  line[AGENTX_OWNED_PREFIX_LEN];
+
+    gAgentXOwnedCount = 0;
+    fp = fopen(AGENTX_OWNED_LIST_FILE, "r");
+    if (fp == NULL) {
+        return;                         /* legacy: no file → register everything locally */
+    }
+    while (fgets(line, sizeof(line), fp) != NULL &&
+           gAgentXOwnedCount < AGENTX_OWNED_MAX) {
+        char  *p = line;
+        size_t n;
+        while (*p == ' ' || *p == '\t') p++;          /* skip leading ws */
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+        n = strlen(p);
+        while (n > 0 && (p[n-1]=='\n'||p[n-1]=='\r'||p[n-1]==' '||p[n-1]=='\t'))
+            p[--n] = '\0';                            /* strip trailing ws */
+        if (n == 0) continue;
+        strncpy(gAgentXOwnedPrefix[gAgentXOwnedCount], p, AGENTX_OWNED_PREFIX_LEN-1);
+        gAgentXOwnedPrefix[gAgentXOwnedCount][AGENTX_OWNED_PREFIX_LEN-1] = '\0';
+        gAgentXOwnedCount++;
+    }
+    fclose(fp);
+}
+
+static int mox_snmp_entry_is_agentx_owned(struct ies_auto_mibs_entry *entry)
+{
+    int i;
+    if (entry->mode & HANDLER_CAN_SET) {
+        return 0;                       /* RW → keep local; SET goes via framework */
+    }
+    for (i = 0; i < gAgentXOwnedCount; i++) {
+        if (strncmp(entry->uri, gAgentXOwnedPrefix[i],
+                    strlen(gAgentXOwnedPrefix[i])) == 0) {
+            return 1;                   /* RO + prefix match → skip → ISS owns it */
+        }
+    }
+    return 0;
+}
+
+ies_handle_t
+mox_snmp_init_entry
+(
+    struct ies_auto_mibs_entry *entry_array,
+    int                         entry_array_len
+)
+{
+    int i, j;
+    netsnmp_handler_registration *reginfo = NULL;
+    struct ies_auto_mibs_entry   *entry   = NULL;
+    
+    
+    for( i = 0; i < entry_array_len; i++ ) 
+    {
+        entry = NULL;
+        entry = (struct ies_auto_mibs_entry *) malloc ( sizeof(*entry) );
+
+        if ( entry == NULL )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__);
+
+            return IES_ERR;
+        }
+
+        memset(entry, 0, sizeof(*entry));
+        memcpy(entry, &entry_array[i], sizeof(*entry));
+
+        entry->magic = IES_AUTO_MIBS_MAGIC_ENTRY;
+
+        if ( IES_NOERR != ies_auto_mibs_setup_entry_flags(entry) )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+                __func__, __LINE__);
+
+            return IES_ERR;
+        }
+
+        /* Plan C: RO + agentx_owned prefix → skip local register, let snmpd
+         * master route this OID to the ISS AgentX subagent. */
+        if ( !gAgentXOwnedLoaded )
+        {
+            mox_snmp_load_agentx_owned_list();
+            gAgentXOwnedLoaded = 1;
+        }
+        if ( mox_snmp_entry_is_agentx_owned(entry) )
+        {
+            free(entry);
+            continue;
+        }
+
+        if ( moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry(entry) != 0 )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+                __func__, __LINE__);
+
+            return IES_ERR;
+        }
+
+        if ( moxaSnmpHandle_UtilMibEntryRegisterToNetSNMP(entry) != 0 )
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d, name=%s\r\n",
+                __func__, __LINE__, entry->name);
+
+            return IES_ERR;
+        }
+    }
+    return IES_NOERR;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : exit_ies_auto_mibs
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+void exit_ies_auto_mibs(void)
+{
+    int                           i;
+    netsnmp_handler_registration *reginfo = NULL;
+    
+
+    for ( i = 0; i < cnt_reginfo; i++ ) 
+    {
+        reginfo = buf_reginfo[i];
+        if ( NULL != reginfo ) 
+        {
+            if ( NULL != reginfo->my_reg_void ) 
+            {
+                free(reginfo->my_reg_void);
+            } 
+            else 
+            {
+                LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",  __func__, __LINE__);
+                break;
+            }
+        } 
+        else 
+        {
+            LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+                __func__, __LINE__);
+            break;
+        }
+    }
+
+    event_handler_exit();
+
+    return;
+}
+
+/*-------------------------------------------------------------------+
+ * Function           : init_ies_auto_mibs
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+void init_ies_auto_mibs(void)
+{
+    LibUtil_SetDbgFlgBits(kDbgFlgIssUriSNMP);
+
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetMaxPortNumInSystem(&aMaxPortNumPtr) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__);
+        return;
+    }
+
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetProductId(&gProductId) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__);
+        return;
+    }
+
+    if ( LIB_SYSTEM_RET_SUCCESS != LibSystem_GetMaxPortChannelNumInSystem(&gMaxPortChannel) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n",
+            __func__, __LINE__);
+        return;
+    }
+
+    gMaxPortInDevice = aMaxPortNumPtr;
+    gMaxPortNumber   = gMaxPortInDevice + gMaxPortChannel;
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortInDevice = %d\n", 
+        __func__, __LINE__, gMaxPortInDevice);
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortChannel  = %d\n", 
+        __func__, __LINE__, gMaxPortChannel);
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gMaxPortNumber   = %d\n", 
+        __func__, __LINE__, gMaxPortNumber);
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s@%d gProductId       = %8.8x\n", 
+        __func__, __LINE__, gProductId);
+
+    if ( IES_NOERR != utilStoken_delete_security_token() ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return;
+    }
+
+    if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+            "/bin/rm -rf %s/*", AUTO_MIB_PATH) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__);
+        return;
+    }
+
+    if ( 0 != LibUtil_ExecShCmd(NULL, NULL, 0, 
+            "/bin/mkdir -p %s", AUTO_MIB_PATH) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", 
+            __func__, __LINE__);
+        return;
+    }
+
+    if ( IES_NOERR != event_handler_init() )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return;
+    }
+
+    util_table_snapshot_reset();
+
+    if ( IES_NOERR != utilStoken_update_security_token() ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return;
+    }
+
+
+    if ( IES_NOERR != ies_auto_mibs_load_mibs() ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return;
+    }
+
+
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s Done !!\n", __func__);
+    LibUtil_ClearDbgFlgBits(kDbgFlgIssUriSNMP);
+    return;
+}
+
+#endif // _IES_AUTO_MIBS_C_

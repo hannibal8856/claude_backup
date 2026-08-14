@@ -1,0 +1,66 @@
+- [Build order](feedback_build_order.md) — 用 ~/mds4xgl3/rebuild_snmp_plan_e.sh,別手打;排序需求來自 cargo 的 path 依賴(25 條)不是 workspace member 身分
+- [Docs only on explicit request](feedback_docs_only_on_explicit_request.md) — during plan Q&A, treat as clarification; don't auto-offer docx/pptx updates
+- [Context 60% reminder](feedback_context_60_reminder.md) — proactively warn near ~60% context, every session; offer handoff
+- [ISS AgentX subagent vs snmpd 161 conflict](project_iss_agentx_subagent_161_conflict.md) — ISS standalone agent binds 161 & crashes snmpd; fix = disable snmpagent + enable snmpsubagent master 127.0.0.1:705
+- [Plan C AgentX SET path & framing bug](project_plan_c_agentx_set_path_and_framing.md) — ifAdminStatus SET→config via existing PortSetAdminStatus2MxCfgAsync; AgentX drops under load = TCP framing desync (single recv + partial send)
+- [Plan D two-subagent OID reachability](project_plan_d_two_subagent_oid_reachability.md) — verified only ISS + framework subagents needed; no daemon serves OIDs directly; new OIDs must go via config/status layer
+- [mod_uri correlates with ISS-owned](project_moduri_correlates_iss_owned.md) — mod_uri groups are almost all iss_build==1; ISS shadows GET, so they can't migrate to framework without an ISS-side change
+- [agentx_owned two-axis design](project_agentx_owned_two_axis_design.md) — list=WHICH OIDs go AgentX (index table); iss_build=WHO serves (1→ISS, 0→reserved)
+- [Plan E iss0 GET-forward](project_plan_e_iss0_get_forward.md) — iss_build==0 GET→framework AgentX, SET stays in-master; ADR-0003 Proposed, PoC-gated
+- [SNMP framework-subagent migration](project_snmp_framework_subagent_migration.md) — roadmap A→B→C→mxDot1xdb, table_col/index-table mechanics, current state (A+syslog pending build), gotchas (generalInfo=system-info reverted)
+- [mxIpIf col2 in-master deferred](project_mxipif_col2_inmaster_deferred.md) — ifVlanId walks 0/0 = in-master shadowing (atoi vlanN); user deferred, not a framework bug
+- [SNMP walk 慢的診斷手法](project_snmp_walk_slow_diagnosis.md) — 先 snmpget vs snmpgetnext 分辨讀值慢 or GETNEXT 慢,再抓 :705 pcap;曾為此修錯兩輪
+- [framework vs mainline SNMP 差異](project_framework_vs_mainline_snmp_diffs.md) — mxTurboRingV2 三處:多回 index 欄、缺 interface 欄、coupling port 少 1(flags 未搬移)
+- [AgentX priority 方向搞反](project_agentx_priority_direction_inverted.md) — framework 200 輸給 in-master 127(小的贏);dual-reg GET 從未進 framework,Plan E 的 GET/SET 分流無法靠 priority 實作
+- [ISS AgentX 註冊範圍怎麼查](project_iss_agentx_registration_scope.md) — 看 *db.h 的分支涵蓋,不是 root 長度;master 連續遍歷會跳過「空 ISS 區段後的 in-master 孤島」(ADR-0011)
+- [DUT dual image A/B 配對](project_dut_dual_image_ab_pair.md) — p1=Plan E 0730_1302(覆蓋)、p2=mainline 0805_2335(對照組);燒錄一定從 0805 那側跑
+- [DUT 操作授權 A/B/C 級](feedback_dut_operation_authorization.md) — 可直接操作含 swupdate,執行前講明等級;護欄不放寬;優先走網路不走序列
+- [Moxa CLI 手冊(2 份 PDF)](reference_moxa_cli_manuals.md) — ~/WORK/SNMP_50ms/;可用 moxash 開功能把空表填出資料再驗 SNMP
+- [建置樹與容器](project_build_tree_and_container.md) — ~/mds4xgl3 是現行(snmp-plan-E);用 mx_mds4xgl3 容器;target 不帶 -custom;HSM 簽章由使用者跑
+- [ISS 涵蓋才是委派前提](project_iss_coverage_screen_before_delegating.md) — mod_uri 前綴與 iss_build 都會假陽性;mxLa 委派會直接刪掉 OID
+- [GET-forward probe 要用 pcap 驗](project_getfwd_probe_must_be_wire_verified.md) — 回得到值≠走 ISS;改對 probe 後機制證實可推廣,但 mxPort 這個應用慢 11% 淨值為負
+- [建置序列漏了 3rdparty_net_snmp](project_build_seq_needs_3rdparty_net_snmp.md) — ies_auto_mibs.c 由它編;git diff 被 alias 到 meld;make 會刪舊 .swu
+- [驗收兩條硬標準](feedback_verify_completeness_and_perf.md) — 對 mainline 完整性不能少,效能不能比原本 agentx_owned.list 差;含已知基準線
+- [agentx_owned.list parser 地雷](project_agentx_owned_list_parser_landmine.md) — 長註解被 fgets 切半會變成假 prefix;`s` 會命中 17 個 std*db/;e605314 已修
+- [委派完整性用 MIB 判](project_delegation_completeness_judge_by_mib.md) — 比欄位不比 varbind 數;少的欄位查 MAX-ACCESS;db.h 宣告≠ISS 服務;in-master port index 不是 ifIndex
+- [多出的 OID 要查 MIB 有無定義](feedback_verify_extra_oids_are_mib_defined.md) — MAX-ACCESS 每支 MIB 不同不可互推(mxPort read-only 是效益、mxQos not-accessible 是違規);mxPort 那 12 個 MIB 外欄位已移除
+- [ies_auto_mibs_setup.c 無相依追蹤](project_ies_auto_mibs_setup_no_dep_tracking.md) — 只改它不會重編,增量 build 靜默出貨舊碼;改完要 touch ies_auto_mibs.c + 刪 .o
+- [snmp 命令要加 /usr/bin](project_pysnmp_shadows_snmpwalk.md) — 使用者明示規則;~/.local/bin 的 pysnmp 版會假裝成「DUT 卡死」;walk/get/translate 都中招
+- [註冊表縮小假說已被推翻](project_registration_count_hypothesis_refuted.md) — ADR-0018;未搬遷 group 的加速原因未知,不可歸因給 AgentX;改用 evtPort 收回 in-master 慢 27× 當素材
+- [dlmod 路徑盤點](project_dlmod_path_inventory.md) — 第四條路,35 個模組;34 純 framework / 1 純 ISS(multicast_routing)/ 2 混合;判別只能看 .conf 的 dlmod 行,snmp/ 資料夾會假陽性
+- [Plan E 分支慣例](feedback_plan_e_branch_convention.md) — 每個動到的 package 都用 snmp-plan-E;origin 沒有就直接開新的;detached HEAD 要先救 commit
+- [+getfwd 靜默無效已被推翻](project_getfwd_noop_on_mxportdb_stdethdb.md) — 2026-08-12 封包證實四個前綴皆轉發,成因待查;仍成立的是「生效≠有效果」
+- [mxPort mainline 基準是 0.768s](project_mxport_mainline_baseline_corrected.md) — 交錯量測推翻 0.871;改善是 −11.3% 不是 −19.8%;8/09 整批未交錯數字都存疑
+- [origin 上不要 Claude trailer](feedback_no_claude_trailers_on_origin.md) — commit 時就別加那兩行;snmp-plan-E.opus 留本地當原始歷史,snmp-plan-E 才 push
+- [跨 session 交接紀律](feedback_cross_session_handoff_discipline.md) — ADR-0027 的執行版;用 from= 回覆、結論帶作用域、動共用資源先廣播、交還要寫「會導致什麼」
+- [pcap 留存紀律](feedback_pcap_retention_discipline.md) — 先取回證據再清 /tmp;檔名格式與 .tcpdump.log sidecar 的強度差別
+- [一律用正體中文回覆](feedback_reply_in_traditional_chinese.md) — 專有名詞(OID/partition/+getfwd/build)保留原文,不翻
+- [讀 memory 要讀 body](feedback_read_memory_body_not_index.md) — 索引行可能過時;證據要綁在被驗的那個 artifact 上
+- [Vincent 提案的評估結論](project_vincent_proposal_evaluation.md) — ADR-0026;#3 分級 TTL 照做是靜默無效,#1 的 arch 旗標跨三個 CPU 家族會壞
+- [LibFrameworkUri 每請求重建連線](project_frameworkuri_reconnects_per_request.md) — _isConnectionAlive() 硬編回 0;快取的 handle 只省 malloc 不省 TCP 握手;AgentX 相反(開機建一次)
+- [moxa_snmp_tools 涵蓋範圍會縮小](project_moxa_snmp_tools_coverage_shrinks.md) — 只看得到還在 in-master 的請求;已委派 OID dump 出空的,跟「沒發生」長得一樣
+- [ISS 的登記與註冊分離](project_iss_agentx_two_registrations_getnextindex.md) — SNMPRegisterMibWithLock 建 gpMibReg,SnxMainRegisterMibs 啟動時整批送 AgentX;註冊粒度是 MIB root 區段
+- [measure-snmp-walk 的靜默缺陷](project_measure_snmp_walk_skill_defects.md) — DUR 不隨 N 縮放、cnt() 重讀整份 pcap;小 N 會產生假的 delta=0(timeout 300 那條已修正為 900,輸出遺失要改懷疑管線緩衝)
+- [TR2 GETNEXT:Subtree vs IterTable](project_tr2_getnext_subtree_vs_itertable.md) — ADR-0009 的 3.9s 量的是逐 OID 註冊+16 個壞 OID,不是否決 IterTable;根因已修,延後處理(task #1)
+- [fiber check SHM 還會重寫 .stat 檔](project_fiber_check_shm_writes_stat_file.md) — 名稱沒說謊但不是純 SHM 路徑;status.rs:127-130 註解是遺留物;8ms 宣稱仍需實測
+- [跨 package header 不觸發重編](project_cross_package_header_no_rebuild.md) — lib_moxa_ies_auto_mibs 不認外部 header;「有沒有編到」的檢查會過,但過的是錯的那個 .so
+- [rtk hook 會改寫輸出,可能虛構條目](project_rtk_hook_truncates_grep_redirect.md) — 不只 grep 重導向;曾回傳不存在的目錄。存在性結論一律用 python3 或 rtk proxy
+- [AGENTX_PROBE_MAX=128 靜默溢出](project_agentx_probe_max_128_silent_overflow.md) — 目前 4 條全開是 100;加 stdrmodb/(104 RO)就爆,症狀跟 ADR-0025 未解的 bug 一模一樣
+- [.swu 有兩個位置](project_swu_lives_in_two_places.md) — output/images(make 會刪)+ ~/swu(備份);只查一邊就說「沒副本」會導致破壞性決策;搶檔靠 cp -n 不是廣播
+- [+getfwd 的 probe 來源與靜默丟值](project_getfwd_probe_sources_and_silent_value_loss.md) — 🔴 2026-08-14 已實地掉值(mxlldp 25 vb 歸零、線上 0 封包);三缺陷串聯;撤回的 runtime 檢查靠 !request->delegated 救得回同步那半
+- [DUT 重啟 snmpd 與 mount 陷阱](feedback_dut_snmp_restart_and_mount_traps.md) — moxash 的 acc en 有 [y/N] 會卡住並把 SNMP 留在停用;產檔與 mount 分兩步,先驗內容再掛
+- [誰在服務這個前綴:看執行期](project_who_serves_this_prefix_runtime_readouts.md) — net_*.h 的 .mode 會被 setup_entry_flags 覆寫;T4 GATE 有沒有出現才是服務者的直接讀數
+- [snmpd 重啟會清 trace 旗標](project_snmpd_restart_clears_trace_flag.md) — 註冊期 trace 還在、之後全空;曾據此得到完全錯誤的結論
+- [長指令不要接管線](feedback_no_pipes_on_long_running_commands.md) — `| tail` 讓 exit code 變 0,把編譯失敗回報成成功
+- [.mode 覆寫盤點的兩個坑](project_mode_override_glob_misses_seventh_file.md) — glob 漏掉 net_stdospfdb_setup.c;一處賦值可蓋整表,stdospdb 靜態 RO 68→實效 83
+- [mxQos 轉發實測慢 14%](project_mxqos_forwarding_measured_slower.md) — 結論是不要搬;in-master 每請求重建連線卻仍較快,瓶頸在 ISS 端
+- [mxQos 整棵 walk 只拿到 17%](project_mxqos_getnext_boundary_bug.md) — GETNEXT 邊界回傳自己;欄位存在只是走不到;-Cc 會無限迴圈
+- [image 身分看 BUILD_TIME](project_dut_image_identity_readouts.md) — /etc/os-release 寫 EDS-G4100 是死標籤;DUT 沒有 timeout 指令;系統時鐘是錯的
+- [「不存在」的結論要先證明走到了](feedback_absence_claims_need_reach_proof.md) — 缺席沒有任何輸出會提示你;一天內踩三次(空 pcap／walk 中止／62 欄)
+- [搬遷驗證文件放哪](project_migration_verification_folder.md) — ~/WORK/SNMP_50ms/snmp-plan-E_reopen/,一組一份;重測換日期不覆蓋
+- [ISS 表具象化與單槽快取](project_iss_table_materialization_single_slot_cache.md) — iss_build==1 每次開表整張寫進 tmpfs;快取 1 槽、換表 unlink、200ms idle TTL;800ms 絕對壽命是 dead code
+- [每個 GET 都做一次 SHM attach](project_every_get_pays_shm_attach.md) — util_timeDiff 無條件呼叫 DbgTrace;2022 年既有、mainline 也付;量級未測
+- [先問「我把什麼固定住了」](feedback_ask_what_you_held_fixed.md) — 兩臂相同的那一格是量測看不見的地方;品質檢查全過但問題問錯
+- [普查用樸素 time snmpwalk 就好](feedback_simple_time_snmpwalk_for_surveys.md) — 重型 measure-snmp-walk 協定只留給 A/B 效能與 AgentX 繞徑判定;/usr/bin 絕對路徑不放寬
+- [全 RW 前綴列入 list 是 no-op](project_zero_ro_prefix_list_is_noop.md) — 委派靠「RO entry 跳過本地註冊」;0 RO 就沒東西可跳;+getfwd 也不會讓未註冊的 index 欄出現
+- [資料來源要三分,不能只看 iss_build](project_iss_data_source_three_way.md) — 帶 ISS_REMAP 旗標的資料在 Aricent .2076(刻意不註冊)→ 轉發結構上不可能;mxlldp/mxvlan/fsvlandb/fscfadb/fsladb 全數取消資格

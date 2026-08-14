@@ -1,0 +1,124 @@
+# NOS v7.0 — Rust Clippy「by-application」遷移
+
+> Session 整理文件(投影片優先結構) · 2026-07-02
+
+## TL;DR
+把 NOS v7.0 buildroot 的 Rust clippy 掃描從「逐 package」改成「逐 application」,完成 169 個 dl repo 轉換、151 個 moxa lib `.mk` 清理、post-build gate 更新、canary 驗證,並在 8 份 defconfig 釘上分支版號。
+
+一句話:v6 已驗證的遷移流程,原封不動套到 v7.0 這條新產品線,步驟 1~5 完成。
+
+---
+
+## 背景與目標
+- 舊做法「逐 package 跑 `cargo clippy`」在**釘死的 rustc(1.85)**下會失敗:library 單獨掃描時沒有 Cargo.lock,crate 會重新 resolve 到需要 1.86/1.88 的版本(icu_*/bytestring/actix)。
+- 新做法「逐 application 跑 `RUSTC_WRAPPER=clippy-driver cargo check`」:靠 app 自己的 Cargo.lock 鎖定整個本地相依封閉集,一次掃完,rustc 版本不再爆。
+- 本次目標:把在 v6 已驗證的 `rust-clippy-by-application` skill,套用到 `~/NOS_v7.0_develop/buildroot` 這條**新產品線**,只做**步驟 1~5**(分類 → dl Makefile → moxa `.mk` → post-build.sh → canary 驗證)。
+
+v6 是母版,v7.0 是複製套用。步驟 6(Cargo.lock)、步驟 7(MR rollout)這次不做。分支刻意加 `-nos7` 後綴,避開 NOS/TN/EDS/v7 共用 GitLab project 的命名碰撞。
+
+---
+
+## 參考資料 / 來源
+- Skill:`rust-clippy-by-application`(v6 遷移母版流程,步驟 1~7)。
+- 母版程式碼樹:`~/NOS_v6.0_develop/buildroot`(dl Makefile、moxa `.mk`、post-build.sh 的 byte-level 對照基準)。
+- 目標樹:`~/NOS_v7.0_develop/buildroot`(symlink → `/home/moxa/sdc1/home/moxa/NOS_v7.0_develop`)。
+- 分支:`clippy-scan-binary-packages-3-nos7`(使用者重新命名,169 repo 已在此分支)。
+- 自製腳本:`transform_mk.py`、`transform_moxa.py`、`set_rev.py`(scratchpad);`check_v7_moxa_branches.sh`(家目錄)。
+
+所有轉換都以 v6 對應檔案做 byte-identical 驗證,確保 v7.0 產出與母版一致。
+
+---
+
+## 討論脈絡
+
+### 步驟 1~5 的執行(問題 → 方案 → 決定)
+- **問題**:v7.0 這條線要如何安全套用 v6 流程,又不誤改無關檔案?
+- **方案**:寫可重跑的 transformer 腳本,逐檔對照 v6 母版做 byte-diff 驗證,而非手改。
+- **取捨**:腳本化雖前期成本高,但可驗證、可回溯、避免手滑;符合「surgical changes」原則。
+- **決定**:三支腳本各司其職,CRLF 用 `open(path, newline='')` 保留,git 操作寫進 script 檔避開 RTK 對頂層 `git` 的改寫。
+
+### moxa `.mk` 的數量對帳
+- **問題**:189 份 moxa `.mk`,但 dl 底下只有部分 repo,對不上?
+- **決定**:拆解成 18 apps + 151 libs + 20「dl 不存在」的 package;對沒有 dl 的 20 個維持不動(surgical),只清理有 dl 的 151 個 lib。
+
+### 掃描腳本的輸出格式反覆
+- 使用者連續調整 `check_v7_moxa_branches.sh` 的輸出:先拿掉 mismatch 標註 → 只印「不在 -nos7」→ 再反過來只印「在 -nos7」。
+- **決定**:最終版只印在 `clippy-scan-binary-packages-3-nos7` 的 repo,依 git root 去重,結尾給總數摘要(總數=231、在分支=167、其他=64、非 git=0)。
+
+### defconfig `_REV` 的範圍
+- **問題**:要不要對所有 package 都寫 `_REV`?
+- **取捨**:buildroot 只有 `=y` 啟用的 package 其 `_REV` 才有效,disabled 的在 savedefconfig 會被剝除。
+- **決定**:只對「已啟用 + 已轉換」的 package 寫 `_REV`,disabled 的 skip。先做 6 份 mds/rks,使用者補要求後再加 tn、eds,共 8 份。
+
+---
+
+## 結論與決策
+- **改用 by-application 掃描** — 因為逐 lib 掃在釘死 rustc 下必然因缺 Cargo.lock 而 resolve 爆版。
+- **腳本化 + byte-diff 對照 v6** — 因為要確保 v7.0 產出與已驗證母版一致,且可重跑、可回溯。
+- **git 操作寫進 script 檔** — 因為 RTK hook 會改寫 Bash 頂層 `git`,寫進腳本內的 git 不受影響。
+- **`git diff` 一律用 `git diff --no-ext-diff`(flag 放在 `diff` 之後)** — 因為使用者的 git 設定會對 diff 叫出 meld GUI 導致卡住/timeout。
+- **`_REV` 只釘 enabled+converted package** — 因為 buildroot 只讓啟用 package 的 `_REV` 生效,disabled 會被 savedefconfig 剝除。
+- **8 份 defconfig 共釘 613 條 `_REV`** — 對齊 `clippy-scan-binary-packages-3-nos7`,涵蓋 mds/rks 6 份 + tn + eds。
+
+`set_rev.py` 只會「插入新 `_REV`」或「取代既有 `_REV`」(本次 replaced=0),所以依建構特性,所有新增行必為 `_REV` 行,grep 計數即為權威驗證,不需依賴 `git diff`。
+
+---
+
+## 後續待辦 / 開放問題
+- **[ ] 提交 8 份 defconfig `_REV` 變更** — 目前全部 uncommitted 在 `clippy-scan-binary-packages-3-nos7`,建議訊息 `Pin Rust packages to clippy-scan-binary-packages-3-nos7`(待使用者確認)。
+- **[ ] 還原 canary** — `dl/rust_moxa_common/src/lib.rs` 的 `clippy_scan_canary()` 待使用者確認 build/scan 驗證通過後,以 `git -C dl/rust_moxa_common checkout -- src/lib.rs` 還原。
+- **[ ] `_mp` variant defconfig** — 目前只做 non-mp 生產 defconfig;`*_mp_defconfig`(mds/rks/tn/eds)未動,待確認是否也要釘。
+- **[?] profiling feature** — `rust_moxa_build` 已比照 v6 拿掉 `CARGO_FEATURES_PROFILING`,待使用者確認。
+- **[?] 20 個「dl 不存在」package** — 目前維持不動,待確認是否需處理。
+- **步驟 6~7 未做** — Cargo.lock 提交、GitLab issue/branch/MR rollout 這次未要求。
+
+由使用者親自驗證 build(不跑 make rebuild,交回使用者),因此 build 驗證通過與否需等使用者回報後才動 canary。
+
+---
+
+## 附錄
+
+### A. 各 defconfig 新增 `_REV` 數
+| defconfig | `_REV` added |
+|---|---|
+| mdsg4000_defconfig | 72 |
+| mdsg4000l3_defconfig | 89 |
+| rksg4000_defconfig | 71 |
+| rksg4000l3_defconfig | 88 |
+| mdsg40004xgs_defconfig | 72 |
+| mdsg4000l34xgs_defconfig | 89 |
+| tn_bseries_defconfig | 63 |
+| edsg4000_defconfig | 69 |
+| **total** | **613** |
+
+### B. 核心指令與慣例
+```bash
+# 逐 application 掃描(取代逐 package cargo clippy)
+RUSTC_WRAPPER=clippy-driver cargo check
+
+# defconfig 內的版號釘定(僅對 =y 的 package 有效)
+BR2_PACKAGE_<PKG>_REV="clippy-scan-binary-packages-3-nos7"
+
+# diff 一律加 --no-ext-diff(放在 diff 之後),避免叫出 meld
+git diff --no-ext-diff -- configs/tn_bseries_defconfig configs/edsg4000_defconfig
+
+# canary 還原
+git -C dl/rust_moxa_common checkout -- src/lib.rs
+```
+
+### C. Canary 內容(暫時,驗證後移除)
+```rust
+// clippy_scan_canary: temporary by-application scan verification (remove after)
+pub fn clippy_scan_canary() { return; }
+```
+注入於 `dl/rust_moxa_common/src/lib.rs`(app_moxa_framework 的直接相依,經 rust_moxa_build 掃到)。
+
+### D. 分類規則(app vs lib)
+- **BIN(app)**:有 `src/main.rs`、`src/bin/`、或 `[[bin]]`。
+- 特例:`rust_moxa_build`(workspace app,用 `-p` 掃 framework+iss)、`plugin_moxa_aide`(framework-only → 補 app 掃描)、framework-split plugins(保留 app 掃描、去掉 framework 掃描)。
+- **dl repo git 邊界**:各 dl repo 自成 git repo,例外是 `3rdparty_net_snmp/snmp_script_rust`(git root 為上層 `3rdparty_net_snmp`)。
+
+### E. 三支腳本職責
+- `transform_mk.py` — dl Makefile 轉換(lib/app/aide 模式,多 `all:` 區塊、CRLF、recipe 區塊移除、`cargo clippy`→`RUSTC_WRAPPER=clippy-driver cargo check`)。
+- `transform_moxa.py` — moxa `.mk` 清理(移除 `RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)` 與 `@if…RUST_CLIPPY_SCAN_CONFIG…fi` scan-copy 區塊)。
+- `set_rev.py` — defconfig `_REV` 編輯(只對 enabled package 插入/取代 `_REV`,保留 EOL,印 added/replaced/skipped)。

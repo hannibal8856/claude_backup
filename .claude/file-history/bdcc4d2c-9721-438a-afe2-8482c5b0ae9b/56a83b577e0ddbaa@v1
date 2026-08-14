@@ -1,0 +1,95 @@
+---
+name: project-getfwd-probe-sources-and-silent-value-loss
+description: "+getfwd 的 probe 可以用 ISS 註冊的 MIB root(不必是被委派的 RO 欄);但 forward_get_to_iss 不檢查 ISS 回什麼,ISS 不服務時值會靜默消失"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: d8fbf478-f4fe-4f9b-b738-eb5019b102dd
+  modified: 2026-08-12T09:20:20.648Z
+---
+
+## 急迫性修正(2026-08-12,ADR-0030 之後)
+
+本檔原本假定 `mxportdb/` / `stdethdb/` 的 `+getfwd` 是壞的(依 ADR-0025)。**那個前提已被推翻** ——
+ADR-0030 用封包證實**四個前綴都正常轉發**,也就是說 **ISS 確實服務那些 OID**,
+所以**現況沒有在丟值**。
+
+→ 下面的缺陷從「正在流血」降級為「**潛在風險**」。程式碼沒有變,缺陷仍然存在,
+但它現在是**加新前綴前必須先架好的安全網**,不是要立刻搶修的線上故障。
+判斷加不加它的優先序時,請用這個修正後的定位。
+
+## ⚠️ 必修缺陷:轉發後不檢查回應,值會靜默消失
+
+`ies_auto_mibs.c` 的 `mox_snmp_forward_get_to_iss()`:
+
+```c
+netsnmp_call_handlers(iss_sub->reginfo, reqinfo, request);
+return 0;                    // ← 只確認 handler 被呼叫,不看 ISS 回了什麼
+```
+
+呼叫端拿到 0 就 `return SNMP_ERR_NOERROR`。所以 **ISS 若不服務該 OID,回 noSuchObject,
+in-master 照樣回報成功** → 那個 OID 從「本地讀得到正確值」變成消失,且無任何錯誤訊息。
+
+### 🔴 我原本提的修法是錯的(2026-08-12 撤回)
+
+原提案:「`netsnmp_call_handlers()` 之後檢查 varbind 是否為 `noSuchObject`,是的話 `return -1`
+退回本地」。**不可行,而且會做出一個假的安全網。**
+
+由 `snmp-plan-E reopen 6` 指出、我查證後確認:**AgentX 轉發是非同步的**。
+`ies_auto_mibs.c:3174-3177` 的註解自己就寫著 "marks the request delegated and sends it async;
+net-snmp fills the value when ISS replies"。所以呼叫後那一行讀到的 varbind **尚未填值**,
+檢查恆為「看起來沒問題」—— 這正是本專案反覆出現的「工具沒運作與假說成立長得一樣」的形狀。
+
+**而且回應階段沒有可用的掛鉤點。** 實際填值在 net-snmp 自己的
+`agent/mibgroup/agentx/master.c` `agentx_got_response()`(`:375-425`)裡:
+
+```c
+for (var = pdu->variables, request = requests; request && var; ...) {
+    if (var->type != SNMP_ENDOFMIBVIEW)
+        snmp_set_var_typed_value(request->requestvb, var->type, ...);
+    request->delegated = REQUEST_IS_NOT_DELEGATED;
+}
+```
+
+**原本的 in-master handler 不會被重新進入**,沒有 per-request callback。要做 runtime 退回
+就得改 net-snmp 本體,或把已離開 handler chain、且 asp 已在 `agent_delegated_list` 上的 request
+重新注入 —— 兩者成本都遠高於收益。
+
+### 改採的立場:安全網留在驗收階段
+
+`walkdiff.py` 的 `missing` 本來就進 exit code,**它已經能抓到「ISS 不服務導致欄位消失」**。
+正確的做法是把規則講明確 —— **加任何新前綴都必須對 oracle 做完整性比對** ——
+而不是加 runtime 機制。見 [[feedback_verify_completeness_and_perf]]。
+
+搭配的診斷手段是 `+getfwd` 的 trace(T2/T3/T4),它能直接指出某個欄位有沒有被轉發。
+
+這是 `+getfwd` 唯一的安全網缺口。目前擋住它的只有人工的完整性驗收
+(ADR-0024 對 mxRstp 驗了 27 欄 / 227 varbind 不變),見 [[feedback_verify_completeness_and_perf]]。
+
+## probe 不必是「被委派的 RO 欄」—— 可以是 ISS 註冊的 MIB root
+
+ISS 的 AgentX 註冊機制(`app_moxa_iss_10_1_0/code/future/snmpv3/snxmain.c:870` `SnxMainRegisterMibs()`):
+
+- 走訪 `gpMibReg`(由各模組的 `SNMPRegisterMibWithLock(&xxxOID, ...)` 填),
+  對每個 MIB 的 **root OID** 送 AgentX Register PDU(`SnxMainRegOrUnRegOid(..., ~SNX_INSTANCE_REGISTRATION)`)
+- 特例:`.1.3.6.1.6`(SNMPv2)跳過;`.1.3.6.1.4.1.2076`(SNX_PROP_MIBID_1)**刻意不註冊**
+  (註解:NOS7 不暴露這棵 ~5k OID 的 ISS 私有樹);`.1.3.6.1.4.1.29601.2` 註冊一次後
+  底下其他 MIB 全部略過
+- `:949-967` 有「root 已註冊就跳過子層」的去重,但那是**單一插槽**(只比對前一個註冊過的 root),
+  依賴 `gpMibReg` 已按字典序排列(`:894` 註解自承)
+
+→ **ISS 註冊的是「區段」不是「單一 OID」。** 所以區段內任何 in-master 沒搶走的 OID,
+`netsnmp_subtree_find()` 都會解析到 ISS —— 包含 table-entry OID、甚至 MIB root 本身
+(`ies_auto_mibs.c:3096-3097` 的註解就是這個意思)。
+
+**實務意義**:0 RO 的前綴(全 RW,現行 11 個:`mxqosdb/` 29、`stdlldp/` 8、`mxradiusdb/` 7、
+`mxlldp/` 6、`fscfadb/` 4、`mxrlpsdb/` 4、`mxstcldb/` 3、`mxvlan/` 3、`stdot1lldp/` 2、
+`fsvlandb/` 1、`stdot3lldp/` 1)**目前拿不到 probe**(候選只來自被委派的 RO entry)→
+`+getfwd` 結構上無效。但若改成**手工指定 probe = ISS 的 MIB root**,機制上就能運作。
+
+**How to apply:** 想讓 0-RO 前綴支援 `+getfwd`,順序是
+① 先確認 ISS 真的**服務**(不只宣告)那段 OID —— 見 [[project_iss_coverage_screen_before_delegating]];
+② 再把上面那個「檢查回應」的修正做掉,否則 ISS 答不出來時值會消失;
+③ 最後才談 probe 要寫在 code 還是 `agentx_owned.list`。
+**順序顛倒的話,第一個症狀就是 OID 消失而且查不到原因。**
+相關:[[project_getfwd_noop_on_mxportdb_stdethdb]]、[[project_iss_agentx_two_registrations_getnextindex]]

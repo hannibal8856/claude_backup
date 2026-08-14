@@ -1,0 +1,252 @@
+# in-master 讀取路徑的四項查證結論(2026-08-11)
+
+本檔收整 session `snmp-plan-E-trace` 的查證結果。**全部為原始碼閱讀所得,除特別註明外皆未在
+DUT 上實測。** 決策性的部分已另立 ADR-0026;本檔記錄的是機制與盤點,不是決策。
+
+相關文件:`~/mds4xgl3/.adr/ADR-0026-evaluate-vincent-3rdparty-net-snmp-quick-wins-1-and-3.md`
+
+---
+
+## 1. `LibFrameworkUri_GetUri()` 每一次請求都重建 TCP 連線
+
+**驗證狀態:程式碼已確認,成本未量測。**
+
+路徑:`snmpd → TCP 127.0.0.1:80 (nginx) → proxy_pass 127.0.0.1:9759 (actix-web) → plugin`。
+底層是手刻的 HTTP client(raw `AF_INET` socket,非 libcurl),見
+`buildroot/dl/lib_moxa_framework_uri/src/lib_framework_uri.c`(全檔 11.4K)。
+
+```c
+// :98-105
+static int _isConnectionAlive(const struct LibFrameworkUri_Handle *aHandle)
+{
+    // The connection check result of using recv(..., MSG_PEEK) with HTTP server
+    // will always get connection not alive.
+    // Before we found another way, connection check just always return false
+    // to force reopen a socket per request.
+    return 0;                       // ← 永遠回 0
+}
+
+// :253 呼叫端
+if (!_isConnectionAlive(aHandle)) { _closeConnection(aHandle); }   // close()
+if (aHandle->mState != kStateConnected) {
+    int socket_fd = _openConnection(...);   // socket() + setsockopt×2 + connect()
+}
+```
+
+每次 URI 讀取 = `socket()` + `connect()` + `send()` + `recv()` + `close()`。
+`gUriHandle` 這類「快取的 handle」**只省下 buffer 的 malloc,TCP 三次握手一次都沒省**。
+請求本身是 HTTP/1.1 且未送 `Connection: close`(`:122` 的請求組裝),nginx 側願意保持連線 ——
+**keep-alive 的能力存在,是 client 主動丟掉的**。
+
+### 影響範圍(共用同一 library)
+
+| 路徑 | handle 建立處 |
+|---|---|
+| in-master `ies-auto-mibs`(URI 路徑 2/3) | `moxa_snmp_handle_util.c:1041` 等 6 處 |
+| dlmod plugin(第四條路) | `lib_moxa_snmp_plugin/src/lib_moxa_snmp_plugin.c:144` |
+
+**不影響** framework subagent 自己(in-process;ADR-0007 曾改走 REST loopback,因 self-loop
+每個 config scalar ~0.7–1.0s,已於 2026-07-29 revert,見 ADR-0008)。
+
+### 對照組:AgentX 把同一件事做對了
+
+| | AgentX(ISS ↔ snmpd) | `libmoxaframeworkuri`(snmpd → nginx) |
+|---|---|---|
+| 傳輸 | TCP 127.0.0.1:705 | TCP 127.0.0.1:80 |
+| 連線 | 開機建一次,永久保留(`snxtrans.c:151/:217`,全域 `gAgtxGlobalInfo.i4SockId`) | 每請求 close + 重新 connect |
+| 每請求握手成本 | 0 | 完整一次 |
+
+同樣是 loopback TCP,差別純粹在連線生命週期。這也是「AgentX 走 TCP 為何不比 SNMP proxy UDP 慢」
+的一半答案(另一半是 AgentX PDU 比完整 SNMP 訊息處理便宜:proxy 兩端各做一次 BER 編解碼與 VACM)。
+
+### 建議的修法(由淺到深)
+
+1. **修好 keep-alive** —— 不用 `MSG_PEEK` 探活,改成信任 `send()`/`recv()` 的錯誤碼並於失敗時重連一次。
+   改動集中在 `_isConnectionAlive()` 與 `:253`,不需任何其他團隊配合,可單獨量測。**建議先做這個。**
+2. 改走 Unix domain socket(需 nginx 側配合)。
+3. 繞過 nginx 直連 actix:9759(省一跳,但失去 auth/routing,風險高)。
+
+### 未做的量測
+
+`strace -c -e trace=socket,connect,close` 掛 snmpd 跑一次 walk 取次數,配 `-T` 取單次耗時。
+**在拿到這個數字之前,不要對外給任何延遲數值。**
+
+> 註:此項**不在** Vincent《3rdparty_net_snmp enhancement》的六個瓶頸內(他的 #4 講 fork/exec、
+> #5 講 URI 循序抓取,都沒提到連線重建)。
+
+---
+
+## 2. `#4 fork/exec` 的完整盤點:全樹 8 處,僅 4 處在熱路徑
+
+**驗證狀態:程式碼已確認。**(先前口頭說「9 處」有誤,已於 ADR-0026 更正。)
+
+| # | 位置 | 命令 | 所在函式 | 頻率 |
+|---|---|---|---|---|
+| 1 | `ies_auto_mibs.c:422` | `app_moxa_token_module -d -s snmp` | `utilStoken_delete_security_token()` | 一次性(由 `init_ies_auto_mibs():3668` 呼叫) |
+| 2 | `ies_auto_mibs.c:2140` | `ies_uri_handle_client --type read` | **`mox_snmp_iss_uri_read_inplace()` 內部** | 僅 hook .so 缺席時 |
+| 3 | `ies_auto_mibs.c:2294` | `/sbin/generate_iss_snmp_merge_table` | 表格取值 | **每次冷 GET** |
+| 4 | `ies_auto_mibs.c:2324` | `/bin/iss_snmp_makeup_index` | 同上 | **每次冷 GET** |
+| 5 | `ies_auto_mibs.c:2523` | `/sbin/generate_uri_snmp_table` | URI 表格取值 | **每次冷 GET** |
+| 6 | `ies_auto_mibs.c:3674` | `/bin/rm -rf /moxa/run/auto_mibs/*` | `init_ies_auto_mibs()` | 一次性 |
+| 7 | `ies_auto_mibs.c:3682` | `/bin/mkdir -p /moxa/run/auto_mibs` | `init_ies_auto_mibs()` | 一次性 |
+| 8 | `moxa_snmp_handle_entry_get_value.c:351` | `ies_uri_handle_client --type read` | `getEntryValue_issScalarEntry()` | **每次 GET** |
+
+### 可行性分級
+
+- **Tier A —— 立刻可做、幾乎零風險:只有第 8 處。**
+  它執行的命令與 `mox_snmp_iss_uri_read_inplace()`(`ies_auto_mibs.c:2122`)已取代掉的那一個**完全相同**。
+  現成函式已上線、已有 fallback 保護。改動約等於:
+  ```c
+  if ( IES_NOERR != mox_snmp_iss_uri_read_inplace(entry->uri, fileName) )
+  ```
+  **實施前要確認兩件事**:輸出檔格式是否一致(`read_inplace` 多做一層 `_remap`,而
+  `getEntryValue_issScalarEntry` 自己在解析 `#uptime=` 開頭的格式);`MOXA_SNMP_URI_CTRL_CLIENT`
+  與 `AUTO_MIB_CMD_URI_CTRL_CLIENT` 是否指向同一支程式。
+
+- **Tier B —— 收益所在,但各自是獨立工程:第 3、4、5 處。**
+  需走 cdylib + dlopen(即 `mox_snmp_uri_hook_load()` 已驗證的那套)。
+  第 5 處 `generate_uri_snmp_table` 涵蓋面最大;第 4 處 `iss_snmp_makeup_index` 是 `snmp_tools/`
+  編出的 C 程式,理論上可直接 link 而不需 cdylib,**可能是 Tier B 裡最先該試的**。
+  三處都必須保留 fallback(照第 2 處的樣板)。
+
+- **Tier C —— 不要動:第 2 處。** 它是刻意的安全網,原始註解:
+  「If the hook .so is not available, fall back to the legacy fork+exec helper so we never regress」。
+
+- **Tier D —— 收益近零,只有整潔價值:第 1、6、7 處。** 全在 `init_ies_auto_mibs()`,開機只跑一次。
+  **不應計入 #4 的效能帳。**
+
+### 既有基礎
+
+`mox_snmp_iss_uri_read_inplace()` + `mox_snmp_uri_hook_load()` 這套 dlopen hook 來自
+commit `17055a9 "Enhancement #2"`(oscartu,2026-05-15,原在 `snmp-trace-time_diff`,現於 `snmp-plan-E`)。
+**它就是 Vincent 文件 4.4 節 Option 2 想要的東西,而且已在產品上執行。** 所以 #4 不是「導入新技術」,
+是「把已驗證的模式再套用到 3~4 個呼叫點」。ADR-0018 另有 PJ4B 上單次 fork+exec **15.0 ms** 的實測。
+
+### 與 fiber check 的關係:不同軸向,常被混淆
+
+| | fiber check(ADR-0021) | #4 ExecShCmd |
+|---|---|---|
+| 消除的是 | **服務位置**:dlmod → framework subagent | **行程邊界**:fork/exec → in-process |
+| 原本有 fork 嗎 | **沒有**(dlmod 本來就 dlopen 在 snmpd 內) | 有,每次冷 GET 兩次 |
+
+`plugin_moxa_fiber_check/` 全部 .c 檔**沒有任何** `ExecShCmd` / `popen` / `system()`,
+ADR-0021 也未提及 fork/exec。**fiber check 那次沒有省下任何 fork/exec。**
+
+---
+
+## 3. ISS AgentX:`GetNextIndex` 有用,且 GETNEXT 不是交給 net-snmp 處理
+
+**驗證狀態:程式碼已確認,無 runtime 佐證。**
+
+曾有的誤解是:因為 `ifmibwr.c:11` 呼叫了
+`SNMPRegisterMibWithLock(&ifmibOID, &ifmibEntry, CfaLock, CfaUnlock, SNMP_MSR_TGR_TRUE)`,
+所以 GETNEXT 之後由 net-snmp 處理,`(*GetNextIndex)()` 形同無用。**這不成立。**
+
+### 關鍵:那是兩段互不相干的註冊
+
+| | 做什麼 | 對象 |
+|---|---|---|
+| `SNMPRegisterMibWithLock(&ifmibOID, &ifmibEntry, ...)` | 登記 Get / GetNextIndex / Set / Test 函式指標表 | **ISS 行程內部的 MIB DB** |
+| `SnxMainRegisterMibs()`(`snxmain.c:869`) | 送 AgentX Register PDU 宣告 OID 區域 | **snmpd master(:705)** |
+
+前者(`snmpv3/snmpmbdb.c:485` → `SNMPRegisterMibWithContextIdAndLock`)整支函式**沒有任何
+`netsnmp_*` 呼叫**,只做 `MibDataAlloc` / `OidAlloc` / `OIDCompare` 排序插入。它不會讓 snmpd 知道任何事。
+
+> 注意:`code/future/util/snmp/snmputil.c:2322` 也有同名函式,但那是**全 `UNUSED_PARAM`、
+> 回傳 `SNMP_FAILURE` 的 stub**(SNMP 停用時的變體)。真正的實作在 `snmpv3/snmpmbdb.c`。
+
+### ISS 自己實作整套 AgentX 協定
+
+`snxmain.c` 是手寫的 AgentX 堆疊,自己解 PDU、自己編碼:`SNX_GETNEXT_PDU`(`:295`)、
+`SNX_GETBULK_PDU`、`SnxMainProcessMgmtPdu()`(`:609`)、以及 `pSearchRngLst`(`:843-845`)——
+**AgentX 的 SearchRange 就是 GETNEXT 的表示法,master 丟過來,subagent 必須自己算出範圍內的下一個 OID。**
+
+### `GetNextIndex` 的實際呼叫點
+
+```c
+// snmpv3/snmplock.c:119   函式 SNMPAccessGetNext()
+i4Result = pSnmpDbEntry->pMibEntry->GetNextIndex(pCurIndex, pNextIndex);
+```
+
+上游解析引擎在 `snmpv3/snmpdb.c`:`SNMPGetNextOID()`(引用於 `:532` `:540` `:649` `:671`)、
+`SNMPGetNextReadWriteOID()`(`:967` `:1069` `:1091`)。
+
+`:649` / `:671` 用 `pCur->GetNextIndex == pNext->GetNextIndex` 判斷**兩欄是否同屬一張表** ——
+函式指標本身被當成「表的身分」在用(對照 `ifmibdb.h`:同表每欄填同一指標)。
+**若 `GetNextIndex` 無用,ISS 連表的邊界都判斷不出來。**
+
+### 附帶澄清
+
+`SNMP_MSR_TGR_TRUE` 是 MSR(MIB Save/Restore,組態存檔還原)的旗標
+(`snmpmbdb.c:347` 註解「Flag to indicate MSR trigger」,`:456` 存進註冊項),
+**與 GET/GETNEXT 的分派完全無關**。
+
+### 對 ADR-0011 / ADR-0017 的意義
+
+既然 ISS 自己解 SearchRange、自己走表,「首欄從連續 walk 消失」就**不可能發生在 ISS 內部** ——
+ISS 拿到 SearchRange 一定會照自己的表回答。問題只能出在 **master 如何切分與組合 SearchRange**。
+這與 ADR-0011 原本的描述一致,並可**排除「ISS 側有 bug」**這個可能性,把調查面縮小到 master 一邊。
+
+### 建議的 runtime 佐證
+
+對 `.1.3.6.1.2.1.2` 做 `/usr/bin/snmpgetnext` 並抓 `:705` pcap,確認 master 送出的是
+GetNext PDU 帶 SearchRange(而非被拆成一堆 Get)。同一份 pcap 也能驗上述 SearchRange 邊界的推論。
+
+---
+
+## 4. `moxa_snmp_tools` 的涵蓋範圍會隨委派**靜默縮小**
+
+**驗證狀態:程式碼已確認。**
+
+`snmp_tools/src/moxa_snmp_tools.c`(2.8K)只操作一個 debug flag 與一個檔案:
+
+```
+--enable  → LibUtil_SetDbgFlgBits(kDbgFlgIssUriSNMP)
+--disable → LibUtil_ClearDbgFlgBits(kDbgFlgIssUriSNMP)
+--dump    → cat /run/util_debug/debug_log_<kDbgFlgIssUriSNMP>
+--clear   → echo "" > 同一個檔
+```
+
+它與 SNMP 請求處理路徑**沒有任何耦合,AgentX 的導入一行都沒動到它**,四步流程
+(`--enable` → `--clear` → 下 CLI cmd → `--dump`)照常可用。
+
+### 但誰會寫進那個 log
+
+**會**(皆在 snmpd 行程內,或獨立的 `ies_uri_handle_client`):
+- `3rdparty_net_snmp/ies-auto-mibs/*.c`
+- `app_moxa_iss_10_1_0/code/uri_ctrl_hook/src/*`(被 `mox_snmp_iss_uri_read_inplace` dlopen)
+- `app_moxa_iss_10_1_0/code/future/urihook/src/urimain.c`
+- net-snmp 的 `snmptrap.c` / `snmpusm.c` / `snmpv3.c`(Moxa patch)
+
+**不會**:
+- ISS 的 SNMP agent 核心(`code/future/snmpv3/`)—— 用自己的 `SNMPTrace()` / `UtlTrcLog()`,另一行程
+- framework subagent(`app_moxa_framework`,Rust)
+- `lib_moxa_ies_auto_mibs`(framework 側映射庫)
+
+### 沉默的失敗模式
+
+> 一個 OID 被 `agentx_owned.list` 委派給 ISS、或被 Plan E 搬到 framework subagent 之後,
+> 對它做 SNMP 請求時 **dump 會是空的 —— 而那看起來跟「請求根本沒發生」一模一樣**。
+
+這個工具的語意已從「看 SNMP 請求」悄悄變成「**看還留在 in-master 的那部分 SNMP 請求**」。
+拿它 debug 已委派的 OID(`ifmibdb/`、`stdethdb/`、`mxportdb/` 的 RO 欄、`mxrstpdb/`)會得到誤導性的空結果。
+判斷歸屬仍須查 `agentx_owned.list` 前綴 + 該 entry 的 `.mode`(RO 委派、RW 留下);
+wire 上確認仍須抓 `:705` pcap。
+
+### 未驗證的一點
+
+流程第 3 步(下 CLI cmd)之所以能在 dump 看到東西,推測是因為 `uri_ctrl_hook/src/ies_uri_handle.c`
+也用同一個 flag。**這是從 flag 使用者清單推出的,未實跑驗證。** 若哪天看不到,先確認的是
+CLI 那條路有沒有繞過 `uri_ctrl_hook`,而不是工具壞了。
+
+---
+
+## 待辦(未指派)
+
+1. **量測 baseline** —— 一組數字可同時回答三件事:`LibFrameworkUri` 連線重建的份量、
+   #4 fork/exec 的相對比重、Tier A 改動值不值得。依 `measure-snmp-walk` 的紀律(交錯 A/B/A、
+   中位數、絕對路徑 `/usr/bin/snmpwalk`)。
+2. **Tier A 的兩項前置確認**(輸出檔格式、兩個 URI_CTRL_CLIENT 巨集是否同一支程式)。
+3. **`entry_handle_check_value_file()` 的死碼清理** —— 不可達的 `MAX_TABLE_TIMEOUT` 分支、
+   `#undef MAX_ENTRY_TIMEOUT` 解除未定義名稱、`moxa_snmp_const.h:23-24` 兩個無人引用的常數。
+   詳見 ADR-0026 (A) 節。

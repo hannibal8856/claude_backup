@@ -1,0 +1,617 @@
+/*****************************************************************************
+ * $Id: snxtrans.c,v 1.4 2015/04/28 12:35:03 siva Exp $
+ *
+ * Description: This file contains routines for Agentx transport mechanism. 
+ ****************************************************************************/
+#include "snxinc.h"
+#include "fssocket.h"
+#include <poll.h>
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransInit
+ *                                                                          
+ *    DESCRIPTION      :  Initialize the trasport mechanism to be used for
+ *                        communication with master agent.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransInit ()
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    /* Based on transport mechanism , Do the initialization */
+    switch (gAgtxGlobalInfo.u1TDomain)
+    {
+        case SNX_TDOMAIN_TCP:
+            /* Initiate TCP connectin */
+            i4RetVal = SnxTransOpenTcpConnection ();
+            break;
+        default:
+            break;
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransDeInit
+ *                                                                          
+ *    DESCRIPTION      : Shutdown the connection establised with master agent.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransDeInit ()
+{
+    INT4                i4RetVal = SNMP_SUCCESS;
+
+    /* Based on transport mechanism , Do the de-initialization */
+    switch (gAgtxGlobalInfo.u1TDomain)
+    {
+        case SNX_TDOMAIN_TCP:
+            SelRemoveFd (gAgtxGlobalInfo.i4SockId);
+            SelRemoveWrFd (gAgtxGlobalInfo.i4SockId);
+            close (gAgtxGlobalInfo.i4SockId);
+            gAgtxGlobalInfo.i4SockId = -1;
+            break;
+
+        default:
+            i4RetVal = SNMP_FAILURE;
+            break;
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransOpenTcpConnection
+ *                                                                          
+ *    DESCRIPTION      :  This function establishes  the TCP connection with 
+ *                        the master agent
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransOpenTcpConnection (VOID)
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    if (gAgtxGlobalInfo.MasterIpAddr.i4_Length == SNX_IP4_LEN)
+    {
+        i4RetVal = SnxTransOpenTcpV4Connection ();
+    }
+    if (gAgtxGlobalInfo.MasterIpAddr.i4_Length == SNX_IP6_LEN)
+    {
+        i4RetVal = SnxTransOpenTcpV6Connection ();
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransInitTcpConnection
+ *                                                                          
+ *    DESCRIPTION      :  This function initiates  the TCP connection with 
+ *                        the maste agent
+ *
+ *    INPUT            : i4SockId - Socket to be connected
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransInitTcpConnection (INT4 i4SockId)
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    printf("OO! %s[%d] start\n", __func__, __LINE__);
+    if (gAgtxGlobalInfo.MasterIpAddr.i4_Length == SNX_IP4_LEN)
+    {
+        i4RetVal = SnxTransInitIpv4TcpConnection (i4SockId);
+    }
+    if (gAgtxGlobalInfo.MasterIpAddr.i4_Length == SNX_IP6_LEN)
+    {
+        i4RetVal = SnxTransInitIpv6TcpConnection (i4SockId);
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransOpenTcpV4Connection
+ *                                                                          
+ *    DESCRIPTION      : Establishes TCP connection with the IPV4 master agent 
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransOpenTcpV4Connection ()
+{
+    INT4                i4SockId;
+
+    i4SockId = socket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    if (i4SockId < 0)
+    {
+        SNMPTrace ("Opening the socket failed\n");
+        return SNMP_FAILURE;
+    }
+
+    if (fcntl (i4SockId, F_SETFL, O_NONBLOCK) < 0)
+    {
+        close (i4SockId);
+        return SNMP_FAILURE;
+    }
+    if (SnxTransInitIpv4TcpConnection (i4SockId) == SNMP_FAILURE)
+    {
+        if ((errno == EINPROGRESS) || (errno == EALREADY))
+        {
+            SNMPTrace ("Connection in Progress\n");
+            gAgtxGlobalInfo.i4SockId = i4SockId;
+            SelAddWrFd (i4SockId, SnxTransTcpOutSocket);
+            return SNMP_SUCCESS;
+        }
+        if (errno == EISCONN)
+        {
+            gAgtxGlobalInfo.i4SockId = i4SockId;
+            SnxTransTcpOutSocket (i4SockId);
+            return SNMP_SUCCESS;
+        }
+        close (i4SockId);
+        return SNMP_FAILURE;
+    }
+    else
+    {
+    	printf("OOO!! SnxTransOpenTcpV4Connection OK\n");
+        gAgtxGlobalInfo.i4SockId = i4SockId;
+        SnxTransTcpOutSocket (i4SockId);
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransInitIpv4TcpConnection
+ *                                                                          
+ *    DESCRIPTION      :  Initiates the connection
+ *
+ *    INPUT            : i4SockFd - Socket  
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransInitIpv4TcpConnection (INT4 i4SockId)
+{
+    struct sockaddr_in  Destaddr;
+    UINT4               u4MasterIp;
+    printf("OO! %s[%d]\n", __func__, __LINE__);
+    /* Get the configured Master IP address */
+    MEMCPY (&u4MasterIp, gAgtxGlobalInfo.MasterIpAddr.pu1_OctetList, SNMP_FOUR);
+
+    MEMSET (&Destaddr, 0, sizeof (struct sockaddr_in));
+    Destaddr.sin_family = AF_INET;
+    Destaddr.sin_port = OSIX_HTONS (gAgtxGlobalInfo.u2PortNo);
+    Destaddr.sin_addr.s_addr = OSIX_HTONL (u4MasterIp);
+
+    if (connect (i4SockId, (struct sockaddr *) &Destaddr,
+                 sizeof (struct sockaddr_in)) < 0)
+    {
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransOpenTcpV6Connection
+ *                                                                          
+ *    DESCRIPTION      : Establishes TCP connection with the IPV6 master agent 
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransOpenTcpV6Connection ()
+{
+    INT4                i4SockId;
+
+    i4SockId = socket (AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+
+    if (i4SockId < 0)
+    {
+        SNMPTrace ("Opening the socket failed\n");
+        return SNMP_FAILURE;
+    }
+
+    if (fcntl (i4SockId, F_SETFL, O_NONBLOCK) < 0)
+    {
+        close (i4SockId);
+        return SNMP_FAILURE;
+    }
+    if (SnxTransInitIpv6TcpConnection (i4SockId) == SNMP_FAILURE)
+    {
+        if ((errno == EINPROGRESS) || (errno == EALREADY))
+        {
+            SNMPTrace ("Connection in Progress\n");
+            SelAddWrFd (i4SockId, SnxTransTcpOutSocket);
+            gAgtxGlobalInfo.i4SockId = i4SockId;
+            return SNMP_SUCCESS;
+        }
+        if (errno == EISCONN)
+        {
+            SnxTransTcpOutSocket (i4SockId);
+            gAgtxGlobalInfo.i4SockId = i4SockId;
+            return SNMP_SUCCESS;
+        }
+        close (i4SockId);
+        return SNMP_FAILURE;
+    }
+    else
+    {
+        gAgtxGlobalInfo.i4SockId = i4SockId;
+        SnxTransTcpOutSocket (i4SockId);
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransInitIpv6TcpConnection
+ *                                                                          
+ *    DESCRIPTION      :  Initiates the IPV6 tcp connection
+ *
+ *    INPUT            : i4SockFd - Socket  
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransInitIpv6TcpConnection (INT4 i4SockId)
+{
+    struct sockaddr_in6 ServerAddr;
+
+    MEMSET (&ServerAddr, 0, sizeof (struct sockaddr_in));
+    ServerAddr.sin6_family = AF_INET6;
+    ServerAddr.sin6_port = OSIX_HTONS (gAgtxGlobalInfo.u2PortNo);
+
+    /* Get the configured Master IP address */
+    MEMCPY (&(ServerAddr.sin6_addr.s6_addr),
+            gAgtxGlobalInfo.MasterIpAddr.pu1_OctetList, SNX_IP6_LEN);
+
+    if (connect (i4SockId, (struct sockaddr *) &ServerAddr,
+                 sizeof (ServerAddr)) < 0)
+    {
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransTcpOutSocket
+ *                                                                          
+ *    DESCRIPTION      :  Indicates the socket is ready for write operation
+ *
+ *    INPUT            : i4SockFd - Socket  
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+VOID
+SnxTransTcpOutSocket (INT4 i4SockFd)
+{
+    if (OsixSendEvent (SELF, (const UINT1 *) SNMP_TASK_NAME,
+                       SNX_TRANS_RDY_EVT) != OSIX_SUCCESS)
+    {
+        SNMPTrace ("SNMP: Agentx Event send Failed\r\n");
+    }
+    UNUSED_PARAM (i4SockFd);
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxTransPktCallBack
+ *                                                                          
+ *    DESCRIPTION      :  Indicates the socket is ready for read operation
+ *
+ *    INPUT            : i4SockFd - Socket
+ * 
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+VOID
+SnxTransPktCallBack (INT4 i4SockFd)
+{
+    if (OsixSendEvent (SELF, (const UINT1 *) SNMP_TASK_NAME,
+                       SNX_AGTX_PKT_EVT) != OSIX_SUCCESS)
+    {
+        SNMPTrace ("SNMP: Agentx Event send Failed\r\n");
+    }
+    UNUSED_PARAM (i4SockFd);
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransRcvPacket
+ *                                                                          
+ *    DESCRIPTION      :  Receives the agentx packet based on the trasport
+ *                        mechanisnm.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : pu1Packet - Received Packet
+ *                       pu4PktLen - Received packet length
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransRcvPacket (UINT1 *pu1Packet, UINT4 *pu4PktLen)
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    switch (gAgtxGlobalInfo.u1TDomain)
+    {
+        case SNX_TDOMAIN_TCP:
+            i4RetVal = SnxTransTcpRcvPacket (pu1Packet, pu4PktLen);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                /* Session is closed by the peer, so reset the subagent
+                 * control  */
+                gAgtxGlobalInfo.i4SessionId = 0;
+                TmrStop (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr);
+                SnxTransDeInit ();
+                MEMSET (&gAgtxStats, 0, sizeof (tSnmpAgentxStats));
+                return SNMP_FAILURE;
+            }
+            /* Wait on the descriptor for packet reception */
+            SelAddFd (gAgtxGlobalInfo.i4SockId, SnxTransPktCallBack);
+            break;
+        default:
+            break;
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransTcpRcvPacket
+ *                                                                          
+ *    DESCRIPTION      :  Receives the packet received on the TCP socket
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : pu1Packet - Received Packet
+ *                       pu4PktLen - Received packet length
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+/****************************************************************************
+ *    FUNCTION NAME    : SnxTransTcpRecvN
+ *    DESCRIPTION      : Receive EXACTLY u4Want bytes from the (non-blocking)
+ *                       master socket into pu1Buf. AgentX runs over a TCP byte
+ *                       stream with no message boundaries, so a single recv()
+ *                       may return several PDUs plus a partial tail, or a PDU
+ *                       split across segments. Reading the exact length keeps
+ *                       the stream aligned. EAGAIN (rest of a PDU still in
+ *                       flight) is waited on via poll() rather than treated as
+ *                       end-of-message.
+ *    RETURNS          : SNMP_SUCCESS / SNMP_FAILURE (peer closed / timeout)
+ ****************************************************************************/
+static INT4
+SnxTransTcpRecvN (UINT1 *pu1Buf, UINT4 u4Want)
+{
+    UINT4               u4Got = 0;
+    INT4                i4Ret;
+    struct pollfd       PollFd;
+
+    while (u4Got < u4Want)
+    {
+        i4Ret = recv (gAgtxGlobalInfo.i4SockId, pu1Buf + u4Got,
+                      (INT4) (u4Want - u4Got), 0);
+        if (i4Ret > 0)
+        {
+            u4Got += (UINT4) i4Ret;
+            continue;
+        }
+        if (i4Ret == 0)
+        {
+            /* Orderly shutdown by the master */
+            return SNMP_FAILURE;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
+        {
+            PollFd.fd = gAgtxGlobalInfo.i4SockId;
+            PollFd.events = POLLIN;
+            PollFd.revents = 0;
+            if (poll (&PollFd, 1, SNX_TRANS_POLL_TIMEOUT_MS) <= 0)
+            {
+                return SNMP_FAILURE;
+            }
+            continue;
+        }
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+INT4
+SnxTransTcpRcvPacket (UINT1 *pu1Packet, UINT4 *pu4PktLen)
+{
+    UINT4               u4Offset     = SNX_AGENTX_HDR_PAYLOADLEN_OFFSET;
+    UINT4               u4PayloadLen = 0;
+
+    /* Read the fixed 20-byte AgentX header first */
+    if (SnxTransTcpRecvN (pu1Packet, SNX_AGENTX_PDU_HDR_LEN) == SNMP_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+
+    /* Payload length is at offset 16; byte order is given by the flags byte */
+    SnxCodeGet4ByteData (pu1Packet, &u4Offset,
+                         pu1Packet[SNX_AGENTX_HDR_FLAGS_OFFSET], &u4PayloadLen);
+
+    /* Keep the same single-buffer limit the decode path already assumes */
+    if (u4PayloadLen > (UINT4) (SNX_MAX_MTU - SNX_AGENTX_PDU_HDR_LEN))
+    {
+        return SNMP_FAILURE;
+    }
+
+    if (u4PayloadLen > 0)
+    {
+        if (SnxTransTcpRecvN (pu1Packet + SNX_AGENTX_PDU_HDR_LEN,
+                              u4PayloadLen) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+
+    *pu4PktLen = SNX_AGENTX_PDU_HDR_LEN + u4PayloadLen;
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransTxPkt 
+ *                                                                          
+ *    DESCRIPTION      :  Transmits the SNMP Agentx packet based on the
+ *                        transport mechanism
+ *
+ *    INPUT            : pu1Packet - Packet to be transmitted
+ *                       u4Len     - Length of the packet
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransTxPkt (UINT1 *pu1Packet, UINT4 u4Len)
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    switch (gAgtxGlobalInfo.u1TDomain)
+    {
+        case SNX_TDOMAIN_TCP:
+            i4RetVal = SnxTransTcpTxPacket (pu1Packet, u4Len);
+            break;
+        default:
+            break;
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainAgentxEnable
+ *                                                                          
+ *    DESCRIPTION      :  Transmits the SNMP Agentx packet over the
+ *                        TCP connection
+ *
+ *    INPUT            : pu1Packet - Packet to be transmitted
+ *                       u4Len     - Length of the packet
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxTransTcpTxPacket (UINT1 *pu1Packet, UINT4 u4Len)
+{
+    UINT4               u4Sent = 0;
+    INT4                i4Ret;
+    struct pollfd       PollFd;
+
+    /* Send the whole PDU. send() on a non-blocking socket can do a partial
+     * write under master backpressure; treating that as success truncated the
+     * outbound stream and desynced the peer (Plan C: stream-framing fix). */
+    while (u4Sent < u4Len)
+    {
+        i4Ret = send (gAgtxGlobalInfo.i4SockId, pu1Packet + u4Sent,
+                      (INT4) (u4Len - u4Sent), MSG_NOSIGNAL);
+        if (i4Ret > 0)
+        {
+            u4Sent += (UINT4) i4Ret;
+            continue;
+        }
+        if ((i4Ret < 0) && (errno == EINTR))
+        {
+            continue;
+        }
+        if ((i4Ret < 0) && ((errno == EAGAIN) || (errno == EWOULDBLOCK)))
+        {
+            PollFd.fd = gAgtxGlobalInfo.i4SockId;
+            PollFd.events = POLLOUT;
+            PollFd.revents = 0;
+            if (poll (&PollFd, 1, SNX_TRANS_POLL_TIMEOUT_MS) <= 0)
+            {
+                SelAddWrFd (gAgtxGlobalInfo.i4SockId, SnxTransTcpOutSocket);
+                return SNMP_FAILURE;
+            }
+            continue;
+        }
+        /* Hard error */
+        SelAddWrFd (gAgtxGlobalInfo.i4SockId, SnxTransTcpOutSocket);
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxTransByteOrderFlag
+ *                                                                          
+ *    DESCRIPTION      :  Provides the byte-ordering to be used in the 
+ *                        transport mechanism.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : u1Flag - Byte Order flag information 
+ ****************************************************************************/
+UINT1
+SnxTransByteOrderFlag ()
+{
+    UINT1               u1Flag = SNX_NETWORK_BYTE_ORDER;
+
+    switch (gAgtxGlobalInfo.u1TDomain)
+    {
+        case SNX_TDOMAIN_TCP:
+            break;
+        default:
+            break;
+    }
+    return u1Flag;
+}
+
+/**************************  End of snxtrans.c *******************************/

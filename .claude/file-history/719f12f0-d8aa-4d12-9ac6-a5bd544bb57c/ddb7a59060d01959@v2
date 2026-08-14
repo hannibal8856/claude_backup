@@ -1,0 +1,93 @@
+/*
+ * lib_moxa_ies_auto_mibs — OID <-> URI mapping data (Layer-1) + lookup.
+ *
+ * Plan D B seed. C source of truth for "which OID maps to which config-layer
+ * URI". Consumers (framework subagent via lib_moxa_rust_ies_auto_mibs) look up
+ * an OID to get its URI, then read the value in-process.
+ *
+ * Pure data + lookup; no net-snmp calls (moxa_oid has the same width as the
+ * net-snmp `oid` type, unsigned long).
+ */
+#ifndef LIB_MOXA_IES_AUTO_MIBS_H
+#define LIB_MOXA_IES_AUTO_MIBS_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Exported even though the library builds with -fvisibility=hidden. */
+#define MOXA_IES_API __attribute__((visibility("default")))
+
+/* Same width as net-snmp `oid` (unsigned long). */
+typedef unsigned long moxa_oid;
+
+/* One OID <-> URI mapping row. */
+/* `table_col` — how the framework subagent handler resolves an OID's value.
+ * Grows as new table shapes are migrated. KEEP IN SYNC with the Rust mirror in
+ * lib_moxa_rust_ies_auto_mibs (COL_* consts) + the handler in snmp_subagent.rs. */
+#define IES_COL_SCALAR         0  /* plain config leaf: get_config_from_path(uri)             */
+#define IES_COL_ROW_INDEX      1  /* index column, value = trailing OID sub-id (portsPbmp
+                                   * portIndex, turboring ring index); row assumed present    */
+#define IES_COL_PBMP_VALUE     2  /* portsPbmp value: config bool array[port-1] as TruthValue */
+#define IES_COL_IDXTBL_VALUE   3  /* index-table value: "<uri><row-1>/<column>" (0-based)     */
+#define IES_COL_IDXTBL_INDEX   4  /* index-table index: trailing OID sub-id, if the row exists */
+#define IES_COL_TR2RING_VALUE  5  /* turboring ring value: "<uri>/ring<row>/<column>" (1-based) */
+#define IES_COL_ROWSTATUS      6  /* SNMP RowStatus: not a config leaf; life-cycle of the
+                                   * index-table row (create/destroy / valid), see ADR-0001 */
+
+struct ies_map_entry {
+    const moxa_oid *oid;       /* OID subids, no instance                       */
+    size_t          oid_len;
+    const char     *uri;       /* config-layer URI base, e.g. "ifmibdb/ifTable/" */
+    const char     *uri_index; /* index/leaf name, e.g. "ifAdminStatus"          */
+    int             val_type;  /* SNMP_DATA_TYPE_* (numeric)                      */
+    int             mode;      /* HANDLER_CAN_RONLY (0x01) / RWRITE (0x03)        */
+    int             table_col; /* one of IES_COL_* above                         */
+    int             is_status; /* 1 = read from the status layer (net_*.h URI had
+                                * a "stat/" prefix), not the config layer.        */
+};
+
+/* Exact-match lookup by OID (no instance). Returns a pointer to a static table
+ * entry (valid for program lifetime) or NULL if not found. */
+MOXA_IES_API const struct ies_map_entry *
+ies_map_lookup_by_oid(const moxa_oid *o, size_t olen);
+
+/* Iterate the table (so the subagent can register every mapped OID). */
+MOXA_IES_API size_t ies_map_count(void);
+MOXA_IES_API const struct ies_map_entry *ies_map_entry_at(size_t i);
+
+/* Write a config value via the framework's own REST endpoint (loopback), the
+ * same path the dlmod uses today: PATCH /api/v1/setting/data/<config_uri>?save
+ * (deviceName is POST /api/v1/setting/agent/...). `config_uri` is the mapping's
+ * config-layer path (e.g. "systemInformation/systemName"). Returns 0 on success.
+ * (Config SET is rare; latency here is irrelevant.) */
+MOXA_IES_API int ies_config_set(const char *config_uri, const char *value);
+
+/* Read a config value via the framework's REST endpoint (loopback GET
+ * /api/v1/setting/data/<config_uri>), the same read path in-master uses
+ * (ADR-0007). Returns heap-allocated JSON text (free with ies_string_free) or
+ * NULL on error / missing path. */
+MOXA_IES_API char *ies_config_get(const char *config_uri);
+
+/* Free a string returned by ies_config_get. */
+MOXA_IES_API void ies_string_free(char *s);
+
+/* Same as ies_config_set but writes a JSON number (for INTEGER OIDs). */
+MOXA_IES_API int ies_config_set_int(const char *config_uri, long value);
+
+/* Same as ies_config_set but writes a JSON boolean (nonzero -> true). Used for
+ * config fields stored as booleans but exposed as SNMP INTEGER TruthValues. */
+MOXA_IES_API int ies_config_set_bool(const char *config_uri, int value);
+
+/* PATCH a raw JSON value (parsed from `json_text`, e.g. a boolean array
+ * "[true,false,…]"). Used by the portsPbmp SET: the caller reads the array,
+ * flips one element, and writes the whole array back. */
+MOXA_IES_API int ies_config_set_json(const char *config_uri, const char *json_text);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIB_MOXA_IES_AUTO_MIBS_H */

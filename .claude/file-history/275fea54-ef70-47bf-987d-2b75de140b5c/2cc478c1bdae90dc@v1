@@ -1,0 +1,176 @@
+.actt:
+  # Runner tag comes from pipeline variables (prefill default + optional product override). Same as `.bvt`.
+  tags:
+    - $BVT_RUNNER_TAG
+  variables:
+    ACTT_IMAGE_TAG: "latest"
+    DUT_VERSION: "0.0.0"
+    GIT_STRATEGY: none
+    TEST_MARK: "actt"
+    # DUT_MODEL must come from the product project's pipeline variables (e.g. autobuild_config.yml). Do not redefine it here — job-level variables would override the product and cause File API 404s.
+    ALLURE_PROJECT_ID: $DUT_MODEL
+    ACTT_IMAGE: "registry.gitlab.com/moxa/sw/sre/share/team-docker-images/maf/docker-actt/actt:${ACTT_IMAGE_TAG}"
+    WIN_WORK_DIR: "C:/actt-run/$CI_JOB_ID"
+    MAF_DEPLOY_USER: "gitlab+deploy-token-12868893"
+    # Primary network at `docker run --network=...`. Second NIC: script runs `docker network connect ${DOCKER_NETWORK2}` — that network must exist on the ACTT Windows host (create once, admin PowerShell).
+    DOCKER_NETWORK: "MyTransparentNetwork"
+    # Host one-shot (fix typo: options are com.docker..., not om.docker). Backtick must be last char on each line; interface name must match Get-NetAdapter on that PC.
+    #   docker network create -d transparent `
+    #     --subnet=192.168.127.0/24 `
+    #     -o com.docker.network.windowsshim.networkname="MyTransparentNetwork2" `
+    #     -o com.docker.network.windowsshim.interface="Ethernet 2" `
+    #     MyTransparentNetwork2
+    DOCKER_NETWORK2: "MyTransparentNetwork2"
+    ACTT_SSH_USERNAME: "moxa"
+    # Repo-relative path is actt_config/<this filename> ($DUT_MODEL from product pipeline variables).
+    DUT_ACTT_CONFIG: "${DUT_MODEL}.yaml"
+    DUT_ACTT_CONFIG_DEST: "dut_config"
+    # GitLab Files API path segment; before_script re-exports DUT_ACTT_CONFIG / ACTT_CFG_REL using the same DUT_MODEL.
+    ACTT_CFG_REL: "actt_config/$DUT_ACTT_CONFIG"
+    # Filled from PIPELINE_INFO (same SCM_URL as BVT); optional override via CI/CD variables.
+    SCM_FILE_PATH: ""
+    ALLURE_SERVER: "10.123.25.160"
+  before_script:
+    # Skip this stage if FWR_FORCE_BUILD is false AND no new changes
+    - |
+      if [ "${FWR_FORCE_BUILD}" == "false" ] && [ ! -s "$FWR_CHANGE_LOG_FILE" ]; then
+        echo "${LOG_INFO}No new changes today, skip ACTT stage.${LOG_END}"
+        exit 3
+      fi
+    # Resolve DUT_MODEL / DUT_VERSION / SCM_FILE_PATH from upload stage (same source as bvt.yml).
+    - |
+      set -e
+      if [ -z "${DUT_MODEL}" ] || [ "${DUT_MODEL}" = "NO_DEFAULT_DUT_MODEL" ]; then
+        echo "ERROR: DUT_MODEL is unset or still NO_DEFAULT_DUT_MODEL. Define it under variables: in your product autobuild_config.yml (same as other switch products)."
+        exit 1
+      fi
+      if [ -z "${SCM_FILE_PATH}" ]; then
+        if [ ! -s "$FWR_PIPELINE_INFO_FILE" ]; then
+          echo "ERROR: ${FWR_PIPELINE_INFO_FILE} missing or empty; run upload stage and ensure cache restores images dir."
+          exit 1
+        fi
+        SCM_FILE_PATH=$(sed -n 's/^SCM_URL=//p' "$FWR_PIPELINE_INFO_FILE" | head -n 1)
+      fi
+      SCM_FILE_PATH=$(echo "$SCM_FILE_PATH" | sed 's#/\([[:space:]]*\)#/#g')
+      export SCM_FILE_PATH
+      DUT_SERIES=$(echo "$SCM_FILE_PATH" | sed -n 's#.*[Ff][Ww][Rr]_\([^_]*\)_v.*#\1#p' | head -n 1)
+      export DUT_SERIES
+      export DUT_MODEL
+      # FWR_<model>_v7.0_2026_... → 7.0 (stop at first _ after _v)
+      DUT_VERSION=$(echo "$SCM_FILE_PATH" | sed -n 's#.*/[Ff][Ww][Rr]_[^_]*_v\([^_]*\).*#\1#p' | head -n 1)
+      export DUT_VERSION
+      export DUT_ACTT_CONFIG="${DUT_MODEL}.yaml"
+      export ACTT_CFG_REL="actt_config/${DUT_ACTT_CONFIG}"
+      export ALLURE_PROJECT_ID="${DUT_MODEL}"
+      echo "ACTT firmware context: DUT_MODEL=${DUT_MODEL} DUT_VERSION=${DUT_VERSION} DUT_SERIES=${DUT_SERIES}"
+      echo "SCM_FILE_PATH=${SCM_FILE_PATH}"
+      echo "ACTT_IMAGE=${ACTT_IMAGE}"
+    - mkdir -p ~/.ssh && echo "StrictHostKeyChecking no" > ~/.ssh/config
+    - chmod 600 "$ACTT_SSH_PRIVATE_KEY"
+    - eval "$(ssh-agent -s)"
+    - ssh-add "$ACTT_SSH_PRIVATE_KEY"
+    # - ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -NoProfile -Command \"hostname; whoami\""
+  script:
+    # Create remote working directory on Windows host
+    - ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -Command New-Item -ItemType Directory -Force -Path '${WIN_WORK_DIR}/report'"
+    # Dump all CI variables to env file (exclude SSH secrets)
+    - printenv | grep -E '^[a-zA-Z_][a-zA-Z0-9_]*=' | grep -vE '^(ACTT_SSH_PRIVATE_KEY|PATH)=' > /tmp/ci.env
+    # Download project-dependent configuration file (GIT_STRATEGY: none — fetch via API, then scp to testbed)
+    - |
+      ACTT_CFG_ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$ACTT_CFG_REL")
+      curl -fsS --header "JOB-TOKEN:${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/files/${ACTT_CFG_ENC}/raw?ref=${CI_COMMIT_SHA}" -o "/tmp/${DUT_ACTT_CONFIG}"
+      echo "Windows work directory = ${WIN_WORK_DIR}"
+      ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -Command New-Item -ItemType Directory -Force -Path '${WIN_WORK_DIR}/${DUT_ACTT_CONFIG_DEST}'"
+      scp "/tmp/${DUT_ACTT_CONFIG}" ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}:${WIN_WORK_DIR}/${DUT_ACTT_CONFIG_DEST}/${DUT_ACTT_CONFIG}
+      echo "Verifying ${DUT_ACTT_CONFIG} under ${WIN_WORK_DIR}/${DUT_ACTT_CONFIG_DEST} ..."
+      ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -NoProfile -Command \"\$p='${WIN_WORK_DIR}/${DUT_ACTT_CONFIG_DEST}/${DUT_ACTT_CONFIG}'; if (Test-Path -LiteralPath \$p) { Write-Host ('CONFIRMED: ' + (Split-Path -Leaf \$p) + ' exists at ' + \$p); Get-Item -LiteralPath \$p | Format-List Name,Length,FullName } else { Write-Error ('MISSING: ' + \$p); exit 1 }\""
+    # Generate per-job Docker auth config on runner to avoid Windows Credential Manager issues via SSH
+    - mkdir -p /tmp/.docker
+    - AUTH=$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_JOB_TOKEN}" | base64 | tr -d '\n') && printf '{"auths":{"%s":{"auth":"%s"}}}' "${CI_REGISTRY}" "${AUTH}" > /tmp/.docker/config.json
+    # Generate PowerShell test script (heredoc avoids cross-platform escaping issues)
+    # Variables are NOT expanded here; they are injected into the container via --env-file
+    - |
+      cat << 'PSEOF' > /tmp/run_test.ps1
+      Set-Location /app/test
+      python ./tool/download_firmware.py $env:DUT_MODEL
+      python initialize.py -t -m $env:DUT_MODEL -v $env:DUT_VERSION -tm $env:TEST_MARK -r $env:ALLURE_SERVER
+      if (Test-Path "/app/test/report/allure") { Remove-Item -Path "/app/test/report/allure" -Recurse -Force }
+      Copy-Item -Path "/app/test/report/*" -Destination "C:/CI_Out_Report/" -Recurse -Force
+      Copy-Item -Path "/app/bin/log/application.log" -Destination "C:/CI_Out_Report/" -Force
+      PSEOF
+    - |
+      cat << PSEOF > /tmp/run_actt_container.ps1
+      docker --config ${WIN_WORK_DIR}/.docker run -d \`
+        --name ${CI_JOB_ID} \`
+        --network=${DOCKER_NETWORK} \`
+        --env-file ${WIN_WORK_DIR}/report/ci.env \`
+        -v ${WIN_WORK_DIR}/report:C:/CI_Out_Report \`
+        -v ${WIN_WORK_DIR}/${DUT_ACTT_CONFIG_DEST}:C:/app/test/environment/dut \`
+        ${ACTT_IMAGE} powershell -Command 'Start-Sleep 3600'
+      if (\$LASTEXITCODE -ne 0) { Write-Error 'Failed to start container'; exit 1 }
+      docker network connect ${DOCKER_NETWORK2} ${CI_JOB_ID}
+      docker exec ${CI_JOB_ID} powershell -File C:\CI_Out_Report\run_test.ps1
+      \$exitCode = \$LASTEXITCODE
+      docker stop ${CI_JOB_ID} | Out-Null
+      docker rm ${CI_JOB_ID} | Out-Null
+      exit \$exitCode
+      PSEOF
+    # Copy env file, test script, and Docker auth config to Windows host
+    - scp /tmp/ci.env /tmp/run_test.ps1 /tmp/run_actt_container.ps1 ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}:${WIN_WORK_DIR}/report/
+    - scp -r /tmp/.docker ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}:${WIN_WORK_DIR}/.docker
+    # DEBUG: verify Docker config (cmd has no `cat`; do not print full config.json — contains registry auth / job token material)
+    - ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -NoProfile -Command \"Get-ChildItem -LiteralPath '${WIN_WORK_DIR}/.docker' -Force -ErrorAction Stop | Format-Table Name,Length -AutoSize\""
+    # Pull ACTT image on Windows host using per-job Docker config (isolated credentials, safe for concurrent pipelines)
+    - ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "docker --config ${WIN_WORK_DIR}/.docker pull ${ACTT_IMAGE}"
+    - ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} powershell -NoProfile -ExecutionPolicy Bypass -File ${WIN_WORK_DIR}/report/run_actt_container.ps1
+    # Remove helper files before pulling report to avoid leaking CI variables into artifacts
+    - ssh ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST} "powershell -Command Remove-Item -Path '${WIN_WORK_DIR}/report/ci.env','${WIN_WORK_DIR}/report/run_test.ps1' ,'${WIN_WORK_DIR}/report/run_actt_container.ps1' -Force -ErrorAction SilentlyContinue"
+    # Pull report back from Windows host to runner workspace
+    - scp -r ${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}:${WIN_WORK_DIR}/report ./report
+  after_script:
+    # after_script runs in a new shell; ssh-agent is gone, use -i to specify key file directly
+    - ssh -i "$ACTT_SSH_PRIVATE_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}" "powershell -NoProfile -Command Remove-Item -Path '${WIN_WORK_DIR}' -Recurse -Force -ErrorAction SilentlyContinue" || true
+    - ssh -i "$ACTT_SSH_PRIVATE_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "${ACTT_SSH_USERNAME}@${ACTT_WINDOWS_HOST}" "docker image prune -f" || true
+  artifacts:
+    paths:
+      - report/
+
+.actt_upload_report:
+  image: registry.gitlab.com/moxa/sw/sre/share/runner-img/docker-scm:latest
+  variables:
+    # Inherited from product autobuild_config.yml (pipeline variables); must not duplicate DUT_MODEL here or it overrides the product.
+    # scm upload: --scm-path = SCM repo path; third arg = destination under repo → .../${DUT_MODEL}/report/${TEST_DATE}/
+    ACTT_MAF_TARGET: "moxa/sw/sre/share/team-docker-images/maf/docker-actt"
+  before_script:
+    # Skip when the upstream actt job produced no report (e.g. it was skipped).
+    - |
+      if [ ! -d "report" ] || [ -z "$(ls -A report 2>/dev/null)" ]; then
+        echo "${LOG_INFO}No ACTT report found, skip report upload.${LOG_END}"
+        exit 3
+      fi
+  script:
+    - |
+      set -e
+      if [ -z "${DUT_MODEL}" ] || [ "${DUT_MODEL}" = "NO_DEFAULT_DUT_MODEL" ]; then
+        echo "ERROR: DUT_MODEL required for report upload path. Set it under variables: in autobuild_config.yml."
+        exit 1
+      fi
+      if [ -n "$FWR_PIPELINE_INFO_FILE" ] && [ -s "$FWR_PIPELINE_INFO_FILE" ]; then
+        _SCM=$(sed -n 's/^SCM_URL=//p' "$FWR_PIPELINE_INFO_FILE" | head -n 1)
+        _SCM=$(echo "$_SCM" | sed 's#/\([[:space:]]*\)#/#g')
+        export DUT_SERIES=$(echo "$_SCM" | sed -n 's#.*[Ff][Ww][Rr]_\([^_]*\)_v.*#\1#p' | head -n 1)
+        _VER=$(echo "$_SCM" | sed -n 's#.*/[Ff][Ww][Rr]_[^_]*_v\([^_]*\).*#\1#p' | head -n 1)
+        export DUT_VERSION="$_VER"
+        echo "actt_upload_report: DUT_MODEL=${DUT_MODEL} DUT_VERSION=${DUT_VERSION} DUT_SERIES=${DUT_SERIES}"
+      fi
+    - |
+      set -e
+      if [ -f report/result_summary.json ]; then
+        TEST_DATE=$(python3 -c "import json; print(json.load(open('report/result_summary.json'))['date'])")
+      else
+        echo "WARN: report/result_summary.json missing; using CI_PIPELINE_CREATED_AT for SCM path segment"
+        TEST_DATE=$(date -d "$CI_PIPELINE_CREATED_AT" +"%Y-%m-%d-%H")
+      fi
+      echo "TEST_DATE=${TEST_DATE}"
+      echo "Upload report/ → ${ACTT_MAF_TARGET}/${DUT_MODEL}/report/${TEST_DATE}/"
+      scm upload --local-path report/ --scm-path "${ACTT_MAF_TARGET}" "report/${DUT_MODEL}/${TEST_DATE}"

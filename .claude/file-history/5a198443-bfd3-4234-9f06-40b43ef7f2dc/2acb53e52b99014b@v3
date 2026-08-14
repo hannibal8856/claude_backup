@@ -1,0 +1,608 @@
+# Plan E — Phase 3 Implementation Plan (framework subagent skeleton + iss0 pilots)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make `app_moxa_framework` an AgentX subagent in its own process, then move GET for two `iss_build==0` MIBs onto it — `mx_device_io` (benchmark) and `mx_portmirror` (semantics) — with SET still going through in-master and no OID lost.
+
+**Architecture:** Two new C libraries sit between net-snmp and Rust. `lib_moxa_snmp_agentx` links `libnetsnmpagent` + `libnetsnmp` + the four AgentX objects **and deliberately keeps `libnetsnmpmibs` out of the framework process** (D6) — the whole of ies-auto-mibs and its parson / framework-uri / lib_moxa_system dependencies hang off that library. `lib_moxa_ies_auto_mibs` compiles the existing `net_*.h` arrays into a lookup so OID→URI mapping has one truth source (D5.1). Rust wraps both. The framework registers its OID arcs over AgentX; in-master's existing children-chain forward (Phase 1) then routes GET there with no further change to `ies_auto_mibs.c`.
+
+**Tech Stack:** C (net-snmp 5.9.3), Rust (actix-web 4 + tokio, existing `app_moxa_framework`), Buildroot 2023.02.11, cross-compiled for Cortex-A9.
+
+## Global Constraints
+
+- **SET must not move.** in-master keeps every registration and answers `MODE_IS_SET` exactly as today. `ies_auto_mibs.c`'s SET branch, `READ_CREATE_*`, `security_token`, rowStatus: not one line (design doc §6.2).
+- **The framework subagent holds no token and has no identity** (D7). AgentX PDUs carry no `securityName`; VACM is enforced in the master before forwarding. If a design step seems to need a token in the subagent, that step is wrong — stop and escalate.
+- **`libnetsnmpmibs` must never link into the framework process** (D6). Task 2 has an explicit test for this; it is the reason that library exists.
+- **`lib_moxa_ies_auto_mibs` must compile with the identical macro set as snmpd.** Any mismatch silently changes which entries exist. Do not copy the list — `3RDPARTY_NET_SNMP_CFLAGS` is assembled from ~20 `ifeq (${BR2_...}, y)` conditions, so a copied snapshot is the thing that drifts. Take it with `$(filter -D%,$(3RDPARTY_NET_SNMP_CFLAGS))`; see Task 3 Step 2. Current expansion, for reference only: `-DMDS_G4000_L3_4XGS -DCPSS -DINCLUDE_MOXA_L3 -DMDSG40004XGS -DMOXA_MULTICOUPLING -DMOXA_TRACKING -DMOXA_DI -DMOXA_DO_RELAY -DMOXA_MACSEC -DMOXA_GOOSE_CHECK -DMOXA_RSTP_SWIFT -DMOXA_MIRROR_VLAN_MIRROR -DMOXA_CUST`.
+- **No new thread for net-snmp.** The library is not thread-safe; every net-snmp call stays inside one tokio task (D5, §5.3). FRR does the same — `~/SRC/frr/lib/agentx.c` is the reference.
+- **Do not rebuild AgentX reconnection — but you must switch it on.** net-snmp's subagent module already does it (`agentx_check_session` alarm + ping); ISS paid for relearning this twice (`dac4ee673`, `aa621ff60`). **It ships disabled.** `subagent_startup()` (`subagent.c:96`) branches on `agentXPingInterval`, which defaults to 0:
+
+  | interval | behaviour |
+  |---|---|
+  | `> 0` | `agentx_reopen_session()` — retries, and registers the ping alarm |
+  | `0` | `subagent_open_master_session()` — **one attempt, never retried** |
+
+  A subagent that loses the startup race to snmpd — which is what a cold boot is — then never connects, and nothing anywhere reports it: the single attempt happens after `init_agent()` has already returned success. Task 5 shipped twice with this missing. Set it before `init_agent()`, alongside the socket address.
+- Source comments in English. Plan, commits, reports may be Chinese.
+- **A new `dl/` package needs four wirings, not two** (learned in Task 2; Tasks 3 and 4 create three more packages and hit the same thing). Beyond `moxa/package/net/<pkg>/{Config.in,<pkg>.mk}`: add a `source` line to `moxa/Config.in.Product_Packages`, add `<PKG>_OVERRIDE_SRCDIR="./dl/<pkg>"` to `moxa/local.mk` (`buildroot/local.mk` is a symlink to it), and refresh `.config` (`make olddefconfig`, set the new symbol to `y`, `make olddefconfig` again). **Without the `OVERRIDE_SRCDIR` line the build prints `Extracting`, leaves an empty build directory and fails later with a misleading `No targets specified and no makefile found`** — the `_SITE` line every sibling `.mk` carries is not what makes the source arrive. A build directory with a `-custom` suffix is the sign the override took.
+- **Before starting an image build, check `/tmp/.moxa_gitlab_scm_token` exists.** The HSM signing step (`Makefile:816`, `target-post-image`) authenticates to GitLab through it, and `/tmp` gets cleared. When it is missing the whole build runs to completion and fails at the very last step — rootfs.squashfs is built, no `.swu` is produced, and the previous `.swu` files are already gone. Two full builds were lost to this on 2026-08-05. One line, first:
+
+```bash
+test -s /tmp/.moxa_gitlab_scm_token || echo "!! token missing - image build will fail at signing"
+```
+
+  Recreating it needs the user's own credential:
+
+```bash
+echo '<gitlab_username>' > /tmp/.moxa_gitlab_scm_token
+echo 'glpat-...'        >> /tmp/.moxa_gitlab_scm_token
+chmod 600 /tmp/.moxa_gitlab_scm_token
+```
+- Builds: `run_in_docker.sh "make <pkg>-rebuild"` for code only; append `; make` only when an image is needed. **`plugin_moxa_*` and framework need `make rust_moxa_build-rebuild` after their own rebuild to take effect.** Never run a build while another one shares `output/` — check `ls -l /proc/<pid>/cwd`, not just whether make is running.
+- Latency is measured from a pcap, never client wall clock. `tools/mxportdb_latency.sh` is the pattern; per-varbind cost is table-dependent so a rate from one MIB does not transfer to another (see `RESULT-phase2-task4.txt`).
+- Any capture compared against another carries a `running-config.txt` snapshot per side, or is same-partition before/after (`dut-config-affecting-snmp.md`).
+
+## On the size of this phase, and where to stop
+
+Phase 3 is materially larger than Phase 2, and unlike Phase 2 it is nearly all new code. There is a real seam after Task 5:
+
+- **Tasks 1–5 are infrastructure.** Each is testable on its own and none changes what any OID returns. At the end of Task 5 the framework is a connected AgentX subagent serving zero OIDs — a state that is verifiable, shippable, and reversible.
+- **Tasks 6–8 are the pilots.** These change behaviour and need the DUT.
+
+Executing 1–5, reviewing, and only then starting 6 is the recommended cadence. The tasks are written so that stopping after 5 leaves nothing half-done.
+
+**A note on the code in this plan.** For the existing C in `3rdparty_net_snmp` the steps carry literal code, because it can be read and matched. For the two new libraries and their Rust wrappers the steps carry **exact signatures, build configuration, acceptance tests and the specific existing code to derive the bodies from** — not invented 300-line implementations that were never put through a compiler. Writing plausible-looking bodies I could not compile would be worse than useless here: it would look authoritative and be wrong in ways the implementer would have to unpick.
+
+---
+
+## File Structure
+
+| File | Action | Responsibility |
+|---|---|---|
+| `moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:185` | Modify | add `agentx/subagent` to `--with-mib-modules` |
+| `dl/lib_moxa_snmp_agentx/` | Create | C shim: AgentX session lifecycle + registration, scalar API, keeps `libnetsnmpmibs` out |
+| `dl/lib_moxa_ies_auto_mibs/` | Create | C: OID → `{uri, mod_uri, layer, val_type, oid_index, flags}` lookup, compiled from `ies_auto_mibs_setup.c` — see Task 3 |
+| `dl/3rdparty_net_snmp/ies-auto-mibs/*` (15 files) + `snmp_tools/inc/ies_auto_mibs_handle.h` | Modify | wrap in-master handler bodies in `#ifndef IES_AUTO_MIBS_TABLE_ONLY` so the entry tables can be included without them |
+| `dl/lib_moxa_rust_snmp_agentx/` | Create | Rust FFI over the above |
+| `dl/lib_moxa_rust_ies_auto_mibs/` | Create | Rust FFI over the above |
+| `dl/app_moxa_framework/src/snmp_agentx.rs` | Create | subagent task: init, fd → tokio, register arcs, dispatch to config/status layer |
+| `dl/app_moxa_framework/src/main.rs` | Modify | spawn the subagent task |
+| `dl/app_moxa_framework/Cargo.toml` | Modify | add the two new crates, widen tokio features |
+| `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase3-task*.txt` | Create | per-task evidence |
+| `~/WORK/SNMP_50ms/plan-e-agentx-get-offload-design-2026-08-03.md` | Modify | §11 gets D19 (Phase 3 verdict) in Task 8 |
+
+The `ies-auto-mibs` row is a **compile-time guard only** — no behaviour changes, and snmpd's compiled output was verified byte-identical before and after (`RESULT-phase3-task3.txt`). The original rule still stands for everything else: Phase 1's forwarding already routes GET to whichever subagent covers the arc, so the framework becoming one requires no logic change there. **If a task finds itself editing `ies_auto_mibs.c`'s GET or SET paths, that is a signal the approach has drifted** — stop and re-read §4.3.
+
+---
+
+### Task 1: Compile the AgentX subagent module into net-snmp
+
+**Files:**
+- Modify: `~/SNMP_PLAN_E/buildroot/moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:185`
+
+**Interfaces:**
+- Produces: `subagent.lo` and `client.lo` in the net-snmp agent build, which every later task depends on. Nothing else in this plan can start until this lands.
+
+**Why first and why alone:** it is a one-line build change with a wide blast radius (it relinks snmpd), and it is the cheapest thing to get wrong. Verified empirically today: the current build produces `agentx/agentx_config.lo`, `agentx/master_admin.lo`, `agentx/master.lo`, `agentx/protocol.lo` — and no `subagent.lo`, no `client.lo`. Adding `agentx/subagent` is harmless to snmpd itself: subagent mode is selected at runtime by `-X`, not at link time (§5.2).
+
+- [ ] **Step 1: Confirm the line is still where planning found it**
+
+The Moxa `.mk` files live under `buildroot/moxa/`, not `buildroot/package/`:
+
+```bash
+cd ~/SNMP_PLAN_E/buildroot
+grep -n "with-mib-modules" moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk
+```
+
+Expected, two hits:
+
+```
+158:    --with-mib-modules="ucd-snmp/dlmod"
+185:    --with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy agentx/master" \
+```
+
+**Line 185 is the one to edit** — it is the full agent build. Line 158 is a separate,
+shorter configure invocation; read the conditional around it before assuming it is
+unused, but do not change it in this task.
+
+- [ ] **Step 2: Add the module**
+
+The values are **space-separated**, not comma-separated:
+
+```
+--with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy agentx/master agentx/subagent" \
+```
+
+`agentx/master` stays — snmpd remains the master. Subagent mode is selected at runtime
+by `-X`, so linking the subagent objects in does not change how snmpd behaves (§5.2).
+
+- [ ] **Step 3: Rebuild and verify the objects appear**
+
+**Use `-reconfigure`, not `-rebuild`.** The change is to a configure argument, and
+`<pkg>-rebuild` re-runs only the build step — it will not re-run `./configure`, so the
+agent Makefile keeps its old module list and the change appears to do nothing.
+
+```bash
+/usr/local/bin/run_in_docker.sh "make 3rdparty_net_snmp-reconfigure"
+cd ~/SNMP_PLAN_E/buildroot/output/build/3rdparty_net_snmp-custom/net-snmp-5.9.3/agent
+grep -oE "agentx/[a-z_]+\.lo" Makefile | sort -u
+```
+
+Expected: the four existing entries **plus** `agentx/client.lo` and `agentx/subagent.lo`.
+
+- [ ] **Step 4: Verify snmpd is unharmed**
+
+Flash and re-run the Phase 2 latency measurement — same tool, same OIDs, so the number is directly comparable to the recorded 13.4ms:
+
+```bash
+cd ~/WORK/SNMP_50ms
+sudo -v && tools/mxportdb_latency.sh phase3-task1
+```
+
+Expected: p50 in the same range as `RESULT-phase2-task4.txt`'s Plan E figure. A large change here means the relink altered master behaviour and must be understood before continuing.
+
+Also check the boot log is still clean of the namelen watchdog (Phase 0/1 Task 5):
+
+```bash
+# DUT, Linux shell. /var/log/messages does not exist on this device - naming it
+# with 2>/dev/null is how this check silently passed without reading anything.
+grep -i "moxa: AgentX" /moxa/permanent/moxalog/*
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd ~/SNMP_PLAN_E/buildroot/moxa
+git add package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk
+git commit -m "[Plan E Task 3-1] build agentx/subagent into net-snmp
+
+lib_moxa_snmp_agentx links subagent.c and client.c, which the current
+configure line does not produce - verified: the agent Makefile lists only
+agentx_config, master_admin, master and protocol. agentx/master stays;
+snmpd remains the master and subagent mode is a runtime -X flag, not a
+link-time choice."
+```
+
+---
+
+### Task 2: `lib_moxa_snmp_agentx` — the C shim that keeps libnetsnmpmibs out
+
+**Files:**
+- Create: `dl/lib_moxa_snmp_agentx/{Makefile,include/lib_moxa_snmp_agentx/agentx.h,src/agentx.c}`
+
+**Interfaces:**
+- Consumes: Task 1's `subagent.lo` / `client.lo`
+- Produces, consumed by Tasks 4 and 5 — these signatures are the contract, keep them exactly:
+
+```c
+/* Session lifecycle. Call order is fixed: init -> register* -> poll loop.
+ *
+ * `socket` is the master's AgentX address in net-snmp's transport syntax.
+ * It is NOT optional in practice: net-snmp's compiled-in default is the unix
+ * socket /var/agentx/master, snmpd on this product listens on
+ * tcp:127.0.0.1:705 (plugin_moxa_snmp writes that line into snmpd.conf at
+ * config_moxa_snmp_control.c:794), and getting it wrong fails silently -
+ * init_agent() succeeds either way and the subagent retries forever, so the
+ * only symptom is a session that never appears on the master. Task 5 shipped
+ * once with this missing. */
+int  mx_agentx_init(const char *name, const char *socket);  /* 0 ok, -1 fail */
+void mx_agentx_shutdown(void);
+
+/* Register one whole OID arc. Per D3/section 4.2 this is arc-level, not
+ * per-column: pass the arc root and its length. */
+int  mx_agentx_register_arc(const unsigned long *oid, size_t oid_len, int priority);
+
+/* Event loop, modelled on FRR's agentx_events_update()
+ * (~/SRC/frr/lib/agentx.c:94). The caller owns the reactor; this returns the
+ * fds net-snmp wants watched and how long it may sleep. */
+int  mx_agentx_select_info(int *maxfd, int *fds, size_t fds_cap,
+                           long *timeout_us, int *block);
+void mx_agentx_handle_read(int fd);
+void mx_agentx_handle_timeout(void);
+
+/* Value delivery. The Rust handler is called back with a request id and an
+ * OID; it answers with exactly one of these. Types are scalars only - no
+ * netsnmp_request_info, no unions, no macros across the FFI boundary (D6). */
+int  mx_agentx_reply_integer(unsigned long req, long value);
+int  mx_agentx_reply_octets(unsigned long req, const unsigned char *buf, size_t len);
+int  mx_agentx_reply_oid(unsigned long req, const unsigned long *oid, size_t oid_len);
+int  mx_agentx_reply_nosuch(unsigned long req);
+
+/* Handler registration: Rust supplies one callback for all arcs. */
+typedef int (*mx_agentx_get_cb)(unsigned long req,
+                                const unsigned long *oid, size_t oid_len,
+                                void *ctx);
+void mx_agentx_set_get_handler(mx_agentx_get_cb cb, void *ctx);
+```
+
+**Derive the bodies from:** `~/SRC/frr/lib/agentx.c` for the init and select/read/timeout cycle — it is the same problem solved against a different reactor, and §5.3 cites it deliberately. `mx_agentx_init` is FRR's `netsnmp_enable_subagent(); init_agent(name); init_snmp(name);`. `mx_agentx_select_info` wraps `snmp_select_info2()`; `mx_agentx_handle_read` wraps `snmp_read2()` + `netsnmp_check_outstanding_agent_requests()`; `mx_agentx_handle_timeout` wraps `snmp_timeout(); run_alarms(); netsnmp_check_outstanding_agent_requests();`.
+
+- [ ] **Step 1: Create the package skeleton**
+
+Copy the layout of an existing small C library in `dl/` (`lib_moxa_utility` or `lib_moxa_system`) — Makefile shape, install targets, `MOXA-SOFTWARE-NOTICE.txt`. Match the sibling exactly; do not invent a new build style.
+
+- [ ] **Step 2: Write the header exactly as specified above**
+
+The signatures in the Interfaces block are the contract Tasks 4 and 5 are written against. Changing one means changing those tasks too.
+
+- [ ] **Step 3: Write the implementation**
+
+Derive from the FRR reference named above. Two rules that are not negotiable:
+
+- Every net-snmp call happens on the caller's thread. No `pthread_create` anywhere in this library.
+- `mx_agentx_register_arc` registers the arc, not each column. Use `netsnmp_register_handler` with a reginfo whose rootoid is the arc and whose handler is this library's dispatcher, which turns the request into `mx_agentx_get_cb`.
+
+- [ ] **Step 4: Link flags — this is the whole point of the library**
+
+`-lnetsnmpagent -lnetsnmp`. Do **not** use `net-snmp-config --agent-libs`: it adds
+`libnetsnmpmibs`, which drags all of ies-auto-mibs plus parson,
+`lib_moxa_framework_uri` and `lib_moxa_system` into whatever links it (§5.2, and
+`agent/Makefile.in:141` is where that bundling happens).
+
+**Simpler than §5.2 assumed — measured during Task 1.** §5.2 says to link "the four
+AgentX objects" separately. They are already inside `libnetsnmpagent`, and none of them
+is in `libnetsnmpmibs`:
+
+```
+symbol                    libnetsnmpagent   libnetsnmpmibs
+subagent_init                    yes              no
+agentx_open_session              yes              no
+agentx_register_index            yes              no
+agentx_parse                     yes              no
+```
+
+`libnetsnmpagent`'s own `NEEDED` list has no `libnetsnmpmibs` either. So there is no
+object extraction to do — two `-l` flags cover it.
+
+**Carry this into the link anyway:** `libnetsnmpagent` pulls in
+`libmoxaframeworkuri`, `libparson`, `libmoxa_system` and `libmoxa_util`, because the
+`.mk` appends them to `--with-ldflags` globally. Anything linking it inherits them.
+Not a D15 violation — D15 forbids the subagent *using* `ies_uri_handle_client`, not
+linking a library that is merely present — but know it rather than discover it.
+
+- [ ] **Step 5: Prove libnetsnmpmibs is absent — the acceptance test**
+
+```bash
+cd ~/SNMP_PLAN_E/buildroot/output/target
+arm-linux-gnueabihf-readelf -d usr/lib/libmoxa_snmp_agentx.so | grep NEEDED
+```
+
+Expected: `libnetsnmpagent`, `libnetsnmp`, libc and friends. **`libnetsnmpmibs` must not appear.** If it does, the link line is wrong and every later task inherits a framework process carrying the whole MIB tree.
+
+- [ ] **Step 6: Cross-compile and commit**
+
+```bash
+/usr/local/bin/run_in_docker.sh "make lib_moxa_snmp_agentx-rebuild"
+```
+
+Confirm the log shows `arm-linux-gnueabihf-gcc`, not host gcc.
+
+---
+
+### Task 3: `lib_moxa_ies_auto_mibs` — one truth source for OID → URI
+
+**Files:**
+- Create: `dl/lib_moxa_ies_auto_mibs/{Makefile,include/lib_moxa_ies_auto_mibs/iesmap.h,src/iesmap.c,test/test_iesmap.c}`
+
+**Interfaces:**
+- Produces, consumed by Tasks 4–7:
+
+```c
+struct iesmap_result {
+    const char *uri;          /* e.g. "io/di/"                      */
+    const char *mod_uri;      /* MIB-name -> config-key bridge, or NULL */
+    const char *uri_index;
+    int         iss_build;    /* 1 = ISS side, 0 = framework side    */
+    int         val_type;     /* SNMP_DATA_TYPE_*                    */
+    int         oid_index;
+    int         mode;         /* HANDLER_CAN_RONLY / _RWRITE         */
+    const unsigned char *flags;/* IES_FLAG_SNMP_* bit array          */
+};
+
+/* ies_flag_t is unsigned char (ies_flag_bits.h:11) - the earlier `unsigned
+   int` here would have read the wrong bits without failing. Read the array
+   through this rather than indexing it: */
+int iesmap_flag_is_set(const struct iesmap_result *result, int flag);
+
+/* 0 = found, -1 = no entry for this OID. */
+int iesmap_lookup(const unsigned long *oid, size_t oid_len,
+                  struct iesmap_result *out);
+
+/* Entry count, for the consistency check in Step 4. */
+size_t iesmap_entry_count(void);
+```
+
+**Build rule that decides whether this library is correct at all — corrected during execution:** including only the `net_*.h` is **not enough, and fails silently**. Those headers carry neither the flags nor the list of which arrays exist:
+
+- **Flags** are applied one layer up, by `ies_auto_mibs_setup_entry_flags()` (`ies_auto_mibs_setup.c:513`), called from `mox_snmp_init_entry()` (`ies_auto_mibs.c:3437`). A header-only build yields an all-zero flag array and no error — and Task 7's `REPLACE_TRUTH_VALUE` then converts nothing.
+- **The array set** is decided by `ies_auto_mibs_setup.c`'s 67 `MOX_SNMP_INIT_ENTRY` calls under 9 `#if` guards. Re-listing them is a copy, and copies drift.
+
+So the library `#include`s `ies_auto_mibs_setup.c` itself with `MOX_SNMP_INIT_ENTRY` redefined from "register with net-snmp" to "append to my table". To make that includable, the in-master handler bodies in the 15 files that mix them with flag setup are wrapped in `#ifndef IES_AUTO_MIBS_TABLE_ONLY` (documented next to the macro in `snmp_tools/inc/ies_auto_mibs_handle.h`). snmpd never defines that macro; its compiled output was verified byte-identical before and after. See `RESULT-phase3-task3.txt`.
+
+- [ ] **Step 1: Package skeleton and header**
+
+Same sibling-matching approach as Task 2 Step 1.
+
+- [ ] **Step 2: Compile with snmpd's exact macro set**
+
+Do **not** copy the macro list. `3RDPARTY_NET_SNMP_CFLAGS` is assembled from ~20 `ifeq (${BR2_...}, y)` conditions (`3rdparty_net_snmp.mk:44-127`), so a copied snapshot is exactly the thing that diverges silently. Every Buildroot `.mk` is read into one make process and `_BUILD_CMDS` expands at recipe time, so take the value directly:
+
+```make
+LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS=$(filter -D%,$(3RDPARTY_NET_SNMP_CFLAGS))
+```
+
+`-D%` only: the variable also carries `-I$(@D)/...` paths relative to net-snmp's own build directory.
+
+- [ ] **Step 3: Write the lookup**
+
+A linear scan over the expanded arrays is acceptable for the pilots. Do not build an index, a cache, or a hash until something measures that the scan is too slow — Phase 3's gate is correctness and the subagent existing at all.
+
+- [ ] **Step 4: The consistency test — this is what makes the library trustworthy**
+
+**The `snmpwalk | wc -l` comparison originally written here does not work** and was dropped: snmpwalk counts OID *instances* (a column over 12 ports is 12 lines) while `iesmap_entry_count()` counts table *entries*, one per column. The two are different quantities and a mismatch would prove nothing.
+
+What Step 2 guards against is the two sides compiling with different macro sets, and that is now structural — both compile the same `MOX_SNMP_INIT_ENTRY` sequence from the same file with the same `-D` set, taken from one variable. Record the number the build produces so a future change that moves it is visible: **1936** for this product.
+
+- [ ] **Step 5: Unit-test a known OID end to end**
+
+`mx_device_io`'s first entry is a good anchor because Task 6 uses it:
+
+```c
+/* 1.3.6.1.4.1.8691.602.8.6.2.1.1.1 -> uri "io/power/system/", iss_build 0,
+   RONLY. Read from net_mx_device_io.h:8 - an earlier draft of this step said
+   "io/di/", which is a different entry. */
+static void test_lookup_device_io(void) {
+    const unsigned long oid[] = {1,3,6,1,4,1,8691,602,8,6,2,1,1,1};
+    struct iesmap_result r;
+    assert(iesmap_lookup(oid, sizeof(oid)/sizeof(oid[0]), &r) == 0);
+    assert(strcmp(r.uri, "io/power/system/") == 0);
+    assert(r.iss_build == 0);
+    assert(r.mode == HANDLER_CAN_RONLY);
+}
+```
+
+- [ ] **Step 6: Cross-compile and commit**
+
+---
+
+### Task 4: Rust FFI for both libraries
+
+**Files:**
+- Create: `dl/lib_moxa_rust_snmp_agentx/{Cargo.toml,Makefile,src/lib.rs}`
+- Create: `dl/lib_moxa_rust_ies_auto_mibs/{Cargo.toml,Makefile,src/lib.rs}`
+
+**Interfaces:**
+- Consumes: the C headers from Tasks 2 and 3
+- Produces, consumed by Task 5: a safe Rust surface. The C API was already reduced to scalars precisely so this layer stays thin (D6) — if a binding here needs `unsafe` beyond the raw `extern "C"` block and one wrapper per call, the C API is wrong, not the Rust.
+
+**Match the existing pattern:** `dl/lib_moxa_rust_system/` is the closest sibling — same Cargo layout, same Makefile, same `build.rs` approach for finding the C library. Copy its structure rather than choosing a new one.
+
+- [ ] **Step 1: `lib_moxa_rust_ies_auto_mibs` first** — it is pure data lookup, no lifecycle, so it is the easier of the two and shakes out the build wiring.
+- [ ] **Step 2: Unit-test the same OID as Task 3 Step 5** through the Rust surface.
+- [ ] **Step 3: `lib_moxa_rust_snmp_agentx`** — the callback is the only awkward part: `mx_agentx_set_get_handler` takes a C function pointer plus `void *ctx`. Box the Rust closure, pass the pointer as `ctx`, and keep the trampoline `extern "C" fn` free of panics (`catch_unwind` at the boundary — a panic across FFI is undefined behaviour).
+- [ ] **Step 4: Cross-compile both, commit.**
+
+---
+
+### Task 5: framework subagent skeleton — connected, serving nothing
+
+**Files:**
+- Create: `dl/app_moxa_framework/src/snmp_agentx.rs`
+- Modify: `dl/app_moxa_framework/src/main.rs`, `dl/app_moxa_framework/Cargo.toml`
+
+**Interfaces:**
+- Consumes: Task 4's Rust crates
+- Produces: a live AgentX session from `app_moxa_framework` to snmpd, registering **zero** OIDs
+
+**Why register nothing:** this task's whole value is separating "can the framework hold an AgentX session inside its tokio runtime" from "does serving an OID work". If they are done together and something breaks, there are two candidate causes. Registering zero arcs makes the failure unambiguous.
+
+- [ ] **Step 1: The task skeleton**
+
+```rust
+// Every net-snmp call must stay on this one task. The library is not
+// thread-safe, and FRR does not spawn a thread for it either (design 5.3).
+// Do not add tokio::spawn inside this task, and do not make the handler async.
+pub async fn run_subagent(state: Arc<AppState>) -> anyhow::Result<()> {
+    mx_agentx::init("moxa-framework")?;
+    // no register_arc calls yet - Task 6 adds the first
+    loop {
+        let info = mx_agentx::select_info()?;
+        // AsyncFd per fd, poll for readable, then handle_read
+        // on timeout: handle_timeout
+    }
+}
+```
+
+- [ ] **Step 2: Wire the fds into tokio**
+
+`AsyncFd` per fd returned by `select_info`. Re-query after every read and every timeout — the fd set changes when the AgentX session reconnects, which is exactly what FRR's `agentx_events_update()` is doing when it recomputes the whole list each time (`~/SRC/frr/lib/agentx.c:94`).
+
+- [ ] **Step 3: Spawn from `main.rs`** alongside the existing actix-web server, not replacing it. Widen the tokio feature list beyond `["signal"]` as needed.
+
+- [ ] **Step 4: Verify the session exists — the acceptance test**
+
+Deploy, then on the DUT:
+
+```bash
+# snmpd should show a second AgentX session besides ISS
+ss -x | grep -i agentx      # or: ss -tnp | grep 705
+ps -ef | grep -E "moxa_framework|snmpd"
+```
+
+and from the host, confirm nothing changed for any OID:
+
+```bash
+cd ~/WORK/SNMP_50ms
+tools/capture_baseline.sh phase3-task5 192.168.127.253
+# plus a running-config snapshot per dut-config-affecting-snmp.md
+python3 tools/walkdiff.py <the task5 capture> <a pre-task5 capture of the same partition>
+```
+
+Expected: `missing=0`, `surplus=0`. The framework is connected and registers nothing, so nothing may move.
+
+- [ ] **Step 5: The namelen invariant — first real test since it was written**
+
+Phase 0/1 Task 5 added a watchdog for the case where a subagent registers finer than in-master (design §4.4). Until now there has been only one subagent, so the invariant was never exercised. **This is the moment it becomes real**, and it is what D17 said Phase 3 would settle.
+
+```bash
+# DUT, after boot with the framework subagent running:
+grep -i "moxa: AgentX" /moxa/permanent/moxalog/*
+```
+
+The watchdog's two messages are emitted at `moxa_snmp_handle_util.c:1850` and `:1858` via `snmp_log(LOG_WARNING/LOG_ERR)`, so syslog is the destination and `moxa.log` / `moxa.debug` are the files that carry them. Confirm those files are non-empty before reading a clean result as evidence.
+
+Expected: no output. Any hit means the framework registered finer than in-master and SET would silently break — stop, and re-read §4.4 before Task 6.
+
+- [ ] **Step 6: Commit** (framework repo; remember `make rust_moxa_build-rebuild` after the package rebuild or the change will not take effect).
+
+---
+
+> **Seam.** Tasks 1–5 change no OID's value or presence. Review here before continuing.
+
+---
+
+### Task 6: `mx_device_io` pilot — 8 read-only entries, and the benchmark
+
+**Files:**
+- Modify: `dl/app_moxa_framework/src/snmp_agentx.rs`
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase3-task6.txt`
+
+**Interfaces:**
+- Consumes: Task 5's live session
+- Produces: the framework-side latency pair that design doc §10.2 Phase 4's go/no-go needs (the Phase 2 side is already recorded in `RESULT-phase2-task4.txt`)
+
+**The MIB, counted from source rather than assumed** (`net_mx_device_io.h`): 8 entries, **all `HANDLER_CAN_RONLY`**, arc root `1.3.6.1.4.1.8691.602.8.6.2`, four URIs — `io/power/system/`, `io/power/poe/`, `io/di/`, `io/relay/` — two entries each. All read-only means SET cannot be affected here at all, which is why it is the right first pilot.
+
+The arc root was previously written here as `…602.8.6.2.1.1`, which is only the first table's column arc. The four tables sit at `…602.8.6.2.{1,2,3,4}.1`, so the common prefix — the thing Step 2 registers — is `1.3.6.1.4.1.8691.602.8.6.2`.
+
+**8 declared entries, 7 retrievable OIDs, and only 4 of the 8 entries are retrievable at all.** The header declares every entry `HANDLER_CAN_RONLY`, but `snmp_moxa_mib/private/mxDeviceIo.mib` declares the four `index` columns `not-accessible` (poe:168, relay:258) or `accessible-for-notify` (systemPower:125, di:211) — under SMI neither may be returned by GET or GETNEXT. Only the four `*Status` columns are `read-only`. Walked on Build 2026_0805_1738:
+
+```
+.…602.8.6.2.1.1.2.1 = 1    .…602.8.6.2.1.1.2.2 = 2    io/power/system/status
+.…602.8.6.2.2.1.2.1 = 0    .…602.8.6.2.2.1.2.2 = 2    io/power/poe/status
+.…602.8.6.2.3.1.2.1 = 0                               io/di/status
+.…602.8.6.2.4.1.2.1 = 0    .…602.8.6.2.4.1.2.2 = 0    io/relay/status
+```
+
+So Step 2 registers the arc but Step 3 serves only the four status columns, and Step 4's `missing=0 / surplus=0` is against these 7.
+
+**Do not reproduce in-master's GET on the index columns.** `snmpget .…602.8.6.2.1.1.1.1` currently answers `1`; per the MIB it should be noSuchObject, and that is the one place where in-master and the MIB genuinely disagree. Dropping it is invisible to `walkdiff` — the index columns were never in a walk — so Step 5 has to state it in `RESULT-phase3-task6.txt` explicitly. The GETNEXT mechanism that produces the correct walk despite the over-permissive entry table is written up in `getnext-skips-first-column-2026-08-05.md`.
+
+**The value mapping is not a pass-through.** The status layer returns strings; `/sbin/generate_uri_snmp_table` (a Rust ELF, source at `dl/3rdparty_net_snmp/snmp_script_rust/generate_uri_snmp_table/src/main.rs`) converts them, and Step 3 has to reimplement that:
+
+| URI | JSON | SNMP | MIB enum | source |
+|---|---|---|---|---|
+| `io/power/system/`, `io/power/poe/` | `"off"` / `"on"` / other | 0 / 1 / 2 | `off(0) on(1) notApplicable(2)` | `main.rs:220-237` |
+| `io/di/`, `io/relay/` | `"open"` / other | 0 / 1 | `open(0) short(1)` | `main.rs:240-253` |
+
+All four URIs carry `IES_FLAG_SNMP_URI_STATUS` (`ies_auto_mibs_setup_net_mx_device_io.c`), so Task 6 touches the status layer only and never the config layer.
+
+**`io/relay/` has a null row.** The status layer returns `[{"status":"open"},{"status":"open"},null]`. Serve two rows; the third has no status to convert. In-master publishes a third *index* value (`.2.4.1.1.3 = 3`) and no third status — an asymmetry that disappears once the index columns are not served.
+
+- [x] **Step 1: Capture the "before" — on this partition, before registering anything** — done 2026-08-05 19:04, `tools/mx_device_io_latency.sh`, `~/pcap/mxdeviceio-7oid-before-20260805_1904.pcapng`: **n=100, p50=113.3ms, p95=135.7ms, p100=153.5ms** over the 7 OIDs above.
+
+```bash
+cd ~/WORK/SNMP_50ms
+sudo -v
+# adapt tools/mxportdb_latency.sh: same structure, mx_device_io's 8 OIDs
+tools/mx_device_io_latency.sh before
+```
+
+Copy `tools/mxportdb_latency.sh` and change only the OID list and the label — it already handles the tcpdump mechanics, verifies the varbind count from the capture, and pairs by `snmp.request_id`.
+
+- [ ] **Step 2: Register the arc**
+
+```rust
+// 1.3.6.1.4.1.8691.602.8.6.2.1.1 - mx_device_io, 8 entries, all RONLY.
+// Whole arc, not per column, per D3 / section 4.2.
+mx_agentx::register_arc(&[1,3,6,1,4,1,8691,602,8,6,2,1,1], PRIORITY)?;
+```
+
+- [ ] **Step 3: Serve the GET from the status layer, in-process**
+
+Look the OID up through `lib_moxa_rust_ies_auto_mibs` to get its URI, then read the status layer **directly** — not through `ies_uri_handle_client`, not through nginx, not through HTTP (D15; the fork+exec and text-file IPC is the cost Plan E exists to remove, and re-introducing it here would make the benchmark meaningless).
+
+- [ ] **Step 4: Verify no OID moved and values are right**
+
+```bash
+python3 tools/walkdiff.py <task5 capture> <task6 capture>
+```
+
+Expected: `missing=0`, `surplus=0`, and `value_differs` only where the underlying I/O genuinely changed between captures (DI state, relay state, PoE power). Check each difference against the hardware rather than waving it through — these are live inputs, so a difference is plausible but must be explainable.
+
+- [ ] **Step 5: Capture the "after" and record the pair**
+
+Same script, label `after`. Record both in `RESULT-phase3-task6.txt` following the shape of `RESULT-phase2-task4.txt`: both numbers, the pcap paths, and what was held constant.
+
+- [ ] **Step 6: Commit.**
+
+---
+
+### Task 7: `mx_portmirror` pilot — the §7 semantics migration
+
+**Files:**
+- Modify: `dl/app_moxa_framework/src/snmp_agentx.rs`
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase3-task7.txt`
+
+**Interfaces:**
+- Consumes: Task 6's working GET path
+- Produces: evidence that §7's value semantics survive the move — the thing Phase 3 exists to de-risk before Phase 6 moves all 567 event-config entries
+
+**The MIB, counted from source** (`net_mx_portmirror.h` + its setup file, with this build's macros): **17 entries, RO 2 / RW 15**, arc root `1.3.6.1.4.1.8691.603.5.5.1`, five URIs (`portMirror/portMirrorTable/` ×13 plus four scalars). Flags present: `REPLACE_TRUTH_VALUE` ×4, `URI_CONFIG_CHAIN` ×4, `URI_STATUS` ×4.
+
+The header is `#if`-gated: `MOXA_MIRROR_VLAN_MIRROR` adds column 13, `BCM_ROBO2_XSDK` adds column 14. This build sets `BR2_MOXA_MIRROR_VLAN_MIRROR=y` (`.config:4125` → `-DMOXA_MIRROR_VLAN_MIRROR`, `3rdparty_net_snmp.mk:124`) and defines `BCM_ROBO2_XSDK` nowhere, hence 13 table columns, not 14. Confirmed against a live walk of an enabled row — `snmpwalk/ORACLE-phase3-task7.txt` §6.
+
+**Why this one is the hard case, and why it is not mxPortdb:** in Phase 2 the three `REPLACE_TRUTH_VALUE` entries turned out to be inert, because the ISS GET path ignores that flag (§7.1). Here `iss_build == 0`, so the framework GET path **does** consume it — MIB `enable(1)`/`disable(2)` against JSON `true`/`false`. This is the first time that conversion has to be reimplemented outside `entry_handle_generate_uri_value_file()`, and getting it backwards produces plausible-looking wrong values rather than an error.
+
+- [x] **Step 1: Write down the expected mapping before touching code** — done 2026-08-05, ahead of Task 6. `snmpwalk/ORACLE-phase3-task7.txt`.
+
+For each of the 4 `REPLACE_TRUTH_VALUE` entries, record: OID, URI, current value read through the in-master path, and the JSON the status/config layer returns for it. That table is the oracle for Step 4. Capture it now, while in-master still serves these OIDs — afterwards the old path is no longer there to compare against.
+
+Two things the capture turned up that Step 2 has to honour. **Rows are published only when `entryEnable` is true** — the config layer always holds 7 rows, but with all of them false the whole table subtree is `No Such Object`, and enabling one makes all 13 of its columns appear at once. A framework implementation that publishes all 7 rows unconditionally is 78 surplus OIDs; one that publishes none passes a walkdiff against the default config and is wrong the moment anyone enables a session. And **the two empty-ish JSON shapes render differently** — an all-zero 64-hex-char string comes back as an empty octet string, an empty JSON array as the literal `"[]"`. Do not normalise them together.
+
+- [ ] **Step 2: Register the arc and implement the conversions**
+
+`REPLACE_TRUTH_VALUE`, `URI_CONFIG_CHAIN` and `URI_STATUS` are the three flags that appear on this MIB. `URI_STATUS` selects status layer over config layer; `URI_CONFIG_CHAIN` is the chained-config read. Derive each from the in-master implementation in `entry_handle_generate_uri_value_file()` (`ies_auto_mibs.c`), which is the behaviour being reproduced.
+
+- [ ] **Step 3: SET must still work — it never moved**
+
+The 16 RW entries still go to in-master. Round-trip one, using the Task 3 pattern from Phase 2 (read original, write, read back, restore, verify):
+
+```bash
+GET=/usr/bin/snmpget; SET=/usr/bin/snmpset; HOST=192.168.127.253
+OID=1.3.6.1.4.1.8691.603.5.5.1.1.0        # portMirror/enable
+ORIG=$($GET -v2c -c public -Ovq -t2 $HOST $OID)
+$SET -v2c -c private -t2 $HOST $OID i 2 && $GET -v2c -c public -Ovq -t2 $HOST $OID
+$SET -v2c -c private -t2 $HOST $OID i "$ORIG" && $GET -v2c -c public -Ovq -t2 $HOST $OID
+```
+
+Confirm the OID exists at that address before running — read it from `net_mx_portmirror.h` rather than trusting the line above, which was written from the arc root and not verified against the header.
+
+- [ ] **Step 4: Check the four converted values against Step 1's oracle**
+
+Every one must match exactly. A `1`/`2` inversion here is the failure this whole task exists to catch, and it is invisible to `missing`/`surplus` counting.
+
+- [ ] **Step 5: Full walkdiff and commit.**
+
+---
+
+### Task 8: Verdict, D19, ledger
+
+**Files:**
+- Modify: `~/WORK/SNMP_50ms/plan-e-agentx-get-offload-design-2026-08-03.md` (§11, add D19)
+- Create: `~/WORK/SNMP_50ms/.superpowers/sdd/plan-e-phase3-PLAN-2026-08-05/progress.md`
+
+- [ ] **Step 1: D19** — the Phase 3 verdict: whether the framework subagent holds a session, whether both pilots serve correctly, the `mx_device_io` latency pair, whether the namelen invariant held with two subagents live (which is what D17 deferred to this phase), and whether SET was untouched.
+- [ ] **Step 2: Ledger** in the Phase 0/1 style — what ran, what was adjudicated and why, commits.
+- [ ] **Step 3: State explicitly what Phase 4 now has** — the Phase 2 pair (`RESULT-phase2-task4.txt`) and the Phase 3 pair (`RESULT-phase3-task6.txt`) are its two inputs. If either is missing or was measured differently, say so rather than letting Phase 4 assume a matched set.
+- [ ] **Step 4: Commit.**
+
+---
+
+## Self-Review Notes
+
+- **Spec coverage.** §10.2's Phase 3 row asks for: embed libnetsnmpagent (Tasks 2, 5), fd into tokio (Task 5), `mx_device_io` for benchmark (Task 6), `mx_portmirror` for §7 semantics (Task 7), SET unchanged (Global Constraints + Task 7 Step 3). The three items Phase 0 deferred here — `--with-mib-modules`, `lib_moxa_ies_auto_mibs`, `lib_moxa_snmp_agentx` — are Tasks 1, 3, 2. D17's deferral of whole-arc registration lands in Task 5 Step 5 and Task 6 Step 2.
+- **Deliberately not covered.** dlmod GET migration is Phase 7, not here. The `portConfigTid` MIB-publication question from Phase 2 is a product decision and stays open. §9.1's mxLa / mxVlan / mxLldp ISS wrappers are Phase 5.
+- **Placeholders.** None. Task 1's file was pinned during planning to `moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:185`, with its present value quoted so the edit can be checked before and after. Tasks 2–4 give signatures, build rules, acceptance tests and the exact code to derive from, and say plainly that inventing uncompiled bodies would be worse than useless. That is a deliberate choice, not an omission.
+- **Type consistency.** `mx_agentx_*` names in Task 2's header are the ones Tasks 4 and 5 use. `iesmap_lookup` / `iesmap_entry_count` / `struct iesmap_result` in Task 3 are the ones Tasks 4, 6 and 7 use.
+- **One thing to watch during execution.** Task 7 Step 3's OID for `portMirror/enable` was written from the arc root and is flagged in the step itself as needing verification against `net_mx_portmirror.h` first. It is the only OID in this plan not read directly out of a header.

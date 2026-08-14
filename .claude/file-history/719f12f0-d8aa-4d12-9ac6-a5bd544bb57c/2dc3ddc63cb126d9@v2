@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Cross-check the ies-auto-mibs OID table against the MIB definitions.
+
+The framework's ies_map is built from 3rdparty_net_snmp/ies-auto-mibs/net_*.h,
+which carries the OID<->URI mapping but has no notion of MAX-ACCESS and only a
+coarse val_type. The MIBs under snmp_moxa_mib/ are the authority on the SNMP
+side: MAX-ACCESS says whether an OID may appear in a walk at all, and SYNTAX
+says how it must be encoded.
+
+Nothing checks the two against each other today, so drift is only found by
+walking a device and comparing against mainline -- which is slow and, worse,
+treats mainline as if it were the spec. This reports the drift directly.
+
+Usage:
+    check_ies_map_vs_mib.py [--all] [--group PREFIX] [--repo DL_DIR]
+
+    --all          also check entries with iss_build != 0 (served by ISS);
+                   by default only iss_build == 0 (framework-served) is checked
+    --group PREFIX only OIDs under this dotted prefix, e.g. 1.3.6.1.4.1.8691.603
+
+Exit status is 1 if any ERROR was reported, else 0 (usable as a CI gate).
+"""
+
+import argparse
+import glob
+import os
+import re
+import sys
+
+DEFAULT_REPO = os.path.expanduser("~/sdc1/home/moxa/mds4xgl3/buildroot/dl")
+
+# Roots imported from SNMPv2-SMI; the MIBs never define these themselves.
+ROOTS = {
+    "enterprises": (1, 3, 6, 1, 4, 1),
+    "private": (1, 3, 6, 1, 4),
+    "mib-2": (1, 3, 6, 1, 2, 1),
+    "internet": (1, 3, 6, 1),
+}
+
+# SNMP_DATA_TYPE_* from 3rdparty_net_snmp/snmp_tools/inc/ies_auto_mibs_handle.h
+DATA_TYPES = {
+    "SNMP_DATA_TYPE_INTEGER": 0x02,
+    "SNMP_DATA_TYPE_INTEGER32": 0x02,
+    "SNMP_DATA_TYPE_OCTET_PRIM": 0x04,
+    "SNMP_DATA_TYPE_NULL": 0x05,
+    "SNMP_DATA_TYPE_OBJECT_ID": 0x06,
+    "SNMP_DATA_TYPE_IP_ADDR_PRIM": 0x40,
+    "SNMP_DATA_TYPE_COUNTER": 0x41,
+    "SNMP_DATA_TYPE_COUNTER32": 0x41,
+    "SNMP_DATA_TYPE_GAUGE": 0x42,
+    "SNMP_DATA_TYPE_GAUGE32": 0x42,
+    "SNMP_DATA_TYPE_UNSIGNED32": 0x42,
+    "SNMP_DATA_TYPE_TIME_TICKS": 0x43,
+    "SNMP_DATA_TYPE_OPAQUE": 0x44,
+    "SNMP_DATA_TYPE_COUNTER64": 0x46,
+    "SNMP_DATA_TYPE_IMP_OCTET_PRIM": 0xF1,
+    "SNMP_DATA_TYPE_IMP_OBJECT_ID": 0xF2,
+    "SNMP_DATA_TYPE_ROW_STATUS": 0xF3,
+    "SNMP_DATA_TYPE_MAC_ADDRESS": 0xF4,
+}
+
+# MIB SYNTAX base type -> the val_type it should map to.
+SYNTAX_TYPES = {
+    "INTEGER": 0x02, "Integer32": 0x02, "TruthValue": 0x02,
+    "Unsigned32": 0x42, "Gauge32": 0x42,
+    "Counter32": 0x41, "Counter64": 0x46, "TimeTicks": 0x43,
+    "IpAddress": 0x40,
+    "OCTET STRING": 0x04, "DisplayString": 0x04, "SnmpAdminString": 0x04,
+    "MacAddress": 0xF4, "PhysAddress": 0xF4,
+    "RowStatus": 0xF3,
+    "OBJECT IDENTIFIER": 0x06,
+}
+
+# Types that are interchangeable in practice (integer-ish, string-ish). A
+# mismatch inside a group is not worth reporting; across groups it is.
+EQUIV = [
+    {0x02, 0x41, 0x42, 0x43, 0x46, 0xF3},
+    {0x04, 0xF1},
+]
+
+
+def equivalent(a, b):
+    if a == b:
+        return True
+    return any(a in g and b in g for g in EQUIV)
+
+
+# --------------------------------------------------------------------------
+# MIB parsing
+# --------------------------------------------------------------------------
+
+def parse_mibs(dirs):
+    """-> (symbols: name -> (parent, subid), info: name -> {syntax, access, file})"""
+    symbols, info = {}, {}
+    oid_def = re.compile(
+        r"^\s*([\w-]+)\s+OBJECT\s+IDENTIFIER\s*::=\s*\{\s*([\w-]+)\s+(\d+)\s*\}")
+    head = re.compile(r"^\s*([\w-]+)\s+(?:OBJECT-TYPE|MODULE-IDENTITY)\s*$")
+    assign = re.compile(r"::=\s*\{\s*([\w-]+)\s+(\d+)\s*\}")
+
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.mib"))):
+            cur = syntax = access = None
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    line = re.sub(r"--.*$", "", line)  # strip ASN.1 comment
+                    m = oid_def.match(line)
+                    if m:
+                        symbols[m.group(1)] = (m.group(2), int(m.group(3)))
+                        cur = None
+                        continue
+                    m = head.match(line)
+                    if m:
+                        cur, syntax, access = m.group(1), None, None
+                        continue
+                    if not cur:
+                        continue
+                    m = re.search(r"\bSYNTAX\s+(.+?)\s*$", line)
+                    if m and syntax is None:
+                        syntax = m.group(1).strip()
+                    m = re.search(r"\bMAX-ACCESS\s+([\w-]+)", line)
+                    if m:
+                        access = m.group(1)
+                    m = assign.search(line)
+                    if m:
+                        symbols[cur] = (m.group(1), int(m.group(2)))
+                        info[cur] = {"syntax": syntax, "access": access,
+                                     "file": os.path.basename(path)}
+                        cur = None
+    return symbols, info
+
+
+def resolve(name, symbols, cache, seen=None):
+    """Symbolic MIB name -> numeric OID tuple, or None if unresolvable."""
+    if name in ROOTS:
+        return ROOTS[name]
+    if name in cache:
+        return cache[name]
+    seen = seen or set()
+    if name in seen or name not in symbols:
+        return None
+    seen.add(name)
+    parent, sub = symbols[name]
+    base = resolve(parent, symbols, cache, seen)
+    if base is None:
+        return None
+    cache[name] = base + (sub,)
+    return cache[name]
+
+
+def mib_by_oid(symbols, info):
+    """-> oid tuple -> (name, entry-info)"""
+    cache, out = {}, {}
+    for name in info:
+        oid = resolve(name, symbols, cache)
+        if oid:
+            out[oid] = (name, info[name])
+    return out
+
+
+# --------------------------------------------------------------------------
+# net_mx_*.h parsing
+# --------------------------------------------------------------------------
+
+def parse_headers(d):
+    """-> list of {file, name, oid, val_type, mode, iss_build}"""
+    field = re.compile(r"\.(\w+)\s*=\s*(.+?),?\s*$")
+    entries = []
+    for path in sorted(glob.glob(os.path.join(d, "net_*.h"))):
+        cur = {}
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                line = re.sub(r"/\*.*?\*/", "", line)
+                m = field.search(line)
+                if m:
+                    cur[m.group(1)] = m.group(2).strip().rstrip(",").strip()
+                if re.match(r"\s*\},\s*$", line) and "oid_list" in cur:
+                    oid = tuple(int(x) for x in
+                                re.findall(r"\d+", cur.get("oid_list", "")))
+                    if oid:
+                        entries.append({
+                            "file": os.path.basename(path),
+                            "name": cur.get("name", "?").strip('"'),
+                            "oid": oid,
+                            "val_type": DATA_TYPES.get(cur.get("val_type", "")),
+                            "val_type_raw": cur.get("val_type", ""),
+                            "iss_build": cur.get("iss_build", "0"),
+                        })
+                    cur = {}
+    return entries
+
+
+# --------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--repo", default=DEFAULT_REPO)
+    ap.add_argument("--all", action="store_true",
+                    help="include iss_build != 0 entries (ISS-served)")
+    ap.add_argument("--group", help="only OIDs under this dotted prefix")
+    args = ap.parse_args()
+
+    mib_dirs = [os.path.join(args.repo, "snmp_moxa_mib", s)
+                for s in ("private", "standard", "product")]
+    hdr_dir = os.path.join(args.repo, "3rdparty_net_snmp", "ies-auto-mibs")
+    for p in mib_dirs[:1] + [hdr_dir]:
+        if not os.path.isdir(p):
+            sys.exit("not found: %s (wrong --repo?)" % p)
+
+    symbols, info = parse_mibs(mib_dirs)
+    by_oid = mib_by_oid(symbols, info)
+    entries = parse_headers(hdr_dir)
+
+    prefix = tuple(int(x) for x in args.group.split(".")) if args.group else None
+    errors, warns, missing, checked = [], [], [], 0
+
+    for e in entries:
+        if not args.all and e["iss_build"] != "0":
+            continue
+        if prefix and e["oid"][:len(prefix)] != prefix:
+            continue
+        checked += 1
+        dotted = ".".join(str(x) for x in e["oid"])
+        hit = by_oid.get(e["oid"])
+        if not hit:
+            missing.append("  %-42s %-28s %s" % (dotted, e["name"], e["file"]))
+            continue
+        mib_name, mi = hit
+        if mi["access"] == "not-accessible":
+            errors.append("  %-42s %-28s MIB %s is not-accessible (%s)"
+                          % (dotted, e["name"], mib_name, mi["file"]))
+        base = (mi["syntax"] or "").split("{")[0].split("(")[0].strip()
+        want = SYNTAX_TYPES.get(base)
+        if want is not None and e["val_type"] is not None \
+                and not equivalent(want, e["val_type"]):
+            warns.append("  %-42s %-28s .h=%s  MIB=%s (%s)"
+                         % (dotted, e["name"], e["val_type_raw"], base, mib_name))
+
+    print("MIBs parsed : %d objects from %s" % (len(by_oid), ", ".join(
+        os.path.basename(d) for d in mib_dirs)))
+    print("Entries     : %d checked (%s)\n"
+          % (checked, "all" if args.all else "iss_build==0 only"))
+
+    if errors:
+        print("ERROR - registered although the MIB says not-accessible:")
+        print("\n".join(errors), "\n")
+    if warns:
+        print("WARN - val_type does not match the MIB SYNTAX:")
+        print("\n".join(warns), "\n")
+    if missing:
+        print("INFO - OID not found in any MIB (MIB missing, or OID typo):")
+        print("\n".join(missing), "\n")
+    if not (errors or warns or missing):
+        print("clean - no drift found")
+
+    print("summary: %d error, %d warn, %d unresolved"
+          % (len(errors), len(warns), len(missing)))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

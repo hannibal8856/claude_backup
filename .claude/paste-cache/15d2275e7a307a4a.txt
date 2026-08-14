@@ -1,0 +1,169 @@
+   Bug fix for rapid SNMP GET via AgentX
+
+------------------------- code/future/snmpv3/snxdef.h -------------------------
+index 14679e0c8..999d09975 100755
+@@ -31,6 +31,11 @@
+ /* AgentX Header Informations*/
+ #define SNX_AGENTX_VERSION                   1
+ #define SNX_AGENTX_PDU_HDR_LEN               20
++/* Offsets within the 20-byte AgentX header, and poll timeout for the
++ * length-framed TCP read/write (Plan C: fix stream-framing desync). */
++#define SNX_AGENTX_HDR_FLAGS_OFFSET          2
++#define SNX_AGENTX_HDR_PAYLOADLEN_OFFSET     16
++#define SNX_TRANS_POLL_TIMEOUT_MS            1000
+ #define SNX_NON_DEFAULT_CTXT                 0x08 
+ #define SNX_NETWORK_BYTE_ORDER               0x10 
+ 
+
+------------------------ code/future/snmpv3/snxtrans.c ------------------------
+index 65c2843c9..0b5a86d32 100755
+@@ -5,6 +5,7 @@
+  ****************************************************************************/
+ #include "snxinc.h"
+ #include "fssocket.h"
++#include <poll.h>
+ 
+ /****************************************************************************
+  *                                                                          
+@@ -414,18 +415,91 @@ SnxTransRcvPacket (UINT1 *pu1Packet, UINT4 *pu4PktLen)
+  *                                                                          
+  *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+  ****************************************************************************/
++/****************************************************************************
++ *    FUNCTION NAME    : SnxTransTcpRecvN
++ *    DESCRIPTION      : Receive EXACTLY u4Want bytes from the (non-blocking)
++ *                       master socket into pu1Buf. AgentX runs over a TCP byte
++ *                       stream with no message boundaries, so a single recv()
++ *                       may return several PDUs plus a partial tail, or a PDU
++ *                       split across segments. Reading the exact length keeps
++ *                       the stream aligned. EAGAIN (rest of a PDU still in
++ *                       flight) is waited on via poll() rather than treated as
++ *                       end-of-message.
++ *    RETURNS          : SNMP_SUCCESS / SNMP_FAILURE (peer closed / timeout)
++ ****************************************************************************/
++static INT4
++SnxTransTcpRecvN (UINT1 *pu1Buf, UINT4 u4Want)
++{
++    UINT4               u4Got = 0;
++    INT4                i4Ret;
++    struct pollfd       PollFd;
++
++    while (u4Got < u4Want)
++    {
++        i4Ret = recv (gAgtxGlobalInfo.i4SockId, pu1Buf + u4Got,
++                      (INT4) (u4Want - u4Got), 0);
++        if (i4Ret > 0)
++        {
++            u4Got += (UINT4) i4Ret;
++            continue;
++        }
++        if (i4Ret == 0)
++        {
++            /* Orderly shutdown by the master */
++            return SNMP_FAILURE;
++        }
++        if (errno == EINTR)
++        {
++            continue;
++        }
++        if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
++        {
++            PollFd.fd = gAgtxGlobalInfo.i4SockId;
++            PollFd.events = POLLIN;
++            PollFd.revents = 0;
++            if (poll (&PollFd, 1, SNX_TRANS_POLL_TIMEOUT_MS) <= 0)
++            {
++                return SNMP_FAILURE;
++            }
++            continue;
++        }
++        return SNMP_FAILURE;
++    }
++    return SNMP_SUCCESS;
++}
++
+ INT4
+ SnxTransTcpRcvPacket (UINT1 *pu1Packet, UINT4 *pu4PktLen)
+ {
+-    INT4                i4Msglen = SNX_MAX_MTU;
++    UINT4               u4Offset     = SNX_AGENTX_HDR_PAYLOADLEN_OFFSET;
++    UINT4               u4PayloadLen = 0;
+ 
+-    i4Msglen = recv (gAgtxGlobalInfo.i4SockId, pu1Packet, i4Msglen, 0);
++    /* Read the fixed 20-byte AgentX header first */
++    if (SnxTransTcpRecvN (pu1Packet, SNX_AGENTX_PDU_HDR_LEN) == SNMP_FAILURE)
++    {
++        return SNMP_FAILURE;
++    }
++
++    /* Payload length is at offset 16; byte order is given by the flags byte */
++    SnxCodeGet4ByteData (pu1Packet, &u4Offset,
++                         pu1Packet[SNX_AGENTX_HDR_FLAGS_OFFSET], &u4PayloadLen);
+ 
+-    if (i4Msglen <= 0)
++    /* Keep the same single-buffer limit the decode path already assumes */
++    if (u4PayloadLen > (UINT4) (SNX_MAX_MTU - SNX_AGENTX_PDU_HDR_LEN))
+     {
+         return SNMP_FAILURE;
+     }
+-    *pu4PktLen = (UINT4) i4Msglen;
++
++    if (u4PayloadLen > 0)
++    {
++        if (SnxTransTcpRecvN (pu1Packet + SNX_AGENTX_PDU_HDR_LEN,
++                              u4PayloadLen) == SNMP_FAILURE)
++        {
++            return SNMP_FAILURE;
++        }
++    }
++
++    *pu4PktLen = SNX_AGENTX_PDU_HDR_LEN + u4PayloadLen;
+     return SNMP_SUCCESS;
+ }
+ 
+@@ -476,13 +550,39 @@ SnxTransTxPkt (UINT1 *pu1Packet, UINT4 u4Len)
+ INT4
+ SnxTransTcpTxPacket (UINT1 *pu1Packet, UINT4 u4Len)
+ {
+-    INT4                i4RetVal = SNMP_FAILURE;
+-
+-    i4RetVal =
+-        send (gAgtxGlobalInfo.i4SockId, pu1Packet, (INT4) u4Len, MSG_NOSIGNAL);
+-
+-    if (i4RetVal < 0)
++    UINT4               u4Sent = 0;
++    INT4                i4Ret;
++    struct pollfd       PollFd;
++
++    /* Send the whole PDU. send() on a non-blocking socket can do a partial
++     * write under master backpressure; treating that as success truncated the
++     * outbound stream and desynced the peer (Plan C: stream-framing fix). */
++    while (u4Sent < u4Len)
+     {
++        i4Ret = send (gAgtxGlobalInfo.i4SockId, pu1Packet + u4Sent,
++                      (INT4) (u4Len - u4Sent), MSG_NOSIGNAL);
++        if (i4Ret > 0)
++        {
++            u4Sent += (UINT4) i4Ret;
++            continue;
++        }
++        if ((i4Ret < 0) && (errno == EINTR))
++        {
++            continue;
++        }
++        if ((i4Ret < 0) && ((errno == EAGAIN) || (errno == EWOULDBLOCK)))
++        {
++            PollFd.fd = gAgtxGlobalInfo.i4SockId;
++            PollFd.events = POLLOUT;
++            PollFd.revents = 0;
++            if (poll (&PollFd, 1, SNX_TRANS_POLL_TIMEOUT_MS) <= 0)
++            {
++                SelAddWrFd (gAgtxGlobalInfo.i4SockId, SnxTransTcpOutSocket);
++                return SNMP_FAILURE;
++            }
++            continue;
++        }
++        /* Hard error */
+         SelAddWrFd (gAgtxGlobalInfo.i4SockId, SnxTransTcpOutSocket);
+         return SNMP_FAILURE;
+     }

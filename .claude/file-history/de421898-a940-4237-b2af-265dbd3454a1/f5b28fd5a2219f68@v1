@@ -1,0 +1,352 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+
+#ifndef _IES_AUTO_MIBS_H_
+#define _IES_AUTO_MIBS_H_
+
+#include "ies_common.h"
+#include "ies_flag_bits.h"
+#include "ies_uri.h"
+
+#define IES_MAX_SYS_BUF      (64)
+
+enum {
+    IES_FLAG_SNMP_INIT = 0,
+
+    IES_FLAG_SNMP_URI_MOD_ON_SET,         // uri modified on set
+    IES_FLAG_SNMP_URI_COMMAND,            // use URI-Command Layer
+    IES_FLAG_SNMP_URI_STATUS,             // use URI Status Layer
+    IES_FLAG_SNMP_URI_REDUNDANT_PORT,     // special handle : redundant port interface
+    IES_FLAG_SNMP_URI_IDX_FROM_OID,       // URI Index is get from OID Index
+    IES_FLAG_SNMP_URI_FILTER_DEL,         // special handle : will del uri config by filter command.
+    IES_FLAG_SNMP_URI_MOD_BY_IDX,         // special handle : URI modified by index
+    IES_FLAG_SNMP_URI_INTERFACE,          /* special handle  : the port interface in URI is 0-base, 
+                                                              in SNMP is 1-base. */
+    IES_FLAG_SNMP_URI_PBMP,               // special handle : URI PortBitMAP
+    IES_FLAG_SNMP_URI_CONFIG_CHAIN,       /* special handle : in some case, config-change will 
+                                             cause chain-reaction of config-change. */
+
+    IES_FLAG_SNMP_GENERAL_TABLE,          // use generat table handler for URI Table
+    IES_FLAG_SNMP_READ_CREATE,            // use read-create flow
+    IES_FLAG_SNMP_READ_CREATE_v2,         // use read-create v2 flow
+    IES_FLAG_SNMP_READ_CREATE_vRMON,      // use read-create vRMON flow
+    IES_FLAG_SNMP_READ_CREATE_OID_URI,    // use read-create flow, but URI Index is get from OID Index
+
+    IES_FLAG_SNMP_REPLACE_TRUTH_VALUE,    /* replace MIB enable/disable into URI True/False
+                                             the MIB syntax use truth_value for enable/disable */
+
+    IES_FLAG_SNMP_REPLACE_BIT_VALUE,      // BITs handle
+
+    IES_FLAG_SNMP_REPLACE_BIT_2OCT,       // special handle : BITs handle for 2OCTs
+
+    IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY,   /* special handle : SNMP_Table remap 2 URI_Entry 
+                                                              instead of URI_Table */
+
+    IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY_ARRAY,
+                                          /* special handle : SNMP Table remap 2 URI Entry ARRAY.
+                                                              use entry array for store SNMP single value table 
+                                                              oid index equal 2 (array index - 1) */
+
+    IES_FLAG_SNMP_REPLACE_TABLE_2PORTS_PBMP,
+                                          /* special handle : SNMP Table remap 2 portsPbmp.   */
+
+    IES_FLAG_SNMP_SYSTEM_COMMAND,         /* system command : always return certain value on read.
+                                                              write certaion value will force system
+                                                              to trigger some action.        */
+
+
+    IES_FLAG_SNMP_OID_VALID_BY_IDX,       // special handle : OID VALID by index
+
+    IES_FLAG_SNMP_LA_REPLACE_BIT,         // special handle : for LA MIB BITs Setting
+
+    IES_FLAG_SNMP_TR2_REPLACE_URI,        // special handle : for TurboRing2 URI Structure
+
+    IES_FLAG_SNMP_MANAGEMENT_VLAN,        // special handle : for mxVLAN management-VLAN handler
+
+    IES_FLAG_SNMP_ISS_REMAP_TBL,          /* special handle : indicate mxMIB was build from 
+                                                              different ISS private mib. 
+                                                              This shall be removed latter on. */
+
+    IES_FLAG_SNMP_ISS_REMAP_MERGE_TABLE, /* special handle  : for some reason, this mib table is merged 
+                                                              from 2 different mib table.
+                                                              This shall be removed latter on. */
+
+    IES_FLAG_SNMP_MAKEUP_INDEX,          /* special handle  : for some reason, iss won't generate table index for mib_db,
+                                                              so we have to makeup index for it */
+    IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS,  /* special handle  : for some reason, iss won't generate table index for mib_db,
+                                                              so we have to makeup index for it */
+    IES_FLAG_SNMP_GENERATE_SYS_OID,      /* special handle  : generate system object ID */
+    IES_FLAG_SNMP_CHANGE_VALUE_SCALE,    /* special handle  : for some reason, value scale different from snmp and uri_config */
+    IES_FLAG_SNMP_URI_FIXED_VALUE,       /* special handle  : fixed value in snmpd */
+    IES_FLAG_SNMP_MULTIPLE_INDEX_TABLE,  /* special handle  : oid index is 1 but this is multiple index table */
+    IES_FLAG_SNMP_INDEX_NOT_START_FROM_1,/* special handle  : oid index Not start 1. from 0 or from portChannel-index */
+    IES_FLAG_SNMP_INDEX_NOT_IN_ORDER,    /* special handle :  In some table ( like laConfigMainTable ) , the table-index
+                                                              may not be in-order. So the table-index should be
+                                                              genegrated from ISS like iftable, not auto-generate by
+                                                              SNMP-Framework.
+                                          */
+    IES_FLAG_SNMP_SYNTHETIC_INDEX,       /* special handle  : index column synthesised by
+                                                              GenerateTableIndexEntry(). It exists
+                                                              only inside ies-auto-mibs - the table's
+                                                              header declares no column 1 - so no
+                                                              subagent can serve it and its GET must
+                                                              stay on the local path. */
+    IES_FLAG_SNMP_MAX,
+};
+
+
+#define AUTO_MIB_CMD_URI_CTRL_CLIENT  "/sbin/ies_uri_handle_client "
+
+#define AUTO_MIB_PATH                 "/moxa/run/auto_mibs"
+#define SNMPD_CONFIG_FILE             "/moxa/run/snmp/snmpd.conf"
+
+#define AUTO_MIB_MAX_DEV_PORT         (64)
+#define AUTO_MIB_MAX_DAYS_OF_WEEK     (8)  // for alignment !!
+#define AUTO_MIB_MAX_SET_DELAY        (1)
+#define AUTO_MIB_MAX_ENTRY_ARRAY      (128)
+
+
+// From ISS/inc/fssnmp.h [Begin]
+#define SNMP_DATA_TYPE_INTEGER        0x02
+#define SNMP_DATA_TYPE_INTEGER32      0x02
+#define SNMP_DATA_TYPE_OCTET_PRIM     0x04
+#define SNMP_DATA_TYPE_NULL           0x05
+#define SNMP_DATA_TYPE_OBJECT_ID      0x06
+#define SNMP_DATA_TYPE_SEQUENCE       0x30
+#define SNMP_DATA_TYPE_IP_ADDR_PRIM   0x40
+#define SNMP_DATA_TYPE_COUNTER        0x41
+#define SNMP_DATA_TYPE_COUNTER32      0x41
+#define SNMP_DATA_TYPE_GAUGE          0x42
+#define SNMP_DATA_TYPE_GAUGE32        0x42
+#define SNMP_DATA_TYPE_TIME_TICKS     0x43
+#define SNMP_DATA_TYPE_OPAQUE         0x44
+#define SNMP_DATA_TYPE_UNSIGNED32     0x42
+#define SNMP_DATA_TYPE_COUNTER64      0x46
+#define SNMP_DATA_TYPE_IMP_OCTET_PRIM 0xf1
+#define SNMP_DATA_TYPE_IMP_OBJECT_ID  0xf2
+#define SNMP_DATA_TYPE_ROW_STATUS     0xf3
+#define SNMP_DATA_TYPE_MAC_ADDRESS    0xf4
+// From ISS/inc/fssnmp.h [End]
+
+#define IES_SNMP_FLAG_NUM  (IES_FLAG_SNMP_MAX/8 + 1)
+
+typedef unsigned int c_flag_t;
+
+typedef enum 
+{
+    IES_SNMP_READ_CREATE_CMD_ACTIVE          = 1,
+    IES_SNMP_READ_CREATE_CMD_NOT_IN_SERVICE  = 2,
+    IES_SNMP_READ_CREATE_CMD_NOT_READY       = 3,
+    IES_SNMP_READ_CREATE_CMD_CREATE_AND_GO   = 4,
+    IES_SNMP_READ_CREATE_CMD_CREATE_AND_WAIT = 5,
+    IES_SNMP_READ_CREATE_CMD_DESTROY         = 6,
+} ies_snmp_read_create_cmd;
+
+typedef enum 
+{
+    IES_SNMP_READ_CREATE_CMD_RMON_VALID         = 1,
+    IES_SNMP_READ_CREATE_CMD_RMON_CREAT_REQUEST = 2,
+    IES_SNMP_READ_CREATE_CMD_RMON_UNDER_CREATE  = 3,
+    IES_SNMP_READ_CREATE_CMD_RMON_INVALID       = 4,
+} ies_snmp_read_create_cmd_rmon;
+
+typedef enum 
+{
+    IES_SNMP_BITS_ENABLE  = 1,
+    IES_SNMP_BITS_DISABLE = 2,
+} ies_snmp_bits_enable_t;
+
+typedef enum
+{
+    IES_URI_BOOLEN_VAL_TRUE  = 1,
+    IES_URI_BOOLEN_VAL_FALSE = 2,
+} ies_uri_boolenValue_t;
+
+typedef enum {
+    IES_SNMP_JSON_STRING                        = 1,
+    IES_SNMP_JSON_NUMBER                        = 2,
+    IES_SNMP_JSON_BOOLEAN                       = 3,
+    IES_SNMP_JSON_URI_PBMP                      = 4, // URI Port BitMAP 
+    IES_SNMP_JSON_URI_DAY_OF_WEEK               = 5, // URI days of week
+    IES_SNMP_JSON_URI_INTERFACE                 = 6, // port with port-channel
+    IES_SNMP_JSON_URI_PBMP_WITH_PORT_CHANNEL    = 7, // URI Port BitMAP with Port and PortChannel
+} ies_snmp_json_t;
+
+typedef enum {
+    IES_SNMP_URI_ARRAY      = 0,
+    IES_SNMP_URI_DICTIONARY = 1,
+} ies_snmp_uri_table_t;
+
+typedef enum {
+    IES_SNMP_URI_WITH_NULL = 0,
+    IES_SNMP_URI_WOUT_NULL = 1,
+} ies_snmp_uri_null_table_t;
+
+typedef enum {
+    IES_SNMP_URI_PORT_PHYSICAL    = 1,
+    IES_SNMP_URI_PORT_PORTCHANNEL = 2,
+} ies_snmp_uri_port_interface;
+
+typedef enum {
+    IES_URI_SNMP_OCT_STRING_NONE     = 0,
+    IES_URI_SNMP_OCT_STRING_ASCII    = 1,
+    IES_URI_SNMP_OCT_STRING_HEX      = 2,
+} ies_snmp_uri_oct_string_t;
+
+typedef enum
+{
+    IES_SNMP_TABLE_MODIFIED = 1,
+    IES_SNMP_TABLE_CREATE   = 2,
+} ies_snmp_table_handle_t;
+
+typedef enum {
+    BUILD_FROM_URI  = 0,
+    BUILD_FROM_ISS  = 1,
+} build_t;
+
+typedef enum {
+    DONE_FOR_NO_ERROR     = 0,
+    DONE_FOR_NO_SUCH_NAME = 1,
+    DONE_FOR_BAD_VALUE    = 2,
+} ies_handle_done_t;
+ 
+typedef enum {
+    ISS_REMAP_TABLE_HANDLE_INIT = 0,
+    ISS_REMAP_TABLE_HANDLE_GET_FILE_NAME,
+    ISS_REMAP_TABLE_HANDLE_GENERATE_FILE,
+    ISS_REMAP_TABLE_HANDLE_MAX,
+} iss_remap_table_t;
+ 
+typedef enum 
+{
+    IES_AUTO_MIBS_TBL_GET_NEXT = 0,
+    IES_AUTO_MIBS_TBL_GET
+} ies_table_handle_t;
+
+typedef enum
+{
+    VLAN_TABLE_SEARCH_ALL       = 1,
+    VLAN_TABLE_SEARCH_SPECIFIC  = 2,
+} vlanTableHandle_t;
+
+typedef enum 
+{
+    READ_CREATE_URI_STRING_SET_ONLY = 1,
+    READ_CREATE_URI_STRING_NORMAL   = 2
+} readCreate_uriString_t;
+
+struct bits_entry
+{
+    ies_snmp_bits_enable_t enable;
+};
+
+struct uriPort_entry
+{
+    ies_snmp_bits_enable_t enable;
+};
+
+struct uriPortNum_entry
+{
+    ies_snmp_bits_enable_t enable;
+};
+
+struct uriDaysOfWeek_entry
+{
+    ies_snmp_bits_enable_t enable;
+};
+
+struct uriEntry_array
+{
+    int                     number;
+    ies_snmp_bits_enable_t  enable;
+};
+
+struct uriIface_entry
+{
+    ies_snmp_uri_port_interface  iftype;
+    int                          index;
+};
+
+struct snmp_table_snapshot
+{
+    char                 fname[IES_MAX_FILE];
+    struct timespec      timeTemp;
+    struct timespec      time_lastUpdate;
+};
+
+
+struct moxaSnmpTableEntry_listHead;
+
+struct ies_auto_mibs_entry
+{
+    int                         magic;
+#define IES_AUTO_MIBS_MAGIC_ENTRY 0x83221568
+    char                        name         [IES_MAX_URI];
+
+    char                        uri          [IES_MAX_URI];
+    char                        uri_index    [IES_MAX_URI_INDEX];
+    char                        mod_uri      [IES_MAX_URI];
+    char                        mod_uri_index[IES_MAX_URI_INDEX];
+    
+    oid                         oid_list     [IES_MAX_OID];
+    int                         oid_len;
+    int                         oid_index;
+
+    int                         val_type;
+    int                         mode;
+    build_t                     iss_build;
+    ies_snmp_uri_oct_string_t   oct_type;
+
+    struct moxaSnmpTableEntry_listHead       *listHead;
+
+    struct {                                                                               \
+        struct ies_auto_mibs_entry  *le_next;    /* next element */                        \
+        struct ies_auto_mibs_entry **le_prev;    /* address of previous next element */    \
+    } listNode;
+
+    ies_flag_t                  flags[IES_SNMP_FLAG_NUM];
+
+
+}__attribute__((packed));
+
+
+struct moxaSnmpTableEntry_listHead
+{
+    char                        uri          [IES_MAX_URI];
+    char                        uri_index    [IES_MAX_URI_INDEX];
+    struct ies_auto_mibs_entry *lh_first;    /* first element */
+};
+
+
+    /** ioAccess
+    ========================
+        HANDLER_CAN_RWRITE, 
+        HANDLER_CAN_RONLY, 
+        HANDLER_CAN_SET_ONLY, 
+        HANDLER_CAN_DEFAULT
+     **/
+
+#define IES_SNMP_COMPARE_URI(__entry_uri_string, __uri) \
+    ( ( 0 == strncmp(__entry_uri_string, __uri, strlen(__uri)) ) ? IES_NOERR : IES_ERR )
+
+#define IES_SNMP_COMPARE_NAME(__entry_name_string, __name) \
+    ( ( 0 == strncmp(__entry_name_string, __name, strlen(__name)) ) ? IES_NOERR : IES_ERR )
+
+#define MOX_SNMP_INIT_ENTRY(ARRAY_NAME) \
+   if ( IES_NOERR != mox_snmp_init_entry(ARRAY_NAME, sizeof(ARRAY_NAME)/sizeof(ARRAY_NAME[0]))) { \
+    return IES_ERR; \
+   } 
+
+#define IES_URI_CONFIG_PATH(_URI_TARGET_PATH_)     "/api/v1/setting/data" _URI_TARGET_PATH_
+#define IES_URI_STATUS_PATH(_URI_TARGET_PATH_)     "/api/v1/status"       _URI_TARGET_PATH_
+#define IES_URI_COMMAND_PATH(_URI_TARGET_PATH_)    "/api/v1/command"      _URI_TARGET_PATH_
+#define IES_URI_ACTION_PATH(_URI_TARGET_PATH_)     "/api/v1/setting/action/"_URI_TARGET_PATH_
+   
+extern void init_ies_auto_mibs(void);
+extern void exit_ies_auto_mibs(void);
+
+#endif //_IES_AUTO_MIBS_H_

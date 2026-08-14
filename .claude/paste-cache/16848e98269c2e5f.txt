@@ -1,0 +1,17 @@
+$ cat -n /etc/moxa/version/BUILD_TIME 
+     1  2026_0805_1636
+$ !ss
+ss -antp | grep ":705"
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ps ax | grep -E "app_moxa_framework|snmpd|ISS.exe" | grep -v grep
+ 300 ?        SLl    0:30 /sbin/ISS.exe
+1228 ?        Ssl    0:02 /usr/bin/app_moxa_framework
+1329 ?        Ss     0:00 /bin/sh /etc/moxa/config-moxa-snmp/init_snmpd.sh
+1330 ?        Sl     0:01 /bin/snmpd -f -C -c /moxa/run/snmp/snmpd.conf,/etc/moxa/netsnmp/config/config_encryption.conf,/etc/moxa/netsnmp/config/dai.conf,/etc/moxa/netsnmp/config/dhcpred
+$ ss -tnp | grep 705
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))         
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))          
+$ grep -i "moxa: AgentX" /moxa/permanent/moxalog/*
+$ 

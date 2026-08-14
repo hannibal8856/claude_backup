@@ -1,0 +1,52 @@
+/*
+ * Feasibility probe for Task 3: can ies_auto_mibs_setup.c be included with
+ * MOX_SNMP_INIT_ENTRY redefined, so the array set and the flag setup both come
+ * from snmpd's own source instead of being re-listed here?
+ */
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+#include <stdio.h>
+#include <string.h>
+
+#include "ies_auto_mibs_handle.h"
+
+/* Replace the registration macro with a collector. This is the whole trick:
+ * the array list and its #if guards stay in snmpd's file. */
+#undef MOX_SNMP_INIT_ENTRY
+#define MOX_SNMP_INIT_ENTRY(ARRAY_NAME) \
+    probe_collect(#ARRAY_NAME, ARRAY_NAME, \
+                  sizeof(ARRAY_NAME) / sizeof(ARRAY_NAME[0]));
+
+static int probe_arrays;
+static int probe_entries;
+
+static void
+probe_collect(const char *name, struct ies_auto_mibs_entry *a, int n)
+{
+    (void) name;
+    (void) a;
+    probe_arrays++;
+    probe_entries += n;
+}
+
+#include "ies_auto_mibs_setup.c"
+
+int
+main(void)
+{
+    struct ies_auto_mibs_entry e;
+
+    ies_auto_mibs_load_mibs();
+    printf("arrays=%d entries=%d\n", probe_arrays, probe_entries);
+
+    /* Does the flag setup path link and run outside snmpd? */
+    memset(&e, 0, sizeof(e));
+    snprintf(e.uri, sizeof(e.uri), "%s", "portMirror/enable");
+    ies_auto_mibs_setup_entry_flags(&e);
+    printf("portMirror/enable flags[0]=0x%x\n", (unsigned) e.flags[0]);
+
+    return 0;
+}

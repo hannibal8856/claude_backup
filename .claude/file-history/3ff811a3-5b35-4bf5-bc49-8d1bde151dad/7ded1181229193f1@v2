@@ -1,0 +1,33 @@
+---
+name: dut-swu-firmware-update-procedure
+description: Plan E 燒新韌體的完整步驟：切到對面 partition → /moxa/fwr_update.sh 對 md5 → swupdate -i → sync → reboot
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 3ff811a3-5b35-4bf5-bc49-8d1bde151dad
+  modified: 2026-08-05T16:11:04.365Z
+---
+
+**使用者告知 2026-08-06 的 DUT 狀態與燒錄流程。**
+
+現況：
+- 目前開機的 partition 是 **SNMP Plan E，build `2026_0805_2322`**，登入落在 Linux
+  `/bin/sh`（所以 [[dut-console-is-linux-shell-not-moxa-cli]] 的 skill 可用）。
+- 對面的 dual image 是 **`2026_0805_2335`**。
+
+之後要驗證新的 Plan E build 時，**不要就地覆蓋現在跑的 partition**，而是：
+
+1. 切到對面 dual image `2026_0805_2335`（`/moxa/firmware_change.sh Y Y` + reboot，
+   見 [[dut-partition-switch-is-scriptable]]）
+2. `su` 取得 root（見 [[dut-root-login-via-su-not-ssh]]）
+3. `/moxa/fwr_update.sh <OOXX.swu>` —— **確認 md5sum 相符**，不符就停手，別往下走
+4. `swupdate -i /tmp/OOXX.swu`
+5. `sync` → `reboot`
+
+**Why:** 65M 韌體燒錄是唯一能驗整包 image 的路（[[dut-hotswap-binary-without-firmware-update]]
+的 bind-mount 熱抽換只換得掉單一 binary/.so，重開機就沒了）。燒在對面 partition 表示
+現役的 Plan E 環境永遠留著當退路，燒壞了切回去就好。md5 檢查是為了擋 scp 到 `/tmp`
+（tmpfs，容量有限）時被截斷的檔案 —— 半截 swu 灌進去會把那個 partition 弄成不可開機。
+
+**How to apply:** 使用者說「燒新韌體上去測」時就照上面五步走；確認 build 版本用
+`cat /etc/moxa/version/BUILD_TIME`，燒完重開機後先確認 BUILD_TIME 變成新的再開始量測。

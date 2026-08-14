@@ -1,0 +1,319 @@
+//! Rust surface over `lib_moxa_snmp_agentx`: AgentX session lifecycle,
+//! arc registration, and the GET callback.
+//!
+//! Threading: net-snmp is not thread-safe and this crate does not make it so.
+//! Every function here must be called from one and the same thread, which for
+//! `app_moxa_framework` means one tokio task (design D5 / section 5.3). None of
+//! these types is `Send` or `Sync`, which is what stops that being accidental.
+
+use std::ffi::CString;
+use std::os::raw::{c_int, c_long, c_uchar, c_ulong, c_void};
+
+/// Matches the C `mx_agentx_get_cb`.
+type RawGetCb = extern "C" fn(
+    req: c_ulong,
+    oid: *const c_ulong,
+    oid_len: usize,
+    ctx: *mut c_void,
+) -> c_int;
+
+#[link(name = "moxa_snmp_agentx")]
+extern "C" {
+    fn mx_agentx_init(
+        name: *const std::os::raw::c_char,
+        socket: *const std::os::raw::c_char,
+    ) -> c_int;
+    fn mx_agentx_shutdown();
+    fn mx_agentx_register_arc(oid: *const c_ulong, oid_len: usize, priority: c_int) -> c_int;
+    fn mx_agentx_select_info(
+        maxfd: *mut c_int,
+        fds: *mut c_int,
+        fds_cap: usize,
+        timeout_us: *mut c_long,
+        block: *mut c_int,
+    ) -> c_int;
+    fn mx_agentx_handle_read(fd: c_int);
+    fn mx_agentx_handle_timeout();
+    fn mx_agentx_reply_integer(req: c_ulong, value: c_long) -> c_int;
+    fn mx_agentx_reply_octets(req: c_ulong, buf: *const c_uchar, len: usize) -> c_int;
+    fn mx_agentx_reply_oid(req: c_ulong, oid: *const c_ulong, oid_len: usize) -> c_int;
+    fn mx_agentx_reply_nosuch(req: c_ulong) -> c_int;
+    fn mx_agentx_set_get_handler(cb: Option<RawGetCb>, ctx: *mut c_void);
+}
+
+/// How many fds `select_info` will report. net-snmp watches the AgentX socket
+/// and little else; the C side returns -1 rather than truncating if this is
+/// ever too small, so a wrong guess is loud.
+const MAX_FDS: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error;
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lib_moxa_snmp_agentx call failed")
+    }
+}
+
+impl std::error::Error for Error {}
+
+type Result<T> = std::result::Result<T, Error>;
+
+fn check(rc: c_int) -> Result<()> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(Error)
+    }
+}
+
+/// What net-snmp wants the reactor to do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectInfo {
+    /// Descriptors to watch for readability.
+    pub fds: Vec<i32>,
+    /// How long the reactor may sleep, or `None` when net-snmp has no deadline.
+    pub timeout: Option<std::time::Duration>,
+}
+
+/// The one value a GET handler may produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Integer(i64),
+    Octets(Vec<u8>),
+    Oid(Vec<u64>),
+    /// No such object at this OID.
+    NoSuch,
+}
+
+/// A request the handler has been asked to answer. Answering consumes it, so
+/// answering twice is not expressible.
+#[derive(Debug)]
+pub struct Request {
+    id: c_ulong,
+}
+
+impl Request {
+    /// Deliver the value. Dropping a `Request` without calling this yields
+    /// noSuchObject, which is also what the C side does.
+    pub fn reply(self, value: Value) -> Result<()> {
+        // SAFETY: self.id names the request currently being served; the C side
+        // rejects any other id rather than writing into a stale varbind.
+        unsafe {
+            match value {
+                Value::Integer(v) => check(mx_agentx_reply_integer(self.id, v as c_long)),
+                Value::Octets(buf) => {
+                    check(mx_agentx_reply_octets(self.id, buf.as_ptr(), buf.len()))
+                }
+                Value::Oid(oid) => {
+                    let subids: Vec<c_ulong> = oid.iter().map(|&v| v as c_ulong).collect();
+                    check(mx_agentx_reply_oid(self.id, subids.as_ptr(), subids.len()))
+                }
+                Value::NoSuch => check(mx_agentx_reply_nosuch(self.id)),
+            }
+        }
+    }
+}
+
+type Handler = Box<dyn FnMut(Request, &[u64])>;
+
+/// Owns the boxed handler for as long as the session is up. Dropping it
+/// unregisters the callback before the box is freed.
+pub struct Session {
+    handler: Option<Box<Handler>>,
+}
+
+/// The trampoline the C side calls.
+///
+/// A panic unwinding across an `extern "C"` boundary is undefined behaviour, so
+/// everything is caught here. A panicking handler is reported as "no value",
+/// which the C side turns into noSuchObject.
+extern "C" fn trampoline(
+    req: c_ulong,
+    oid: *const c_ulong,
+    oid_len: usize,
+    ctx: *mut c_void,
+) -> c_int {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() || oid.is_null() || oid_len == 0 {
+            return -1;
+        }
+        // SAFETY: ctx is the pointer handed to mx_agentx_set_get_handler, which
+        // is the address of the Box owned by the live Session. oid points at
+        // oid_len subidentifiers valid for this call only.
+        unsafe {
+            let handler = &mut *(ctx as *mut Handler);
+            // c_ulong is 32-bit on the target, where this is a real widening,
+            // and 64-bit on the host, where clippy sees it as a no-op. The
+            // project's clippy gate runs against the target, so keep the
+            // conversion and silence the host-only lint.
+            #[allow(clippy::useless_conversion)]
+            let subids: Vec<u64> = std::slice::from_raw_parts(oid, oid_len)
+                .iter()
+                .map(|&v| u64::from(v))
+                .collect();
+            handler(Request { id: req }, &subids);
+        }
+        0
+    }));
+
+    // A panic is "no value", which the C side turns into noSuchObject.
+    result.unwrap_or(-1)
+}
+
+impl Session {
+    /// Enable subagent mode and open the AgentX session.
+    ///
+    /// `socket` is the master's AgentX address in net-snmp's transport syntax,
+    /// e.g. `"tcp:127.0.0.1:705"`. `None` accepts net-snmp's compiled-in
+    /// default of `/var/agentx/master`, which is almost certainly not where
+    /// this product's snmpd listens - and pointing a subagent at the wrong
+    /// address fails silently, with net-snmp retrying forever in the
+    /// background.
+    pub fn init(name: &str, socket: Option<&str>) -> Result<Self> {
+        let cname = CString::new(name).map_err(|_| Error)?;
+        let csocket = match socket {
+            Some(s) => Some(CString::new(s).map_err(|_| Error)?),
+            None => None,
+        };
+        let socket_ptr = csocket
+            .as_ref()
+            .map_or(std::ptr::null(), |s| s.as_ptr());
+        // SAFETY: both strings outlive the call; the C side copies what it needs.
+        unsafe { check(mx_agentx_init(cname.as_ptr(), socket_ptr))? };
+        Ok(Session { handler: None })
+    }
+
+    /// Install the GET handler. One callback serves every registered arc.
+    ///
+    /// The handler runs synchronously inside the net-snmp dispatcher on this
+    /// thread and must not block - hence `FnMut`, not an async fn.
+    pub fn set_get_handler<F>(&mut self, handler: F)
+    where
+        F: FnMut(Request, &[u64]) + 'static,
+    {
+        // Two boxes on purpose: the inner one erases F, the outer one gives a
+        // stable thin address to hand to C. Storing it in self keeps it alive
+        // exactly as long as the callback can be invoked.
+        let mut boxed: Box<Handler> = Box::new(Box::new(handler));
+        let ctx = &mut *boxed as *mut Handler as *mut c_void;
+        // SAFETY: ctx stays valid until clear_get_handler or drop, both of
+        // which unregister before releasing the box.
+        unsafe { mx_agentx_set_get_handler(Some(trampoline), ctx) };
+        self.handler = Some(boxed);
+    }
+
+    /// Register one whole OID arc - the arc root, not each column (D3 / 4.2).
+    pub fn register_arc(&mut self, oid: &[u64], priority: i32) -> Result<()> {
+        if oid.is_empty() {
+            return Err(Error);
+        }
+        let subids: Vec<c_ulong> = oid.iter().map(|&v| v as c_ulong).collect();
+        // SAFETY: subids is a valid slice of subids.len() elements.
+        unsafe {
+            check(mx_agentx_register_arc(
+                subids.as_ptr(),
+                subids.len(),
+                priority as c_int,
+            ))
+        }
+    }
+
+    /// Which descriptors to watch and how long the reactor may sleep.
+    ///
+    /// Re-query after every read and every timeout: the set changes when the
+    /// AgentX session reconnects.
+    pub fn select_info(&self) -> Result<SelectInfo> {
+        let mut maxfd: c_int = 0;
+        let mut fds = [0 as c_int; MAX_FDS];
+        let mut timeout_us: c_long = -1;
+        let mut block: c_int = 1;
+
+        // SAFETY: all four out-parameters are live for the call and fds has
+        // MAX_FDS elements, which is what fds_cap says.
+        let n = unsafe {
+            mx_agentx_select_info(
+                &mut maxfd,
+                fds.as_mut_ptr(),
+                MAX_FDS,
+                &mut timeout_us,
+                &mut block,
+            )
+        };
+        if n < 0 {
+            return Err(Error);
+        }
+
+        Ok(SelectInfo {
+            fds: fds[..n as usize].to_vec(),
+            timeout: if block != 0 || timeout_us < 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_micros(timeout_us as u64))
+            },
+        })
+    }
+
+    /// One readable descriptor became ready.
+    pub fn handle_read(&mut self, fd: i32) {
+        // SAFETY: fd is one net-snmp reported through select_info.
+        unsafe { mx_agentx_handle_read(fd as c_int) };
+    }
+
+    /// The deadline from `select_info` expired.
+    pub fn handle_timeout(&mut self) {
+        // SAFETY: no arguments; runs net-snmp's own alarm processing.
+        unsafe { mx_agentx_handle_timeout() };
+    }
+
+    fn clear_get_handler(&mut self) {
+        if self.handler.is_some() {
+            // SAFETY: unregister before the box is dropped, so the C side can
+            // never call through a freed pointer.
+            unsafe { mx_agentx_set_get_handler(None, std::ptr::null_mut()) };
+            self.handler = None;
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.clear_get_handler();
+        // SAFETY: no outstanding requests - the handler is unregistered above.
+        unsafe { mx_agentx_shutdown() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These types must not be Send or Sync: every net-snmp call has to stay on
+    /// one thread, and the compiler is a better guard than a comment.
+    #[test]
+    fn test_session_is_not_send() {
+        fn assert_not_send<T: ?Sized>() {}
+        assert_not_send::<Session>();
+        // Session holds Box<dyn FnMut>, which is neither Send nor Sync, so the
+        // auto traits are already absent; this test documents that it is
+        // deliberate rather than incidental.
+    }
+
+    #[test]
+    fn test_value_roundtrip_shapes() {
+        assert_eq!(Value::Integer(2), Value::Integer(2));
+        assert_ne!(Value::Integer(1), Value::Integer(2));
+        assert_eq!(Value::Octets(vec![1, 2]), Value::Octets(vec![1, 2]));
+        assert_eq!(Value::Oid(vec![1, 3, 6]), Value::Oid(vec![1, 3, 6]));
+    }
+
+    #[test]
+    fn test_select_info_shape() {
+        let info = SelectInfo {
+            fds: vec![7],
+            timeout: None,
+        };
+        assert_eq!(info.fds, vec![7]);
+        assert!(info.timeout.is_none());
+    }
+}

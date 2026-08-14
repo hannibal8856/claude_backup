@@ -1,0 +1,9 @@
+# Migrated to the app_moxa_framework subagent (reuse): mx_Mms_MibEntry[] in
+# 3rdparty_net_snmp/ies-auto-mibs/net_mxMms.h, registered via g_reuse_srcs[] in
+# lib_moxa_ies_auto_mibs/src/mapping_reuse.c.
+#
+# Disabling this dlmod line is the dlmod path's equivalent of commenting out
+# MOX_SNMP_INIT_ENTRY for an in-master group. plugin_snmp_mms_setting.so is
+# still built and installed; it is simply no longer loaded.
+#
+# dlmod mms_setting /etc/moxa/netsnmp/plugin/plugin_snmp_mms_setting.so

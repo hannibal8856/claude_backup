@@ -1,0 +1,49 @@
+#!/bin/bash
+# Local only. Renames snmp-plan-E -> snmp-plan-E.opus (kept as the true history)
+# and rebuilds snmp-plan-E from it with the Claude trailers removed.
+# Pushes NOTHING.
+set -u
+DL=/home/moxa/mds4xgl3/buildroot/dl
+REPOS="3rdparty_net_snmp app_moxa_fiber_check app_moxa_framework app_moxa_iss_10_1_0
+lib_moxa_ies_auto_mibs lib_moxa_rust_ies_auto_mibs lib_moxa_rust_snmp_agentx
+lib_moxa_snmp_agentx lib_moxa_utility plugin_moxa_fiber_check plugin_moxa_mms
+plugin_moxa_snmp plugin_moxa_system_information"
+
+MSGFILTER="sed -e '/^Co-Authored-By: Claude/d' -e '/^Claude-Session:/d' -e '\\#^https://claude\\.ai/code/session_#d' | sed -e :a -e '/^\\n*\$/{\$d;N;};/\\n\$/ba'"
+
+for name in $REPOS; do
+    d="$DL/$name"
+    git -C "$d" rev-parse --verify -q snmp-plan-E >/dev/null || { echo "SKIP $name (no snmp-plan-E)"; continue; }
+
+    # pick the closest non-snmp base branch
+    best=""; bestn=999999
+    for base in $(git -C "$d" for-each-ref --format='%(refname:short)' refs/remotes/origin \
+                  | grep -Ei 'develop|_v5\.0|master|main$' | grep -viE 'snmp'); do
+        n=$(git -C "$d" rev-list --count "$base..snmp-plan-E" 2>/dev/null) || continue
+        [ -z "$n" ] && continue
+        if [ "$n" -lt "$bestn" ] && [ "$n" -gt 0 ]; then bestn=$n; best=$base; fi
+    done
+    [ -z "$best" ] && { echo "SKIP $name (no base found)"; continue; }
+
+    before=$(git -C "$d" log --format='%B' "$best..snmp-plan-E" | grep -cE '^(Co-Authored-By: Claude|Claude-Session:)')
+    old=$(git -C "$d" rev-parse --short snmp-plan-E)
+
+    if git -C "$d" rev-parse --verify -q snmp-plan-E.opus >/dev/null; then
+        echo "SKIP $name (snmp-plan-E.opus already exists)"; continue
+    fi
+
+    git -C "$d" branch -m snmp-plan-E snmp-plan-E.opus
+    git -C "$d" checkout -q -B snmp-plan-E snmp-plan-E.opus
+
+    if [ "$before" -gt 0 ]; then
+        FILTER_BRANCH_SQUELCH_WARNING=1 \
+        git -C "$d" filter-branch -f --msg-filter "$MSGFILTER" "$best..HEAD" >/dev/null 2>&1
+    fi
+
+    after=$(git -C "$d" log --format='%B' "$best..snmp-plan-E" | grep -cE '^(Co-Authored-By: Claude|Claude-Session:)')
+    new=$(git -C "$d" rev-parse --short snmp-plan-E)
+    difftree=$(git -C "$d" diff --stat snmp-plan-E.opus snmp-plan-E | wc -l)
+
+    printf "%-32s base=%-28s trailers %2s -> %s   %s -> %s   tree-diff-lines=%s\n" \
+           "$name" "$best" "$before" "$after" "$old" "$new" "$difftree"
+done

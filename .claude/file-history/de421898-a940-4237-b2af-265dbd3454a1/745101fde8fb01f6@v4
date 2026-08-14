@@ -1,0 +1,198 @@
+RESULT-phase3-task5.txt — framework subagent skeleton
+=====================================================
+Date: 2026-08-05
+
+WHAT WAS BUILT
+
+  dl/app_moxa_framework/src/snmp_agentx.rs        new
+  dl/app_moxa_framework/src/main.rs               spawn alongside the HTTP service
+  dl/app_moxa_framework/Cargo.toml                tokio no longer optional, + the crate
+  moxa/package/net/app_moxa_framework/*.mk        dependency, for ordering only
+
+  The task registers ZERO OIDs. That is the point: it separates "can the
+  framework hold an AgentX session inside its runtime" from "does serving an
+  OID work", so a failure has one candidate cause rather than two.
+
+D6 — libnetsnmpmibs is out of the framework process              PASS
+
+  Checked across the full transitive closure of the built binary, not just its
+  direct link line, because D6 is about the process:
+
+    transitive libraries      37
+    net-snmp libraries        libnetsnmp.so.40, libnetsnmpagent.so.40
+    libnetsnmpmibs            absent
+
+  app_moxa_framework links libmoxa_snmp_agentx.so directly and reaches
+  libnetsnmpagent only through it, which is the shape Task 2 was built for.
+
+BUILD                                                            PASS
+
+  A trap worth recording: `make app_moxa_framework-rebuild` returns 0 and
+  prints "Building" while compiling nothing. app_moxa_framework.mk has no build
+  commands at all - it is dependencies plus $(eval $(generic-package)) - and the
+  cargo build belongs to rust_moxa_build. Both are needed:
+
+    make app_moxa_framework-rebuild rust_moxa_build-rebuild
+
+  Verified by inspecting the artefact rather than the exit code:
+
+    strings usr/bin/app_moxa_framework | grep "AgentX subagent"   2 hits
+    readelf -d ... | grep NEEDED                                  libmoxa_snmp_agentx.so
+    size                                                          14.4M -> 14.5M
+
+DESIGN DECISIONS IN THE EVENT LOOP
+
+  Threading is enforced by the type system. Session is !Send, so the future can
+  only be started with spawn_local and tokio::spawn does not compile. That is
+  the D5 / section 5.3 constraint - every net-snmp call on one thread - made
+  into a compile error instead of a comment. #[actix_web::main] already runs a
+  current-thread runtime with a LocalSet, so no runtime of our own is needed.
+
+  AsyncFd registrations are kept across iterations for descriptors that did not
+  change. The set is still re-queried every iteration, because it changes when
+  the AgentX session reconnects - that part follows FRR's agentx_events_update().
+  What does NOT follow FRR is dropping and rebuilding the registration each
+  time: tokio's epoll registration is edge-triggered, and recreating it on every
+  wake-up can lose a readiness edge for data already sitting in the socket.
+  FRR's reactor is level-triggered and does not have this problem.
+
+  Readiness is cleared explicitly after each read. snmp_read2() drains the
+  socket, so the edge is consumed; without clear_ready() the next readable()
+  returns immediately and the task spins.
+
+  If net-snmp reports neither a descriptor to watch nor a deadline, the task
+  sleeps IDLE_POLL (1s) instead of blocking forever. Nothing would wake it
+  otherwise, and select_all over an empty set panics.
+
+  A failing subagent does not take the framework down. It is spawned alongside
+  the HTTP service and its error is logged, not propagated. That is what makes
+  this task reversible and shippable on its own.
+
+THREE FAILURES, ALL THE SAME SHAPE
+
+  This task shipped three images that did not work, and each reported success
+  everywhere. The shape is worth naming because it decides how Task 6 onward
+  must be verified.
+
+  net-snmp's subagent initialisation does not report connection state at any
+  point. mx_agentx_init() returning 0 means "subagent mode is enabled and the
+  callbacks are registered" - nothing more. The connection attempt happens
+  after init_agent() has already returned, inside a callback, and its outcome
+  is not propagated anywhere.
+
+    1. AgentX address never set    -> connected to /var/agentx/master
+    2. (wrong diagnosis: subagent_init, which init_agent already calls)
+    3. agentXPingInterval was 0    -> one attempt, never retried
+
+  So: verification of this path belongs on the master, not in the framework.
+  `ss -tnp | grep 705` is the only thing that knows. Framework return values
+  and log lines cannot answer it and must not be treated as if they can.
+
+  On (3), the ordering is not a race but a certainty: on this product the
+  framework always starts before snmpd - config loader runs, decides SNMP is
+  enabled, and only then is snmpd started. The single connection attempt
+  therefore always fails, and without a ping interval the subagent never
+  connects at all. Confirmed by the user from the system design, and consistent
+  with both failing images.
+
+FIRST ATTEMPT FAILED, AND FAILED SILENTLY
+
+  Image 2026_0805_1603 was flashed and the framework never appeared as a second
+  AgentX session:
+
+    BUILD_TIME  2026_0805_1603
+    ss -tnp | grep 705   ->  one session only, ISS.exe pid=300
+    ps -ef               ->  app_moxa_framework pid=1228 running
+    moxalog grep         ->  clean
+
+  mx_agentx_init() never set NETSNMP_DS_AGENT_X_SOCKET, so net-snmp used its
+  compiled-in default of /var/agentx/master (net-snmp-config.h:1534). snmpd on
+  this product listens on tcp:127.0.0.1:705 - plugin_moxa_snmp writes that line
+  into snmpd.conf at config_moxa_snmp_control.c:794.
+
+  The failure mode is worth naming because nothing about it is visible from the
+  subagent side: init_agent() returns success whether or not the address is
+  reachable, and the subagent module then retries on its own alarm forever. No
+  error, no log, no crash - just a session that never exists. It is only
+  observable on the master.
+
+  Fixed by making the address a parameter of mx_agentx_init(), threaded through
+  Session::init() to AGENTX_SOCKET in snmp_agentx.rs, which carries the
+  reference to config_moxa_snmp_control.c:794 because the two have to agree and
+  nothing enforces it.
+
+  The startup log also claimed "AgentX subagent connected", which it could not
+  know. It now says "started" and names the master address.
+
+  BUILD-ORDER TRAP, hit while fixing this: editing dl/lib_moxa_rust_snmp_agentx
+  and rebuilding only app_moxa_framework compiles the framework against the OLD
+  copy of the crate - the source is synced into
+  output/build/lib_moxa_rust_snmp_agentx-custom only when that package itself
+  is rebuilt. The failure was loud here (E0061, wrong argument count), but the
+  same trap with a compatible signature change would be silent. The full chain:
+
+    make lib_moxa_rust_snmp_agentx-rebuild \
+         app_moxa_framework-rebuild \
+         rust_moxa_build-rebuild
+
+STEP 4 — the session exists                                      PASS
+
+  Cold boot of 2026_0805_1738 - not a restart, which would bypass the ordering
+  the fix is about:
+
+    ESTAB 127.0.0.1:56344 -> 127.0.0.1:705   ISS.exe          pid=298
+    ESTAB 127.0.0.1:56354 -> 127.0.0.1:705   app_moxa_framew  pid=1234
+
+  Two AgentX sessions where every previous boot had one.
+
+STEP 4b — nothing moved                                          PASS
+                                                    (LLDP excluded, see below)
+
+  Against the 2026-08-04 Plan E baseline (snmpwalk/task6fix-20260804_1353):
+
+    subtree                      baseline   task5     verdict
+    1.3.6.1.2                    2606       2606      identical
+    1.3.6.1.4.1.2021             109        109       identical
+    1.3.6.1.4.1.8691.600         5          5         identical
+    1.3.6.1.4.1.8691.602         866        866       identical
+    1.3.6.1.4.1.8691.603         -          -         captured, no diff
+    1.3.6.1.4.1.8691.605         -          -         captured, no diff
+    1.0.8802                     1472       479       see below
+
+  The 602 subtree looked like it had lost two OIDs. It has not: the 2026-08-04
+  capture wrote the text of a `badValue` error into the .txt file, and the
+  fragments ".1.3.6.Error" and "Reason:" were being counted as OIDs. The error
+  itself is present in both captures - it predates this work.
+
+  1.0.8802 is a pre-existing GETNEXT loop, not something this task caused:
+
+    snmpgetnext .1.0.8802.1.1.2.1.5.3791.1.1.1.1.1.1
+      -> .1.0.8802.1.1.2.1.5.3791.1.1.1.1.1.1
+
+  GETNEXT returns the OID it was given, so the walk never advances and ~993
+  LLDP OIDs are unreachable. Verified by stopping app_moxa_framework entirely -
+  705 with ISS only - and re-running the same getnext: unchanged. Written up
+  separately in lldp-getnext-loop-2026-08-05.md, including the NOS 7 mainline
+  comparison that is still owed.
+
+  This is why it was tested rather than reasoned about: the subagent registers
+  zero OIDs and therefore "cannot" affect GETNEXT, but three diagnoses on this
+  same task had already been wrong by inference.
+
+STEP 5 — the namelen invariant                                   PASS
+
+  What D17 deferred to Phase 3, and the first time two subagents have been live
+  at once.
+
+    grep -i "moxa: AgentX" /moxa/permanent/moxalog/*     -> no output
+
+  Not vacuous this time: moxa.log 441600 bytes, moxa.debug 137541 bytes, both
+  written the same minute. The pattern matches what the watchdog emits at
+  moxa_snmp_handle_util.c:1850 and :1858, and those are snmp_log() calls, so
+  these are the files that carry them.
+
+  Strength, stated so it is not over-read: this task registers no arcs, so a
+  clean result says the watchdog does not fire spuriously with two subagents
+  connected. The invariant is properly exercised in Task 6, when the framework
+  first registers an arc that in-master also covers.
+

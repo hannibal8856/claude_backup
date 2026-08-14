@@ -1,0 +1,1408 @@
+/********************************************************************
+ * Copyright (C) 2006 Aricent Inc . All Rights Reserved 
+ *
+ * $Id: snmpmain.c,v 1.17 2016/03/06 10:07:12 siva Exp $
+ *
+ * Description:Routines for Snmp Agent Init and main Module specific for
+ *             FutSoftSLI.   
+ *******************************************************************/
+#ifndef __SNMPMAIN_C_
+#define __SNMPMAIN_C_
+
+#include "snmpcmn.h"
+#include "snxinc.h"
+#include "fssocket.h"
+#include "snprxtrn.h"
+
+#include "fssyslog.h"
+
+#define MAX_SNMP_PKT_LEN 1024
+#define SNMP_FOREVER()     for(;;)
+
+PRIVATE INT4        SnmpSockInit (INT4 *pi4Socket);
+PRIVATE INT4        SnmpProxySockInit (INT4 *pi4Socket);
+VOID                SNMPAgtRcvdIpv4Pkt (UINT4);
+
+#ifdef IP6_WANTED
+PRIVATE INT4        SnmpSock6Init (INT4 *pi4Socket);
+PRIVATE INT4        SnmpProxySock6Init (INT4 *pi4Socket);
+PRIVATE INT4        SNMPSock6InitOnPort (INT2 i2Port, INT4 *pi4Socket);
+VOID                SNMPAgtRcvdIpv6Pkt (UINT4);
+#endif
+
+INT4                gi4Socket6 = SNMP_NOT_OK;
+INT4                gi4ProxySocket6 = SNMP_NOT_OK;
+tMgrIpAddr          gManagerIpAddr;
+UINT4               gu4SnmpAgentControl = SNMP_AGENT_DISABLE;
+UINT4               gu4SnmpAllowedVersion = SNMP_V1V2V3_PDU;
+UINT4               gu4SnmpMinimumSecurity = SNMP_MIN_SEC_NONE;
+INT4                gi4SnmpAgentxSubAgtStatus = SNMP_AGENTX_DISABLE;
+tOsixSemId          gu4SnxSemId;
+INT4                gi4SnmpLaunch = SNMP_FAILURE;
+INT4                gi4SnmpMemInit = SNMP_FAILURE;
+INT4                gi4Socket = -1;
+INT4                gi4ProxySocket = SNMP_NOT_OK;
+UINT4               gu4ManagerAddr = SNMP_ZERO;
+UINT4               gu4ManagerPort = SNMP_ZERO;
+tSnmpTcp            gSnmpTcpGblInfo;
+tSNMP_OID_TYPE     *gEntOid1, *gEntOid2;
+
+tIndexMgrId         gMibRegIndexMgrId;
+UINT1               gau1MibRegBitMap[SNMP_MAX_NUM_OF_MIBS / BITS_PER_BYTE + 1];
+
+/************************************************************************
+ *  Function Name   : SNMPProtoInit 
+ *  Description     : Function to Create SNMP Agent Task. Called from main
+ *  Input           : None
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPProtoInit (VOID)
+{
+    tOsixTaskId         u4SnmpTaskId;
+    if (OsixCreateTask ((const UINT1 *) SNMP_TASK_NAME, SNMP_TASK_PRIORITY,
+                        SNMP_STACK_SIZE, SnmpMain, NULL, OSIX_DEFAULT_TASK_MODE,
+                        &u4SnmpTaskId) != OSIX_SUCCESS)
+    {
+        SNMPTrace ("Error During Creation of SNMP Agent Task \n");
+    }
+
+}
+
+/************************************************************************
+ *  Function Name   : SnmpSockInit 
+ *  Description     : Function to create snmp agent socket and bind to
+ *                    snmp agent port
+ *  Input           : None
+ *  Output          : None
+ *  Returns         : Socket descriptor or FAILURE
+ ************************************************************************/
+PRIVATE INT4
+SnmpSockInit (INT4 *pi4Socket)
+{
+    INT4                i4Sock = SNMP_NOT_OK;
+    struct sockaddr_in  SockAddr;
+
+    i4Sock = socket (AF_INET, SOCK_DGRAM, SNMP_ZERO);
+    if (i4Sock < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Open Socket\n");
+        return SNMP_FAILURE;
+    }
+    MEMSET (&SockAddr, SNMP_ZERO, sizeof (SockAddr));
+    SockAddr.sin_family = AF_INET;
+    SockAddr.sin_port = OSIX_HTONS (SNMP_PORT);
+    SockAddr.sin_addr.s_addr = OSIX_HTONL (INADDR_ANY);
+
+    if (bind (i4Sock, (struct sockaddr *) &SockAddr, sizeof (SockAddr))
+        < SNMP_ZERO)
+    {
+        SockAddr.sin_port = OSIX_HTONS (SNMP_ALT_PORT);
+        if (bind (i4Sock, (struct sockaddr *) &SockAddr, sizeof (SockAddr))
+            < SNMP_ZERO)
+        {
+            *pi4Socket = -1;
+            close (i4Sock);
+            SNMPTrace ("SNMP:Unable to Bind Socket\n");
+            return SNMP_FAILURE;
+        }
+    }
+    *pi4Socket = i4Sock;
+
+    if (SelAddFd (i4Sock, SNMPPacketOnSocket) != OSIX_SUCCESS)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    if (fcntl (i4Sock, F_SETFL, O_NONBLOCK) < 0)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        SelRemoveFd (i4Sock);
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SnmpProxySockInit 
+ *  Description     : Function to create snmp Proxy socket and bind to
+ *                    snmp Proxy Trap port
+ *  Input           : None
+ *  Output          : None
+ *  Returns         : Socket descriptor or FAILURE
+ ************************************************************************/
+PRIVATE INT4
+SnmpProxySockInit (INT4 *pi4Socket)
+{
+    INT4                i4Sock = SNMP_NOT_OK;
+    struct sockaddr_in  SockAddr;
+
+    i4Sock = socket (AF_INET, SOCK_DGRAM, SNMP_ZERO);
+    if (i4Sock < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Open Socket\n");
+        return SNMP_FAILURE;
+    }
+    MEMSET (&SockAddr, SNMP_ZERO, sizeof (SockAddr));
+    SockAddr.sin_family = AF_INET;
+    SockAddr.sin_port = OSIX_HTONS (gSnmpSystem.u2ProxyListenTrapPort);
+    SockAddr.sin_addr.s_addr = OSIX_HTONL (INADDR_ANY);
+
+    if (bind (i4Sock, (struct sockaddr *) &SockAddr, sizeof (SockAddr))
+        < SNMP_ZERO)
+    {
+        *pi4Socket = -1;
+        close (i4Sock);
+        SNMPTrace ("SNMP:Unable to Bind Socket\n");
+        return SNMP_FAILURE;
+    }
+    *pi4Socket = i4Sock;
+
+    if (SelAddFd (i4Sock, SNMPPacketOnSocket) != OSIX_SUCCESS)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    if (fcntl (i4Sock, F_SETFL, O_NONBLOCK) < 0)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        SelRemoveFd (i4Sock);
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+#if defined (IP6_WANTED) 
+/************************************************************************
+ *  Function Name   : SnmpSock6Init
+ *  Description     : Function to create snmp agent socket and bind to
+ *                    snmp agent port
+ *  Input           : None
+ *  Output          : None
+ *  Returns         : Socket descriptor or FAILURE
+ ************************************************************************/
+PRIVATE INT4
+SnmpSock6Init (INT4 *pi4Socket)
+{
+    return (SNMPSock6InitOnPort (SNMP_PORT, pi4Socket));
+}
+
+/************************************************************************
+ *  Function Name   : SnmpProxySock6Init
+ *  Description     : Function to create snmp agent socket and bind to
+ *                    snmp Porxy port
+ *  Input           : None
+ *  Output          : None
+ *  Returns         : Socket descriptor or FAILURE
+ ************************************************************************/
+PRIVATE INT4
+SnmpProxySock6Init (INT4 *pi4Socket)
+{
+    INT4                i4Sock = 0;
+    INT4                i4OptVal = 0;
+    struct sockaddr_in6 SockAddr;
+
+    i4Sock = socket (AF_INET6, SOCK_DGRAM, 0);
+    if (i4Sock < 0)
+    {
+        SNMPTrace ("SNMP6:Unable to Open Socket\n");
+        return SNMP_FAILURE;
+    }
+
+    i4OptVal = OSIX_TRUE;
+    if (setsockopt (i4Sock, IPPROTO_IPV6, IPV6_V6ONLY, &i4OptVal,
+                    sizeof (i4OptVal)))
+    {
+        SNMPTrace ("SNMP6:Unable to Set Socket Option IPV6_V6ONLY \n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    MEMSET (&SockAddr, 0, sizeof (SockAddr));
+    SockAddr.sin6_family = AF_INET6;
+    SockAddr.sin6_port = OSIX_HTONS (gSnmpSystem.u2ProxyListenTrapPort);
+    inet_pton (AF_INET6, (const CHR1 *) "0::0", &SockAddr.sin6_addr.s6_addr);
+
+    if (bind (i4Sock, (struct sockaddr *) &SockAddr, sizeof (SockAddr)) < 0)
+    {
+        SNMPTrace ("SNMP6:Unable to Bind Socket\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+
+    /* FS_DELTA - Making the Socket Non-Blocking */
+
+    *pi4Socket = i4Sock;
+
+    if (SelAddFd (i4Sock, SNMPPacketOnSocket) != OSIX_SUCCESS)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    if (fcntl (i4Sock, F_SETFL, O_NONBLOCK) < 0)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        SelRemoveFd (i4Sock);
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPSock6InitOnPort
+ *  Description     : Function to modify the snmp agent listen port for
+ *                     Ipv6 address.
+ *  Input           : i2Port - The new port number
+ *  Output          : pi4Socket - The new socket created for the given port
+ *  Returns         : SNMP_SUCCESS / SNMP_FAILURE
+ ************************************************************************/
+INT4
+SNMPSock6InitOnPort (INT2 i2Port, INT4 *pi4Socket)
+{
+    INT4                i4Sock = 0;
+    INT4                i4OptVal = 0;
+    struct sockaddr_in6 SockAddr;
+
+    i4Sock = socket (AF_INET6, SOCK_DGRAM, 0);
+    if (i4Sock < 0)
+    {
+        SNMPTrace ("SNMP6:Unable to Open Socket for ipv6\n");
+        return SNMP_FAILURE;
+    }
+
+    i4OptVal = OSIX_TRUE;
+    if (setsockopt (i4Sock, IPPROTO_IPV6, IPV6_V6ONLY, (char *) &i4OptVal,
+                    sizeof (i4OptVal)))
+    {
+        SNMPTrace ("SNMP6:Unable to Set Socket Option IPV6_V6ONLY \n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+
+    MEMSET (&SockAddr, 0, sizeof (SockAddr));
+    SockAddr.sin6_family = AF_INET6;
+    SockAddr.sin6_port = OSIX_HTONS (i2Port);
+    inet_pton (AF_INET6, (const CHR1 *) "0::0", &SockAddr.sin6_addr.s6_addr);
+
+    if (bind (i4Sock, (struct sockaddr *) &SockAddr, sizeof (SockAddr)) < 0)
+    {
+        SNMPTrace ("SNMP6:Unable to Bind Socket\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+
+    /* FS_DELTA - Making the Socket Non-Blocking */
+
+    *pi4Socket = i4Sock;
+
+    if (SelAddFd (i4Sock, SNMPPacketOnSocket) != OSIX_SUCCESS)
+    {
+        SNMPTrace
+            ("SNMP6 : Adding Socket Descriptor to Select utility Failed \r\n");
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    if (fcntl (i4Sock, F_SETFL, O_NONBLOCK) < 0)
+    {
+        SNMPTrace
+            ("SNMP6 : Adding Socket Descriptor to Select utility Failed \r\n");
+        SelRemoveFd (i4Sock);
+        *pi4Socket = -1;
+        close (i4Sock);
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+#endif
+
+/************************************************************************
+ *  Function Name   : SnmpMain 
+ *  Description     : Snmp Agent Task Entry Point Function
+ *  Input           : pParam - Not in use
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+/* PRIVATE */
+VOID
+SnmpMain (INT1 *pParam)
+{
+    UINT4               u4Events = 0;
+
+    UNUSED_PARAM (pParam);
+
+    if (SNMPMemInit () == SNMP_FAILURE)
+    {
+        SNMP_INIT_COMPLETE (OSIX_FAILURE);
+        return;
+    }
+    gi4SnmpMemInit = SNMP_SUCCESS;
+
+    if (gu4SnmpAgentControl == SNMP_AGENT_ENABLE){
+        if (SNMPAgentInit () == SNMP_FAILURE)
+        {
+            /* Indicate the status of initialization to the main routine */
+            SNMP_INIT_COMPLETE (OSIX_FAILURE);
+            return;
+        }
+    }
+    else
+    {
+        if (SNMPAgentDeInit () == SNMP_FAILURE)
+        {
+            /* Indicate the status of initialization to the main routine */
+            SNMP_INIT_COMPLETE (OSIX_FAILURE);
+            return;
+        }
+    }
+
+    if (SnxMainProtoInit () == SNMP_FAILURE)
+    {
+        /* Indicate the status of initialization to the main routine */
+        SNMP_INIT_COMPLETE (OSIX_FAILURE);
+        return;
+    }
+    if (SnmpAgentTcpInit () == SNMP_FAILURE)
+    {
+        /* Indicate the status of initialization to the main routine */
+        SNMP_INIT_COMPLETE (OSIX_FAILURE);
+        return;
+    }
+    SNMPInitSystemObjects ();
+    gi4SnmpLaunch = SNMP_SUCCESS;
+
+    gi4SnmpSysLogId =
+        SYS_LOG_REGISTER ((CONST UINT1 *) "SNMP", SYSLOG_INFO_LEVEL);
+    if (gi4SnmpSysLogId <= 0)
+    {
+        SNMPTrace ("SNMP:SysLog registration failed\r\n");
+        return;
+    }
+
+    SNMPInitEOID ();
+    /* Indicate the status of initialization to the main routine */
+    /* Register the MIBs with SNMP */
+    RegisterSNMPMIB ();
+    RegisterFUTURESNMP ();        /* This is for Community table */
+    SNMPRegisterSNMPV3MIBS ();
+
+    if (SNMP_CREATE_SEMAPHORE () == OSIX_FAILURE)
+    {
+        SNMPTrace ("SNMP:S Semaphore creation failed\r\n");
+    }
+    if (SNMP_GETNEXT_CREATE_SEMAPHORE () == OSIX_FAILURE)
+    {
+        SNMPTrace ("SNMP:S Semaphore creation failed\r\n");
+    }
+
+    /* Plan C: default this build to AgentX subagent mode, connecting to the
+     * local net-snmp master on 127.0.0.1:705. Mirrors the nmh sequence of
+     * SnxCliActivateAgentxSubagent (CLI "enable snmpsubagent master ip4
+     * 127.0.0.1 port 705"). The default (empty) context set up by
+     * SnxMainProtoInit is reused, so only addr/port/control are set here.
+     * gi4SnmpAgentxSubAgtStatus is still SNMP_AGENTX_DISABLE at this point, so
+     * the ENABLE transition fires SnxMainAgentxEnable()->SnxTransInit(); if the
+     * master is not yet listening on :705, SNX_RECONNECT_TIMER retries until it
+     * is. The IP is built as a host-order UINT4 then MEMCPY'd, exactly as the
+     * CLI does, so the byte order round-trips identically. */
+    {
+        tSNMP_OCTET_STRING_TYPE MasterIp;
+        UINT1                   au1Master[SNX_IP4_LEN];
+        UINT4                   u4MasterIp = 0x7F000001;    /* 127.0.0.1, host order */
+
+        MEMCPY (au1Master, &u4MasterIp, SNX_IP4_LEN);
+        MasterIp.pu1_OctetList = au1Master;
+        MasterIp.i4_Length = SNX_IP4_LEN;
+
+        (VOID) nmhSetSnmpAgentxMasterAgentAddr (&MasterIp);
+        (VOID) nmhSetSnmpAgentxMasterAgentPortNo (SNX_DEFAULT_MASTER_PORT);
+        if (nmhSetSnmpAgentxSubAgentControl (SNMP_AGENTX_ENABLE) != SNMP_SUCCESS)
+        {
+            SNMPTrace ("Plan C: initial Agentx subagent enable deferred; "
+                       "reconnect timer will retry\n");
+        }
+    }
+
+    SNMP_INIT_COMPLETE (OSIX_SUCCESS);
+
+    SNMP_FOREVER ()
+    {
+        if (OsixReceiveEvent (SNMP_ALL_EVENTS, OSIX_WAIT, 0, &u4Events)
+            == OSIX_SUCCESS)
+        {
+
+            if ((u4Events & SNMP_AGT_IPV4PKT_EVT) ||
+                (u4Events & SNMP_PXY_IPV4PKT_EVT))
+            {
+                SNMPAgtRcvdIpv4Pkt (u4Events);
+                /* Check to see the socket was deleted by CLI and is
+                 * initialized to -1 */
+                if ((gi4Socket != -1) && (u4Events & SNMP_AGT_IPV4PKT_EVT))
+                {
+                    if (SelAddFd (gi4Socket, SNMPPacketOnSocket) !=
+                        OSIX_SUCCESS)
+                    {
+                        SNMPTrace
+                            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+                    }
+                }
+                if ((gi4ProxySocket != -1) && (u4Events & SNMP_PXY_IPV4PKT_EVT))
+                {
+                    if (SelAddFd (gi4ProxySocket, SNMPPacketOnSocket) !=
+                        OSIX_SUCCESS)
+                    {
+                        SNMPTrace
+                            ("SNMP : Adding Proxy Socket Descriptor to Select utility Failed \r\n");
+                    }
+                }
+            }
+#ifdef IP6_WANTED
+            if ((u4Events & SNMP_AGT_IPV6PKT_EVT) ||
+                (u4Events & SNMP_PXY_IPV6PKT_EVT))
+            {
+                SNMPAgtRcvdIpv6Pkt (u4Events);
+                /* Check to see the socket was deleted by CLI and is
+                 * initialized to -1 */
+                if ((gi4Socket6 != -1) && (u4Events & SNMP_AGT_IPV6PKT_EVT))
+                {
+                    if (SelAddFd (gi4Socket6, SNMPPacketOnSocket) !=
+                        OSIX_SUCCESS)
+                    {
+                        SNMPTrace
+                            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+                    }
+                }
+                if ((gi4ProxySocket6 != -1) &&
+                    (u4Events & SNMP_PXY_IPV6PKT_EVT))
+                {
+                    if (SelAddFd (gi4ProxySocket6, SNMPPacketOnSocket) !=
+                        OSIX_SUCCESS)
+                    {
+                        SNMPTrace
+                            ("SNMP : Adding Proxy Socket Descriptor to Select utility Failed \r\n");
+                    }
+                }
+            }
+#endif
+            if (u4Events & SNMP_THROTTLE_TMR_EXP_EVT)
+            {
+                SnmpThrottleTmrExpiry ();
+            }
+            if (u4Events & SNMP_AGT_TMR_EXP_EVT)
+            {
+                SnmpProcessTmrExpiry ();
+            }
+            if (u4Events & SNX_TMR_EXP_EVT)
+            {
+                SnxProcessTmrExpiry ();
+            }
+            if (u4Events & SNX_AGTX_PKT_EVT)
+            {
+                SnxMainRcvdAgtxPacketEvent ();
+            }
+            if (u4Events & SNX_TRANS_RDY_EVT)
+            {
+                if (gAgtxGlobalInfo.u1TDomain == SNX_TDOMAIN_TCP)
+                {
+#ifdef SLI_WANTED
+                    SnxTransInitTcpConnection (gAgtxGlobalInfo.i4SockId);
+#endif
+                    /* Wait on the descriptor for packet reception */
+                    SelAddFd (gAgtxGlobalInfo.i4SockId, SnxTransPktCallBack);
+                }
+                /* Open the agentx session */
+                SnxMainOpenSession ();
+                gi4SnmpAgentxSubAgtStatus = SNMP_AGENTX_ENABLE;
+                /* Create Agentx semaphore to protect the buddy allocations */
+                if (OSIX_FAILURE ==
+                    OsixCreateSem (SNX_PROTO_SEMAPHORE, 1,
+                                   OSIX_DEFAULT_SEM_MODE, (&gu4SnxSemId)))
+                {
+                    SNMPTrace
+                        ("Creation of Agentx module semaphore failed \r\n");
+                }
+
+            }
+
+            if (u4Events & SNMP_PXY_TMR_EXP_EVT)
+            {
+                SnmpProxyProcessTimerExpiry ();
+            }
+
+            if (u4Events & SNMPTCP_ENABLE_EVT)
+            {
+                /* Initialise the socket if its not initialised before */
+                if (gSnmpTcpGblInfo.i4TcpV4SockId == SNMPTCP_INVALID_SOCKFD)
+                {
+                    SnmpTcpSockInit (gSnmpTcpGblInfo.u2TcpPort);
+                }
+#ifdef IPV6_WANTED
+                if (gSnmpTcpGblInfo.i4TcpV6SockId == SNMPTCP_INVALID_SOCKFD)
+                {
+                    SnmpTcpSock6Init (gSnmpTcpGblInfo.u2TcpPort);
+                }
+#endif
+                gSnmpTcpGblInfo.i4TcpStatus = SNMPTCP_ENABLE;
+            }
+
+            if (u4Events & SNMPTCP_DISABLE_EVT)
+            {
+                gSnmpTcpGblInfo.i4TcpStatus = SNMPTCP_DISABLE;
+                if (gSnmpTcpGblInfo.i4TcpV4SockId != SNMPTCP_INVALID_SOCKFD)
+                {
+                    SNMPTrace ("SnmpMain: Cleaning the previous IPv4 socket\r\n");
+                    SelRemoveFd (gSnmpTcpGblInfo.i4TcpV4SockId);
+                    close (gSnmpTcpGblInfo.i4TcpV4SockId);
+                    gSnmpTcpGblInfo.i4TcpV4SockId = SNMPTCP_INVALID_SOCKFD;
+                }
+
+#ifdef IPV6_WANTED
+                if (gSnmpTcpGblInfo.i4TcpV6SockId != SNMPTCP_INVALID_SOCKFD)
+                {
+                    SNMPTrace ("SnmpMain: Cleaning the previous IPv6 socket\r\n");
+                    SelRemoveFd (gSnmpTcpGblInfo.i4TcpV6SockId);
+                    close (gSnmpTcpGblInfo.i4TcpV6SockId);
+                    gSnmpTcpGblInfo.i4TcpV6SockId = SNMPTCP_INVALID_SOCKFD;
+                }
+#endif
+                SnmpTcpForceCloseAllSsn();
+            }
+            /* EVent of New client connects to the server through ipv4 */
+            if ((u4Events & SNMPTCP_V4_NEWCONN_EVT) ||
+                (u4Events & SNMPTCP_V6_NEWCONN_EVT))
+            {
+                if (gSnmpTcpGblInfo.i4TcpStatus == SNMPTCP_ENABLE)
+                {
+                    SnmpTcpHandleNewConnEvt (u4Events);
+                }
+            }
+            if ((u4Events == SNMPTCP_PKT_READ_EVT) ||
+                (u4Events == SNMPTCP_PKT_WRITE_EVT))
+            {
+                SnmpTcpHandleRdWrEvt ();
+            }
+        }
+    }
+    /*return; TO remove kloc warning */
+}
+
+/************************************************************************
+ *  Function Name   : SNMPAgtRcvdIpv4Pkt 
+ *  Description     : This will receive and process the incoming SNMP 
+ *                    Agent IPV4 pkts 
+ *  Input           : None 
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPAgtRcvdIpv4Pkt (UINT4 u4Events)
+{
+    UINT1              *pu1PktArray = NULL;
+    UINT1              *pu1SendPkt = NULL;
+    INT4                i4PktSize = SNMP_ZERO;
+    INT4                i4SendSize = SNMP_ZERO;
+    UINT4               u4Len = SNMP_ZERO;
+    INT4                i4Return = SNMP_ZERO;
+    INT4                i4Version = SNMP_ZERO;
+    INT4                Socket = SNMP_ZERO;
+    struct sockaddr_in  SnmpMgrAddr;
+
+    if (u4Events & SNMP_AGT_IPV4PKT_EVT)
+    {
+        Socket = gi4Socket;
+    }
+    else if (u4Events & SNMP_PXY_IPV4PKT_EVT)
+    {
+        Socket = gi4ProxySocket;
+    }
+
+    MEMSET (&SnmpMgrAddr, SNMP_ZERO, sizeof (SnmpMgrAddr));
+    SnmpMgrAddr.sin_family = AF_INET;
+    SnmpMgrAddr.sin_port = OSIX_HTONS (SNMP_ZERO);
+    SnmpMgrAddr.sin_addr.s_addr = OSIX_HTONL (INADDR_ANY);
+    u4Len = sizeof (SnmpMgrAddr);
+
+    pu1PktArray = MemAllocMemBlk (gSnmpDataPoolId);
+    if (pu1PktArray == NULL)
+    {
+        return;
+    }
+    MEMSET (pu1PktArray, 0, MAX_SNMP_DATA_LENGTH);
+    while ((i4PktSize = recvfrom (Socket, pu1PktArray,
+                                  MAX_SNMP_PKT_LEN, 0,
+                                  (struct sockaddr *) &SnmpMgrAddr,
+                                  (socklen_t *) & u4Len)) > 0)
+    {
+        // disable ISS snmp packet handle
+        continue;
+        /* Copying V4 Address */
+        gManagerIpAddr.Ip4MgrAddr = SnmpMgrAddr.sin_addr.s_addr;
+        gManagerIpAddr.u4AddrType = IPVX_ADDR_FMLY_IPV4;
+        gu4ManagerAddr = OSIX_NTOHL (SnmpMgrAddr.sin_addr.s_addr);
+        gu4ManagerPort = OSIX_NTOHS (SnmpMgrAddr.sin_port);
+        SNMP_INR_IN_PKTS;
+        i4Version = SNMPVersionCheck (pu1PktArray, i4PktSize);
+        if (i4Version == VERSION1 || i4Version == VERSION2)
+        {
+            /* V!-V2 or V1-V2-V3 Should be configured */
+            if ((gu4SnmpAllowedVersion != SNMP_V1V2_PDU) &&
+                (gu4SnmpAllowedVersion != SNMP_V1V2V3_PDU))
+            {
+                SNMP_INR_BAD_VERSION;
+                SNMP_INR_SILENT_DROPS;
+                continue;
+            }
+
+            i4Return = SNMPProcess (pu1PktArray, (UINT4) i4PktSize,
+                                    &pu1SendPkt, (UINT4 *) &i4SendSize);
+        }
+        else if (i4Version == VERSION3)
+        {
+            /* V3 or V1-V2-V3 Should be configured */
+            if ((gu4SnmpAllowedVersion != SNMP_V3_PDU) &&
+                (gu4SnmpAllowedVersion != SNMP_V1V2V3_PDU))
+            {
+                SNMP_INR_BAD_VERSION;
+                SNMP_INR_SILENT_DROPS;
+                continue;
+            }
+            i4Return = SNMPV3Process (pu1PktArray, (UINT4) i4PktSize,
+                                      &pu1SendPkt, (UINT4 *) &i4SendSize);
+        }
+        else
+        {
+            SNMP_INR_BAD_ASN_PARSE;
+            SNMP_INR_BAD_VERSION;
+            SNMP_INR_SILENT_DROPS;
+            continue;
+        }
+        if (i4Return == SNMP_SUCCESS)
+        {
+            /* check to avoid empty inform pdu transmission */
+            if (pu1SendPkt != NULL)
+            {
+                /*This Check is added because,snmp socket can be changed
+                   at this point due change in SNMPAGENT PORT ,
+                   Hence send this via new socket */
+                if (u4Events & SNMP_AGT_IPV4PKT_EVT)
+                {
+                    Socket = gi4Socket;
+                }
+                /* Create SnmpMgrAddr from the
+                   Global Manager Address and Port */
+
+                SnmpMgrAddr.sin_addr.s_addr = OSIX_HTONL (gu4ManagerAddr);
+                SnmpMgrAddr.sin_port = OSIX_HTONS (gu4ManagerPort);
+
+                if (sendto (Socket, pu1SendPkt, i4SendSize, SNMP_ZERO,
+                            (struct sockaddr *) &SnmpMgrAddr,
+                            (INT4) u4Len) == SNMP_NOT_OK)
+                {
+                    SNMP_INR_SILENT_DROPS;
+                    SNMPTrace ("SNMP: Unable to send pdu to manager\n");
+                }
+                else
+                {
+                    SNMP_INR_OUT_PKTS;
+                }
+            }
+        }
+    }                            /* End of While */
+    MemReleaseMemBlock (gSnmpDataPoolId, pu1PktArray);
+}
+
+#ifdef IP6_WANTED
+/************************************************************************
+ *  Function Name   : SNMPAgtRcvdIpv6Pkt 
+ *  Description     : This will receive and process the incoming SNMP 
+ *                    Agent IPV6 pkts 
+ *  Input           : None 
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPAgtRcvdIpv6Pkt (UINT4 u4Events)
+{
+    UINT1              *pu1Pkt6Array = NULL;
+    UINT1              *pu1Send6Pkt = NULL;
+    INT4                i4Send6Size = 0;
+    INT4                i4Pkt6Size = 0;
+    UINT4               u4Len6 = 0;
+    INT4                i4Return = SNMP_ZERO;
+    INT4                i4Version = SNMP_ZERO;
+    INT4                Socket = SNMP_ZERO;
+    struct sockaddr_in6 SnmpMgrAddr6;
+
+    MEMSET (&SnmpMgrAddr6, 0, sizeof (SnmpMgrAddr6));
+    SnmpMgrAddr6.sin6_family = AF_INET6;
+    SnmpMgrAddr6.sin6_port = OSIX_HTONS (0);
+    inet_pton (AF_INET6, (const CHR1 *) "0::0",
+               &SnmpMgrAddr6.sin6_addr.s6_addr);
+    u4Len6 = sizeof (SnmpMgrAddr6);
+
+    if (u4Events & SNMP_AGT_IPV6PKT_EVT)
+    {
+        Socket = gi4Socket6;
+    }
+    else if (u4Events & SNMP_PXY_IPV6PKT_EVT)
+    {
+        Socket = gi4ProxySocket6;
+    }
+
+    pu1Pkt6Array = MemAllocMemBlk (gSnmpDataPoolId);
+    if (pu1Pkt6Array == NULL)
+    {
+        return;
+    }
+    MEMSET (pu1Pkt6Array, 0, MAX_SNMP_DATA_LENGTH);
+    while ((i4Pkt6Size = recvfrom (Socket, pu1Pkt6Array,
+                                   MAX_SNMP_PKT_LEN,
+                                   0, (struct sockaddr *) &SnmpMgrAddr6,
+                                   (socklen_t *) & u4Len6)) > 0)
+    {
+        // disable ISS snmp packet handle
+        continue;
+
+        /* Copying V6 Address */
+        MEMCPY (gManagerIpAddr.Ip6MgrAddr, &SnmpMgrAddr6.sin6_addr.s6_addr,
+                sizeof (SnmpMgrAddr6.sin6_addr.s6_addr));
+        gManagerIpAddr.u4AddrType = IPVX_ADDR_FMLY_IPV6;
+
+        SNMP_INR_IN_PKTS;
+        i4Version = SNMPVersionCheck (pu1Pkt6Array, i4Pkt6Size);
+        if (i4Version == VERSION3)
+        {
+            if ((gu4SnmpAllowedVersion != SNMP_V3_PDU) &&
+                (gu4SnmpAllowedVersion != SNMP_V1V2V3_PDU))
+            {
+                SNMP_INR_BAD_VERSION;
+                SNMP_INR_SILENT_DROPS;
+                continue;
+            }
+
+        }
+        else if (i4Version == VERSION1 || i4Version == VERSION2)
+        {
+            if ((gu4SnmpAllowedVersion != SNMP_V1V2_PDU) &&
+                (gu4SnmpAllowedVersion != SNMP_V1V2V3_PDU))
+            {
+                SNMP_INR_BAD_VERSION;
+                SNMP_INR_SILENT_DROPS;
+                continue;
+            }
+        }
+        if (i4Version == VERSION1 || i4Version == VERSION2)
+        {
+            i4Return = SNMPProcess (pu1Pkt6Array, (UINT4) i4Pkt6Size,
+                                    &pu1Send6Pkt, (UINT4 *) &i4Send6Size);
+        }
+        else if (i4Version == VERSION3)
+        {
+            i4Return = SNMPV3Process (pu1Pkt6Array, (UINT4) i4Pkt6Size,
+                                      &pu1Send6Pkt, (UINT4 *) &i4Send6Size);
+        }
+        else
+        {
+            SNMP_INR_BAD_ASN_PARSE;
+            SNMP_INR_BAD_VERSION;
+            SNMP_INR_SILENT_DROPS;
+            continue;
+        }
+        if (i4Return == SNMP_SUCCESS)
+        {
+            /* check to avoid empty inform pdu transmission */
+            if (pu1Send6Pkt != NULL)
+            {
+                if (sendto (Socket, pu1Send6Pkt, i4Send6Size,
+                            SNMP_ZERO, (struct sockaddr *) &SnmpMgrAddr6,
+                            (INT4) u4Len6) == SNMP_NOT_OK)
+                {
+                    SNMP_INR_SILENT_DROPS;
+                    SNMPTrace ("SNMP: Unable to send pdu to manager\n");
+                }
+                else
+                {
+                    SNMP_INR_OUT_PKTS;
+                }
+            }
+        }
+    }                            /* End of While */
+    MemReleaseMemBlock (gSnmpDataPoolId, pu1Pkt6Array);
+}
+#endif
+
+/************************************************************************
+ *  Function Name   : SNMPGetManagerAddr 
+ *  Description     : This will return a Manager Address 
+ *  Input           : None 
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+UINT4
+SNMPGetManagerAddr ()
+{
+    return gu4ManagerAddr;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPGetManagerPort 
+ *  Description     : This will return a Manager Port 
+ *  Input           : None 
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+UINT4
+SNMPGetManagerPort ()
+{
+    return gu4ManagerPort;
+}
+
+/*********************************************************************
+ *  Function Name : SNMPSetManagerAddr
+ *  Description   : This function sets target address 
+ *  Parameter(s)  : u4ManagerAddr - Targt Address 
+ *  Return Values : VOID
+ *********************************************************************/
+
+VOID
+SNMPSetManagerAddr (UINT4 u4ManagerAddr)
+{
+    gu4ManagerAddr = u4ManagerAddr;
+
+}
+
+/*********************************************************************
+ *  Function Name : SNMPSetManagerPort
+ *  Description   : This function sets target port 
+ *  Parameter(s)  : u4ManagerPort - Target port 
+ *  Return Values : VOID
+ *********************************************************************/
+
+VOID
+SNMPSetManagerPort (UINT4 u4ManagerPort)
+{
+    gu4ManagerPort = u4ManagerPort;
+
+}
+
+/************************************************************************
+ *  Function Name   : SNMPSendTrapToManager 
+ *  Description     : Function to open a socket and send the trap to manager
+ *  Input           : pu1Msg - Data Pointer
+ *                    i4MsgLen - Data Length, u4Addr - Manager Address 
+ *                    u2Port - Manager Port
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPSendTrapToManager (UINT1 *pu1Msg, INT4 i4MsgLen, UINT4 u4Addr, UINT2 u2Port)
+{
+    INT4                i4Sock = SNMP_NOT_OK;
+    struct sockaddr_in  SockAddr;
+
+    i4Sock = socket (AF_INET, SOCK_DGRAM, SNMP_ZERO);
+    if (i4Sock < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Open Socket for Trap\n");
+        SNMP_INR_OUT_GEN_ERROR;
+        return;
+    }
+
+    MEMSET (&SockAddr, SNMP_ZERO, sizeof (SockAddr));
+    SockAddr.sin_family = AF_INET;
+    SockAddr.sin_port = OSIX_HTONS (u2Port);
+    SockAddr.sin_addr.s_addr = OSIX_HTONL (u4Addr);
+    if (sendto (i4Sock, pu1Msg, i4MsgLen, SNMP_ZERO,
+                (struct sockaddr *) &SockAddr,
+                sizeof (SockAddr)) == SNMP_NOT_OK)
+    {
+        SNMP_INR_OUT_GEN_ERROR;
+        SNMPTrace ("SNMP: Unable to send trap to manager on V4 socket\n");
+
+    }
+    else
+    {
+        SNMP_INR_OUT_TRAP_SUCCESS;
+    }
+    close (i4Sock);
+    return;
+}
+
+#ifdef IP6_WANTED
+/************************************************************************
+ *  Function Name   : SNMPSendTrap6ToManager 
+ *  Description     : Function to open IP6 socket and send the trap to manager
+ *  Input           : pu1Msg - Data Pointer
+ *                    i4MsgLen - Data Length,         
+ *                    pIp6Addr - Manager IP6 Address 
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPSendTrap6ToManager (UINT1 *pu1Msg, INT4 i4MsgLen,
+                        tSNMP_OCTET_STRING_TYPE * pIp6Addr)
+{
+    INT4                i4Sock6 = SNMP_NOT_OK;
+    struct sockaddr_in6 Sock6Addr;
+
+    i4Sock6 = socket (AF_INET6, SOCK_DGRAM, SNMP_ZERO);
+    if (i4Sock6 < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Open V6 Socket for Trap\n");
+        SNMP_INR_OUT_GEN_ERROR;
+        return;
+    }
+
+    MEMSET (&Sock6Addr, SNMP_ZERO, sizeof (Sock6Addr));
+    Sock6Addr.sin6_family = AF_INET6;
+    Sock6Addr.sin6_port = (UINT2) OSIX_HTONS (SNMP_MANAGER_PORT);
+    MEMCPY (Sock6Addr.sin6_addr.s6_addr, pIp6Addr->pu1_OctetList,
+            sizeof (Sock6Addr.sin6_addr.s6_addr));
+
+    if (sendto (i4Sock6, pu1Msg, i4MsgLen, SNMP_ZERO,
+                (struct sockaddr *) &Sock6Addr,
+                sizeof (Sock6Addr)) == SNMP_NOT_OK)
+    {
+        SNMP_INR_OUT_GEN_ERROR;
+        SNMPTrace ("SNMP: Unable to send trap to manager on V6 socket\n");
+    }
+    else
+    {
+        SNMP_INR_OUT_TRAP_SUCCESS;
+    }
+    close (i4Sock6);
+    return;
+}
+#endif
+
+/************************************************************************
+ *  Function Name   : SNMPChangeListenPort 
+ *  Description     : Function to change the Listen Port
+ *  Input           : i4Port - Port to be Change 
+ *  Output          : None 
+ *  Returns         : SNMP_SUCCESS 
+ ************************************************************************/
+INT4
+SNMPChangeListenPort (INT4 i4Port)
+{
+    INT4                i4RetVal = SNMP_SUCCESS;
+    INT4                i4LocalSockId = SNMP_NOT_OK;
+#if defined (IP6_WANTED) 
+    INT4                i4V6SockId = SNMP_NOT_OK;
+    INT4                i4Status = SNMP_SUCCESS;
+#endif
+    INT2                i2Port = (INT2) i4Port;
+    struct sockaddr_in  sinLocalAddress;
+
+    MEMSET (&sinLocalAddress, SNMP_ZERO, sizeof (sinLocalAddress));
+    sinLocalAddress.sin_family = AF_INET;
+    sinLocalAddress.sin_addr.s_addr = OSIX_HTONL (INADDR_ANY);
+    sinLocalAddress.sin_port = (UINT2) OSIX_HTONS (i2Port);
+    i4LocalSockId = socket (AF_INET, SOCK_DGRAM, SNMP_ZERO);
+    if (i4LocalSockId < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Create Socket\n");
+        return SNMP_FAILURE;
+    }
+    i4RetVal = bind (i4LocalSockId,
+                     (struct sockaddr *) &sinLocalAddress,
+                     sizeof (sinLocalAddress));
+    if (i4RetVal < SNMP_ZERO)
+    {
+        close (i4LocalSockId);
+        i4LocalSockId = -1;
+        SNMPTrace ("SNMP:Unable to Bind Socket\n");
+        return SNMP_FAILURE;
+    }
+    if (fcntl (i4LocalSockId, F_SETFL, O_NONBLOCK) < 0)
+    {
+        close (i4LocalSockId);
+        i4LocalSockId = -1;
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        return SNMP_FAILURE;
+    }
+    if (SelAddFd (i4LocalSockId, SNMPPacketOnSocket) != OSIX_SUCCESS)
+    {
+        SNMPTrace
+            ("SNMP : Adding Socket Descriptor to Select utility Failed \r\n");
+        close (i4LocalSockId);
+        i4LocalSockId = -1;
+        return SNMP_FAILURE;
+    }
+
+#if defined (IP6_WANTED)
+    i4Status = SNMPSock6InitOnPort (i2Port, &i4V6SockId);
+    if (i4Status == SNMP_FAILURE)
+    {
+        SelRemoveFd (i4LocalSockId);
+        close (i4LocalSockId);
+        i4LocalSockId = -1;
+        SNMPTrace
+            ("SNMP: Unable to change the lister socket for ipv6 address\r\n");
+        return SNMP_FAILURE;
+    }
+    if (gi4Socket6 > -1)
+    {
+        SelRemoveFd (gi4Socket6);
+        close (gi4Socket6);
+    }
+    gi4Socket6 = i4V6SockId;
+
+#endif
+
+    if (gi4Socket > -1)
+    {
+        SelRemoveFd (gi4Socket);
+        close (gi4Socket);
+        gi4Socket = -1;
+    }
+
+    gi4Socket = i4LocalSockId;
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPChangeProxyListenPort 
+ *  Description     : Function to change the Proxy Listen Port
+ *  Input           : i4Port - Port to be Change 
+ *  Output          : None 
+ *  Returns         : SNMP_SUCCESS 
+ ************************************************************************/
+INT4
+SNMPChangeProxyListenPort (INT4 i4Port)
+{
+    INT4                i4RetVal = SNMP_SUCCESS;
+    INT4                i4LocalSockId = SNMP_NOT_OK;
+    INT2                i2Port = (INT2) i4Port;
+
+    struct sockaddr_in  sinLocalAddress;
+
+    if (gi4ProxySocket > -1)
+    {
+        SelRemoveFd (gi4ProxySocket);
+        close (gi4ProxySocket);
+        gi4ProxySocket = -1;
+    }
+
+    MEMSET (&sinLocalAddress, SNMP_ZERO, sizeof (sinLocalAddress));
+    sinLocalAddress.sin_family = AF_INET;
+    sinLocalAddress.sin_addr.s_addr = OSIX_HTONL (INADDR_ANY);
+    sinLocalAddress.sin_port = (UINT2) OSIX_HTONS (i2Port);
+    i4LocalSockId = socket (AF_INET, SOCK_DGRAM, SNMP_ZERO);
+    if (i4LocalSockId < SNMP_ZERO)
+    {
+        SNMPTrace ("SNMP:Unable to Create Socket\n");
+        return SNMP_FAILURE;
+    }
+    i4RetVal = bind (i4LocalSockId,
+                     (struct sockaddr *) &sinLocalAddress,
+                     sizeof (sinLocalAddress));
+    if (i4RetVal < SNMP_ZERO)
+    {
+        close (i4LocalSockId);
+        SNMPTrace ("SNMP:Unable to Bind Socket\n");
+        return SNMP_FAILURE;
+    }
+    gi4ProxySocket = i4LocalSockId;
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPGetRemoteManagerIpAddr
+ *  Description     : This will return a Manager Address
+ *  Input           : pMgrIpAddr
+ *  Output          : None
+ *  Returns         : None
+ ************************************************************************/
+VOID
+SNMPGetRemoteManagerIpAddr (tMgrIpAddr * pMgrIpAddr)
+{
+    *pMgrIpAddr = gManagerIpAddr;
+}
+
+/******************************************************************************
+ * Function Name   : SNMPPacketOnSocket
+ * Description     : Call back function from SelAddFd(), when SNMP packet is
+ *                   received
+ * Inputs          : None
+ * Output          : Sends an event to SNMP task
+ * Returns         : None.
+ ******************************************************************************/
+VOID
+SNMPPacketOnSocket (INT4 i4SockFd)
+{
+    if (i4SockFd == gi4Socket)
+    {
+        if (OsixSendEvent
+            (SELF, (const UINT1 *) SNMP_TASK_NAME,
+             SNMP_AGT_IPV4PKT_EVT) != OSIX_SUCCESS)
+        {
+            SNMPTrace ("SNMP: Event send Failed\r\n");
+        }
+    }
+
+    if (i4SockFd == gi4ProxySocket)
+    {
+        if (OsixSendEvent
+            (SELF, (const UINT1 *) SNMP_TASK_NAME,
+             SNMP_PXY_IPV4PKT_EVT) != OSIX_SUCCESS)
+        {
+            SNMPTrace ("SNMP: Event send Failed\r\n");
+        }
+    }
+#ifdef IP6_WANTED
+    if (i4SockFd == gi4Socket6)
+    {
+        if (OsixSendEvent
+            (SELF, (const UINT1 *) SNMP_TASK_NAME,
+             SNMP_AGT_IPV6PKT_EVT) != OSIX_SUCCESS)
+        {
+            SNMPTrace ("SNMP: Event send Failed\r\n");
+        }
+    }
+
+    if (i4SockFd == gi4ProxySocket6)
+    {
+        if (OsixSendEvent
+            (SELF, (const UINT1 *) SNMP_TASK_NAME,
+             SNMP_PXY_IPV6PKT_EVT) != OSIX_SUCCESS)
+        {
+            SNMPTrace ("SNMP: Event send Failed\r\n");
+        }
+    }
+#endif
+}
+
+/************************************************************************
+ *  Function Name   : SNMPAgentInit 
+ *  Description     : Do the initialization required for SNMP Agent 
+ *  Input           : None 
+ *  Output          : None 
+ *  Returns         : None 
+ ************************************************************************/
+INT4
+SNMPAgentInit (VOID)
+{
+    if (gi4Socket == SNMP_NOT_OK)
+    {
+        if (SnmpSockInit (&gi4Socket) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    if (gi4ProxySocket == SNMP_NOT_OK)
+    {
+        if (SnmpProxySockInit (&gi4ProxySocket) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+#if defined (IP6_WANTED) 
+    if (gi4Socket6 == SNMP_NOT_OK)
+    {
+        if (SnmpSock6Init (&gi4Socket6) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+    if (gi4ProxySocket6 == SNMP_NOT_OK)
+    {
+        if (SnmpProxySock6Init (&gi4ProxySocket6) == SNMP_FAILURE)
+        {
+            return SNMP_FAILURE;
+        }
+    }
+#endif
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPAgentDeInit 
+ *  Description     : Do the de-initialization of  SNMP Agent 
+ *  Input           : None 
+ *  Output          : None 
+ *  Returns         : None 
+ ************************************************************************/
+INT4
+SNMPAgentDeInit (VOID)
+{
+    /* Stop all SNMP timers running */
+    SnmpStopTimers ();
+
+    /* Close sockets only if they are valid */
+    if (gi4Socket != -1)
+    {
+        /* close the agent socket Descriptor */
+        SelRemoveFd (gi4Socket);
+        close (gi4Socket);
+        gi4Socket = -1;
+    }
+
+    if (gi4ProxySocket != -1)
+    {
+        SelRemoveFd (gi4ProxySocket);
+        close (gi4ProxySocket);
+        gi4ProxySocket = -1;
+    }
+
+#ifdef IP6_WANTED
+    if (gi4Socket6 != -1)
+    {
+        SelRemoveFd (gi4Socket6);
+        close (gi4Socket6);
+        gi4Socket6 = -1;
+    }
+
+    if (gi4ProxySocket6 != -1)
+    {
+        SelRemoveFd (gi4ProxySocket6);
+        close (gi4ProxySocket6);
+        gi4ProxySocket6 = -1;
+    }
+#endif
+
+    MEMSET (&gSnmpStat, 0, sizeof (tSNMP_STAT));
+    return SNMP_SUCCESS;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPShutdown 
+ *  Description     : Function to Shutdown Agent Operations 
+ *  Input           : None 
+ *  Output          : None 
+ *  Returns         : None 
+ ************************************************************************/
+VOID
+SNMPShutdown ()
+{
+    UINT4               u4Count = SNMP_ZERO;
+
+    SNMP_DELETE_SEMAPHORE ();
+    SNMP_GETNEXT_DELETE_SEMAPHORE();
+    SNMP_DELETE_DB_SEMAPHORE ();
+
+    /* Delete the SNMP Task */
+    if (OsixDeleteTask (SELF, (const UINT1 *) SNMP_TASK_NAME) == OSIX_FAILURE)
+    {
+        SNMPTrace ("SNMP:Unable to Delete the SNMP Agent Task\n");
+        return;
+    }
+    /* close the agent socket Descriptor */
+
+    if (gi4Socket != -1)
+    {
+        SelRemoveFd (gi4Socket);
+        close (gi4Socket);
+        gi4Socket = -1;
+    }
+
+    if (gi4ProxySocket != -1)
+    {
+        SelRemoveFd (gi4ProxySocket);
+        close (gi4ProxySocket);
+        gi4ProxySocket = -1;
+    }
+
+#ifdef IP6_WANTED
+
+    if (gi4Socket6 != -1)
+    {
+        SelRemoveFd (gi4Socket6);
+        close (gi4Socket6);
+        gi4Socket6 = -1;
+    }
+
+    if (gi4ProxySocket6 != -1)
+    {
+        SelRemoveFd (gi4ProxySocket6);
+        close (gi4ProxySocket6);
+        gi4ProxySocket6 = -1;
+    }
+#endif
+
+    SYS_LOG_DEREGISTER ((UINT4) gi4SnmpSysLogId);
+
+    /* Memset the Sysor Table */
+    MEMSET (gaSnmpSysorTable, SNMP_ZERO, sizeof (gaSnmpSysorTable));
+    for (u4Count = SNMP_ZERO; u4Count < MAX_SYSOR_TABLE_ENTRY; u4Count++)
+    {
+        gaSnmpSysorTable[u4Count].i4Status = SNMP_INACTIVE;
+    }
+}
+
+/************************************************************************
+ *  Function Name   : SNMPIsMibRestoreInProgress
+ *  Description     : Function to test whether MSR Restoration is in 
+ *                    Progress or Not.
+ *  Input           : None 
+ *  Output          : None 
+ *  Returns         : SNMP_TRUE or SNMP_FALSE
+ ************************************************************************/
+INT1
+SNMPIsMibRestoreInProgress (VOID)
+{
+#ifdef MSR_WANTED
+    if (MsrIsMibRestoreInProgress () == MSR_TRUE)
+    {
+        return SNMP_TRUE;
+    }
+#endif
+    return SNMP_FALSE;
+}
+
+/************************************************************************
+ *  Function Name   : SNMPIndexMangerListInit
+ *  Description     : Function to initilize the index manager list for the
+ *                    SNMP Mib Registration. 
+ *  Input           : None 
+ *  Output          : None 
+ *  Returns         : SNMP_SUCCESS/SNMP_FAILURE
+ ************************************************************************/
+
+INT4
+SNMPIndexMangerListInit (VOID)
+{
+    UINT4               u4StartIndex = 0;
+    UINT4               u4EndIndex = SNMP_MAX_NUM_OF_MIBS - 1;
+    UINT1               u1Type = INDEX_MGR_INCR_HOLES_TYPE;
+
+    if (IndexManagerInitList (u4StartIndex, u4EndIndex, gau1MibRegBitMap,
+                              u1Type, &gMibRegIndexMgrId) == INDEX_FAILURE)
+    {
+
+        return SNMP_FAILURE;
+    }
+
+    if (SNMP_CREATE_DB_SEMAPHORE () == OSIX_FAILURE)
+    {
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+#endif /* __SNMPMAIN_C_ */
+/********************  END OF FILE   ***************************************/

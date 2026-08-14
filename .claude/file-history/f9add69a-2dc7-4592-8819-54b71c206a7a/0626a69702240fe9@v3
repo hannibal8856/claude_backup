@@ -1,0 +1,376 @@
+# Confluence 補貼清單(2026-08-10)
+
+基準:你 11:44 匯出的 PDF(Confluence 現況)。以下 **11 塊**(B0–B10)是現況缺少或需要修正的。
+每一塊都獨立,可以分開貼、順序不拘 —— 但 **B1 接在 B0 後面**、**B3 接在 B2 後面**、**B10 接在 B9 之後的段落**一起處理比較順。
+
+貼法:編輯頁面 → 游標移到指定位置 → **Insert → Markup(Ctrl+Shift+D)→ Markdown** → 貼下方 `====` 之間的內容。
+
+> ⚠️ **B6 / B7 / B8 是取代,不是新增** —— 要先刪掉舊句子再貼。B7 更是純手改,不用貼 Markdown。
+
+**一覽**
+
+| 塊 | 動作 | 章節 |
+|---|---|---|
+| B0 | 新增 | Comparison → Maintenance:兩道關卡內文 |
+| B1 | 新增 | Comparison → Maintenance:已知缺陷表 |
+| B2 | 新增 | Maintenance:升級 net-snmp |
+| B3 | 新增 | Maintenance:新增 OID 的 SOP |
+| B4 | 新增 | Maintenance:抓 AgentX 封包 |
+| B5 | 新增 | Appendix B:四塊明細 |
+| B6 | **取代** | Next:補回 stall 複驗那條 |
+| B7 | **手改** | Next:移除兩處 ADR 字樣 |
+| B8 | **取代** | FAQ Q2:結尾那段(過時 + 出現「中位數」)|
+| B9 | 新增 | Original Architecture:四條路對照表 + 代價註 |
+| B10 | 新增 | Original Architecture:註 1 / 註 2 |
+
+---
+
+## B0 —— 「搬遷前的兩道關卡」的內文
+
+**插入位置**:`Comparison → Maintenance` → 標題「搬遷前的兩道關卡」底下(目前那裡是空的)
+
+**為什麼要補**:標題還在但內文全空;而且 `Performance` 的效益分布表註解、`Next` 的「剩餘候選以兩道關卡重新排序」兩處都引用它。
+
+```
+====================== 以下開始貼 ======================
+```
+
+(順序不可顛倒)
+
+1. **ISS / framework 是否真的服務這些 OID** —— 讀 `<mod>db.h` 的分支涵蓋,**不是**看 `tSNMP_OID_TYPE` root 的長度(那只是 SysORTable 標籤)。
+2. **walk 是否夠慢** —— 秒級才有搬遷價值;若原本就在 1 秒內,搬了無益甚至有害。
+
+> 這兩道關卡是踩過坑之後補上的:早期只看「RO 數量 / 有無資料 / 表格形狀」,挑出了搬完反而少 12 個 OID 的候選,白跑一輪完整循環。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B1 —— 「已知缺陷與運作注意事項」表
+
+**插入位置**:緊接在 B0 之後,`FAQ` 標題之前
+
+**為什麼要補**:下方 `Maintenance` 章節開頭那句「搬遷流程、篩選關卡與**已知缺陷**見 Comparison → Maintenance」現在指向一個不存在的段落。
+
+```
+====================== 以下開始貼 ======================
+```
+
+**已知缺陷與運作注意事項**
+
+| 項目 | 說明 | 影響 |
+|---|---|---|
+| 委派表的第 1 欄在連續 walk 中消失 | 若 in-master 保留的可寫欄是該表第一欄 | 連續 walk;**定點 walk 與 exact GET 不受影響**。已確認 **mainline 同樣存在**,非本案引入 |
+| AgentX ping 同步阻塞 | ping 與回應請求在同一個工作序上 | interval 已由 5 秒改為 30 秒;代價是最多 30 秒才察覺 master 消失 |
+| 首次請求 stall 約 10 秒 | 2026-08-06 可重複重現,根因未確認 | 近期量測未再出現,**待專門複驗**(見 Next)|
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B2 —— Maintenance:升級 net-snmp
+
+**插入位置**:`Maintenance`(最外層那個)→ 開頭那句「本節記錄日常維運與除錯的手法……」之後,**「除錯手法:以 hot-swap 替換 binary,免燒錄」之前**
+
+**為什麼要補**:這是「導入 AgentX 沒有增加維護成本」最直接的證據 —— 對主管的說服力在這一節。
+
+```
+====================== 以下開始貼 ======================
+```
+
+### 升級 net-snmp
+
+**維護成本與導入前一樣。** 因為本案**未修改 net-snmp 任何一行原始碼**,升級流程與過去每一次相同:
+
+1. 把 `dl/3rdparty_net_snmp/net-snmp-5.9.3/` 換成新版本的資料夾。
+2. 重新套用既有的 patch —— 目前只有一個 `agent_make.patch`(在 `agent/Makefile` 補一行 `LIBS += $(PATCH_LDPATH)`)。
+3. 不必更動掛載方式:`ies-auto-mibs` 是以 `ln -sf` 掛進 `agent/mibgroup/`,配置行維持不變:
+
+```
+--with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy
+                    agentx/master agentx/subagent"
+```
+
+導入 AgentX 只是在這一行**多加了 `agentx/subagent` 一個字串**,沒有引入新的相依或修補。
+
+> **一個遺憾**:`ies-auto-mibs` 仍必須留下來繼續服務。它同時承擔 OID 對映表與 in-master 的 SET 路徑,兩者都還沒有替代方案,因此升級 net-snmp 時仍需確認它能在新版本上編譯通過。這是目前尚未消除的耦合。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B3 —— Maintenance:新增一個 OID 的 SOP
+
+**插入位置**:緊接在 B2 之後,仍在「除錯手法:以 hot-swap……」之前
+
+```
+====================== 以下開始貼 ======================
+```
+
+### 新增一個 OID 的 SOP
+
+**先問一個問題:這筆資料在誰手上?** 答案決定後面所有步驟。
+
+| 資料位置 | 走哪條路 |
+|---|---|
+| snmpd 行程內(可直接算或呼叫 shared library) | 維持 in-application |
+| framework 的 config / status layer | framework subagent |
+| ISS 內部變數 | ISS subagent |
+
+**共同步驟**
+
+1. **先改 MIB 檔** —— MIB 是 OID 的權威來源,不是程式碼。新增的物件要先在 MIB 裡定義,含 `MAX-ACCESS`(`read-only` / `read-write` / `not-accessible`)。
+2. **在 `ies-auto-mibs/net_<mib>.h` 新增 entry** —— 填 `.uri`、`.oid_list`、`.val_type`、`.mode`(`HANDLER_CAN_RONLY` / `HANDLER_CAN_RWRITE`)、`.iss_build`。這張表仍是 OID ↔ URI 的對映正本。
+3. **依資料位置接上服務者**:
+   - **framework** → 在 framework subagent 以 `table_iterator` 註冊該表(**註冊為唯讀**);SET 不需額外處理,會自動落回 in-master。
+   - **ISS** → 先確認 ISS 真的服務該 OID(讀 `<mod>db.h` 的分支涵蓋),再於 `agentx_owned.list` 加一行 URI 前綴。
+   - **in-application** → 實作取值 handler,無須其他動作。
+4. **驗證** —— 走 Test 章節的五步驟:靜態檢查 → 基線 walk → 套用 → 逐字 diff → mainline 對照。
+
+**三個常見錯誤**
+
+- 只改了程式碼沒改 MIB,導致 MIB 與實作不一致。
+- 把 `not-accessible` 的 index 欄實作成可讀 —— 違反 SMI。
+- 假設「ISS 的註冊 root 有涵蓋就等於有服務」—— 那個 root 只是 SysORTable 標籤,必須看 `db.h` 的實際分支。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B4 —— Maintenance:抓 AgentX 封包
+
+**插入位置**:`Maintenance` → **「除錯手法:以 hot-swap 替換 binary,免燒錄」整節的最後面**(注意事項表格之後)
+
+**標題已配合你的寫法**:你把原本的「3. Trouble shooting / (1)」壓平成「除錯手法:……」,所以這節也用同樣句型,不再引入編號。
+
+```
+====================== 以下開始貼 ======================
+```
+
+### 除錯手法:抓 AgentX 封包,確認請求跑去哪了
+
+當一顆 OID 回錯值、回 `No Such Object`、或慢得莫名其妙時,**第一件要確認的事是它有沒有離開 snmpd**。AgentX 走的是 loopback 的 TCP 705,直接抓就看得到。
+
+在 DUT 上開一個 terminal 錄封包:
+
+```bash
+tcpdump -i lo -w /tmp/agentx_trace.pcap tcp port 705
+```
+
+另一個 terminal(或從開發主機)發出查詢:
+
+```bash
+snmpget -v2c -c public -On <DUT_IP> <OID>
+```
+
+停止錄製後把 pcap 取回分析。**判讀方式**:
+
+| 觀察到 | 代表 |
+|---|---|
+| **`lo:705` 上完全沒有封包** | 這顆 OID 由 in-master 服務,沒有走 AgentX |
+| 有封包,且 request / response 成對 | subagent 有回應 —— 問題在取值內容或延遲 |
+| 有 request 但沒有 response | subagent 卡住或當掉,snmpd 會等到逾時 |
+| 同一個 OID 反覆重送 | 觸發了 snmpd 的 AgentX 逾時重試 |
+
+**這一招最常用來回答**:「這顆 OID 現在到底是誰在服務?」—— 因為 walk 的輸出在兩種來源下可能逐位元組相同,**光看回應分不出來**,必須看封包。
+
+> 若要進一步分辨是哪一個 subagent,可挑一顆「確定只有該 subagent 服務」的鄰近 OID 當對照組,一起抓再比對。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B5 —— Appendix B 的四塊明細
+
+**插入位置**:`Appendix B —— OID 與四條路的對應` → 現有那張總覽表之後、`Appendix C` 之前
+
+**為什麼要補**:目前 Appendix B 只剩總覽表。而「問題」章節結尾那句「四種處理方式的**細節**與 OID 對應請見 Original Architecture 與 Appendix B」指的就是這幾張表。
+
+```
+====================== 以下開始貼 ======================
+```
+
+> `iss_build == 1` 的 1,391 筆,與 DUT 上實測「ISS 服務 1391 個 OID」完全吻合 —— 兩個獨立來源互相印證。
+
+**走 ISS 的前 10 大(委派候選的來源)**
+
+| MIB 定義檔 | entry | URI 前綴 | 狀態 |
+|---|---|---|---|
+| `net_stdrmodb.h` | 167 | `stdrmodb` | **已否決** —— 產品未提供 RMON |
+| `net_stdospdb.h` | 115 | `stdospdb` | 未評估 |
+| `net_stdipdb.h` | 78 | `stdipdb` | 未評估 |
+| `net_stdpnadb.h` | 77 | `stdpnadb` | 未評估 |
+| `net_stdpnodb.h` | 76 | `stdpnodb` | 未評估 |
+| `net_stdvladb.h` | 58 | `stdvladb` | 未評估 |
+| `net_stdbridb.h` | 55 | `stdbridb` | 未評估 |
+| `net_stdladb.h` | 55 | `stdladb` | **已否決** —— 委派後淨損 12 個 OID |
+| `net_stdllddb.h` | 48 | `stdllddb` | 未評估 |
+| `net_ifmibdb.h` | 47 | `ifmibdb` | **已委派** |
+
+**走 framework 的前 10 大**
+
+| MIB 定義檔 | entry | URI 前綴 |
+|---|---|---|
+| `net_mx_event_switching.h` | 205 | `gooseCheckEvent` |
+| `net_mx_event_general.h` | 90 | `commonSystemEvent` |
+| `net_mx_event_port.h` | 80 | `portEvent` |
+| `net_mx_event_routing.h` | 78 | `bfdEvent` |
+| `net_mx_event_poe.h` | 54 | `poeEvent` |
+| `net_mx_dhcpSrv.h` | 44 | `dhcpServer` |
+| `net_mx_event_hardware.h` | 36 | `intelTempCtrlEvent` |
+| `net_mx_turboring_v2.h` | 29 | `stat` |
+| `net_mx_event_tracking.h` | 24 | `mxtrackingEvent` |
+| `net_mx_portmirror.h` | 18 | `portMirror` |
+
+> 走 framework 的前幾大幾乎都是**事件類 MIB**(`*Event`),合計逾 560 個 entry。
+
+**目前已委派給 ISS subagent 的**
+
+```
+ifmibdb/    +getfwd      ← 另開啟 RW 欄的 GET 轉發
+stdethdb/
+mxportdb/
+mxrstpdb/
+```
+
+`+getfwd` 是逐群組的 opt-in:轉發不是免費的,只在該群組的 RW 欄本地讀取確實較慢時才開。mxPort 曾實測轉發反而讓整棵 walk 慢 13.5%(0.694 s → 0.788 s),因此未開。
+
+**dlmod 的 37 個 plugin**
+
+```
+config_encryption  dai  dhcp_relay  dhcpsnp  eip  fiber_check  fiber_check_event
+iec62439_2  ieee8021mstp  ipsg  locator_command  macsec  mms_setting  modbus_tcp
+moxa_1588  moxa_c37_238  moxa_goose_check  moxa_iec61850  moxa_ptp
+multicast_routing  mxlp  mxMcp  mxmstp  poe  profinet  ptpbase  relay
+relay_command  status_iec62439_2  status_mxlp  status_system_information
+system_information  system_utilization  time_info  time_setting  time_zone
+ui_service_management
+```
+
+以 `dlmod <name> /etc/moxa/netsnmp/plugin/*.so` 的形式登記於 `/etc/moxa/netsnmp/config/*.conf`。
+**`mms_setting` 已完成搬遷至 framework subagent**(第一個案例);下一個目標是 `fiber_check`。
+
+> **統計方法**:掃描 `ies-auto-mibs/net_*.h` 中的 `.uri` 與 `.iss_build` 欄位;dlmod 取自
+> `output/target/etc/moxa/netsnmp/plugin/`。此為**靜態統計**,反映註冊意圖而非執行期實際歸屬 ——
+> 一支 MIB 是否真的被 ISS 服務,仍須逐案以 walk 與 pcap 確認(見 Comparison → Maintenance 的兩道關卡)。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B6 —— Next:補回第一項(**取代**,不是新增)
+
+**位置**:`Next` → 「必須先解決的」
+
+**動作**:現在這一欄只有「跨週末長時間壓力測試」一條。請在它**前面**加一條。
+
+```
+====================== 以下開始貼 ======================
+```
+
+- **確認「首次請求 stall 約 10 秒」是否已消失。** 此現象在 2026-08-06 的量測中可重複重現,根因當時未確認。**近期的 walk 量測(4 個 group × 5 次)最壞值介於 0.67–0.95 秒,未再出現 10 秒等級的離群** —— 高度顯示問題已隨後續修正一併消除,但**尚未做過專門的複驗**。建議重跑一次當初的量測腳本確認,並補記根因。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B7 —— 移除兩處 ADR 字樣(**必改**)
+
+**位置**:`Next`
+
+現在的頁面還留著 ADR 字樣,違反「報告不提 ADR」。兩處都是**手改一句話**,不用貼 Markdown:
+
+| 位置 | 現在寫的 | 改成 |
+|---|---|---|
+| Next → 繼續推進收斂 → 第 3 點 | 收斂終局尚未定案。全面收斂的 **ADR** 目前仍是 **Proposed**,需要決定… | 收斂終局尚未定案。全面收斂的**計畫仍在提案階段**,需要決定… |
+| Next → 已定位、值得另案處理的 → 第 3 點 | …真正原因目前未知(**ADR-0018**)。 | …真正原因目前未知。 |
+
+---
+
+## B8 —— FAQ Q2 結尾那段(**取代**,不是新增)
+
+**位置**:`FAQ → Q2:ISS 的 AgentX 會不會不穩?` 的**最後一段**
+
+**為什麼**:頁面上這段是舊的,有兩個問題 ——
+① 說「已列為最優先待解項目」,但近期量測其實已經沒再出現,說法過時且對外偏negative;
+② 出現「**中位數**」字樣,違反「對外一律用 平均 / 最壞 / >50 ms 佔比,不用中位數」。
+
+**先刪掉整段**:「還在追蹤的一項:每輪第一次請求 stall 約 10 秒……已列為最優先待解項目,見 Next。」再貼下面這段。
+
+```
+====================== 以下開始貼 ======================
+```
+
+**一項待確認**:2026-08-06 曾觀察到每輪第一次請求 stall 約 10 秒,可重複重現,根因未確認。**近期的 walk 量測(4 個 group × 5 次)最壞值介於 0.67–0.95 秒,未再出現該現象**,顯示問題可能已隨後續修正消除 —— 但尚未做過專門複驗,仍列在 **Next**。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B9 —— Original Architecture:四條路對照表 + 代價排序註
+
+**插入位置**:`Original Architecture → 四條路` → 開頭那句「snmpd 收到一個 GET……分成四條路。」**與那張四條路圖之後**、「怎麼讀這張圖 —— 三句話」**之前**
+
+**為什麼要補**:目前這一節只剩一句話和一張圖,四條路各自的成本結構沒有文字說明。
+
+```
+====================== 以下開始貼 ======================
+```
+
+**四條路各自做什麼**
+
+| 路 | 資料在誰那裡 | 怎麼拿到 | 代價(實測) |
+|---|---|---|---|
+| ① 在 snmpd 內取值 | ies-auto-mibs 內建 | 行程內直接讀,或呼叫 shared library | **快(ns 等級)** |
+| ② 問 ISS | ISS 內部變數 | 呼叫函式庫 → **寫成檔案 → 再讀回來** | **最慢** |
+| ③ 問 framework | config / status layer | **啟動外部程式** → HTTP → nginx → actix-web → **寫成檔案 → 再讀回來** | 慢 |
+| ④ dlmod | config / status layer | snmpd 行程內直接呼叫 → HTTP → nginx → actix-web | 中等 |
+
+> **代價的排序依實測,不依「做了多少事」。** ③ 帳面上比 ② 多一次 fork+exec,但實際最慢的是 ② —— 這也是改善幅度最大的一條(mxRstp 每 varbind 131.9 ms → 2.9 ms)。程式碼註解中記載的 ~600 ms 慢路徑,指的正是 ② 的 ISS value-file 取值。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## B10 —— Original Architecture:註 1 / 註 2
+
+**插入位置**:`Original Architecture → 四條路` → 「怎麼讀這張圖 —— 三句話」的第 3 點之後、「**一個容易被忽略的成本**」之前
+
+```
+====================== 以下開始貼 ======================
+```
+
+> 註 1:② 原本也是啟動外部程式,已改為在行程內直接呼叫同一組函式庫(`mox_snmp_iss_uri_read_inplace()`),省下約 25 ms;**但檔案往返仍在**。
+> 註 2:④ 目前有 37 個 plugin,以 `dlmod <name> /etc/moxa/netsnmp/plugin/*.so` 的形式登記於 `/etc/moxa/netsnmp/config/*.conf`。
+
+```
+====================== 貼到這裡為止 ======================
+```
+
+---
+
+## 貼完之後仍然缺的(等你提供,我不能猜)
+
+| 位置 | 缺什麼 |
+|---|---|
+| 目標與限制 → **限制** | 整節是空的。素材:ISS 為既有黑箱不可改 / wire 行為(OID 與值)不可變 / SET 路徑與 4-phase commit 不受影響 / 量測基準為單台 12 埠 MDS-G4000-L3-4XGS。**四選二**由你決定 |
+| FAQ **Q2** | 兩處【待填】:①已修正的缺陷(哪個問題、什麼症狀、怎麼修、哪個 build 之後生效)②整日壓測的條件與結果 |
+| Test → **Stress Test** | 跨週末壓測尚未執行,唯一素材本身不存在的一節 |

@@ -1,0 +1,5 @@
+lib-moxa-ies-auto-mibs (1.0.0) unstable; urgency=low
+
+  * Initial Release: OID <-> URI mapping data + lookup (Plan D B, Layer-1 seed).
+
+ -- Moxa <noreply@moxa.com>  Mon, 14 Jul 2026 10:00:00 +0800

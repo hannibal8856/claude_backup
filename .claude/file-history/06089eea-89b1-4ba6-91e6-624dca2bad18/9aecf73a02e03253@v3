@@ -1,0 +1,51 @@
+#!/bin/bash
+# EDS dl clippy DRAFT MR:每個 repo 本地已有 clippy-scan-binary-packages-3(單一 commit)
+#  1. 開 issue "Clippy scan binaries only" → iid
+#  2. 從本地 clippy-scan-binary-packages-3 建 <iid>-clippy-scan-binary-packages,amend→"Issue #<iid>: ...",push
+#  3. 開 DRAFT MR → NOS_v6.0_EDS_develop(Closes #<iid>)
+# 0-commit-ahead(framework/iss)自動跳過。預設 DRY-RUN;--go 才動作。
+set -u
+DL=$HOME/edsg4000/buildroot/dl
+SRC=clippy-scan-binary-packages-3
+BASE=origin/NOS_v6.0_EDS_develop
+TARGET=NOS_v6.0_EDS_develop
+TITLE="Clippy scan binaries only"
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' "${TOKEN_FILE:-$HOME/moxa_gitlab_scm_token}" | head -1)
+GO=0; [ "${1:-}" = "--go" ] && GO=1
+api(){ curl -sS --max-time 30 --header "PRIVATE-TOKEN: $TOKEN" "$@" </dev/null; }
+cd "$DL" || exit 1
+done_n=0; skip_n=0; fail=""
+while read -r r; do
+  [ -d "$r/.git" ] || continue
+  ( cd "$r" || exit 9
+    git rev-parse --verify -q "$SRC" >/dev/null 2>&1 || { echo "SKIP(無源分支) $r"; exit 2; }
+    n=$(git rev-list --count ${BASE}..${SRC} 2>/dev/null)
+    [ "$n" = 0 ] && { echo "SKIP(無改動) $r"; exit 2; }
+    enc=$(git remote get-url origin | sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g')
+    # idempotency:只看「target=本 EDS base 的 open MR」(不可用 branch glob,會誤抓 TN/NOS 同名分支)
+    exist=$(api "https://gitlab.com/api/v4/projects/$enc/merge_requests?state=opened&target_branch=${TARGET}&per_page=100" \
+            | jq '[.[]|select(.source_branch|endswith("-clippy-scan-binary-packages"))]|length')
+    [ "${exist:-0}" -gt 0 ] && { echo "EXISTS $r"; exit 2; }
+    # EDS 一律開新 issue(不 reuse,避免與 TN/NOS 共用 #iid 導致分支撞名)
+    if [ "$GO" = 1 ]; then
+      iid=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/issues" --data-urlencode "title=$TITLE" | jq -r '.iid // empty')
+      [ -n "$iid" ] || { echo "FAIL(開issue) $r"; exit 3; }
+    else iid="<NEW>"; fi
+    newbr="${iid}-clippy-scan-binary-packages"; msg="Issue #${iid}: ${TITLE}"
+    if [ "$GO" = 0 ]; then echo "DRY  $r  issue=#$iid  branch=$newbr  → DRAFT MR to $TARGET"; exit 0; fi
+    git branch -f "$newbr" "$SRC" >/dev/null 2>&1
+    git checkout -q "$newbr" || { echo "FAIL(checkout) $r"; exit 3; }
+    git commit -q --amend -m "$msg" || { echo "FAIL(amend) $r"; exit 3; }
+    git push -q -u origin "$newbr" || { echo "FAIL(push) $r"; exit 3; }
+    resp=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/merge_requests" \
+      --data-urlencode "source_branch=$newbr" --data-urlencode "target_branch=$TARGET" \
+      --data-urlencode "title=Draft: $msg" --data-urlencode "description=Closes #${iid}" --data "remove_source_branch=true")
+    mrurl=$(echo "$resp" | jq -r '.web_url // empty')
+    [ -n "$mrurl" ] && echo "OK   $r  issue #$iid  → $mrurl" || echo "FAIL(MR) $r : $(echo "$resp"|jq -rc '.message//.')"
+  )
+  rc=$?
+  case $rc in 0) [ "$GO" = 1 ] && done_n=$((done_n+1));; 2) skip_n=$((skip_n+1));; 3) fail="$fail $r";; esac
+  [ "${SLEEP:-0}" != 0 ] && [ "$GO" = 1 ] && sleep "${SLEEP}"
+done < "${LIST_FILE:-/tmp/eds_rust_repos_for_rev.txt}"
+echo "---------"; echo "完成=$done_n 跳過=$skip_n 失敗:${fail:- 無}"
+[ "$GO" = 0 ] && echo "(DRY-RUN)"; exit 0

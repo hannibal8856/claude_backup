@@ -1,0 +1,25 @@
+/* Dump the fiber-check rows of the ies mapping table as the library builds them
+ * at runtime, to see the table_col / uri_index actually handed to the subagent. */
+#include <stdio.h>
+#include <string.h>
+#include "lib_moxa_ies_auto_mibs.h"
+
+int main(void)
+{
+    size_t n = ies_map_count();
+    size_t i;
+    printf("total rows: %zu\n", n);
+    for (i = 0; i < n; i++) {
+        const struct ies_map_entry *e = ies_map_entry_at(i);
+        if (e == NULL || e->uri == NULL) continue;
+        if (strstr(e->uri, "fiberCheck") == NULL &&
+            strstr(e->uri, "mxfiberCheck") == NULL) continue;
+        /* one row per column is enough */
+        if (e->oid[e->oid_len - 1] != 1) continue;
+        printf("col=%2d is_status=%d uri=%-38s uri_index=\"%s\" oid=.%lu.%lu\n",
+               e->table_col, e->is_status, e->uri, e->uri_index,
+               (unsigned long) e->oid[e->oid_len - 2],
+               (unsigned long) e->oid[e->oid_len - 1]);
+    }
+    return 0;
+}

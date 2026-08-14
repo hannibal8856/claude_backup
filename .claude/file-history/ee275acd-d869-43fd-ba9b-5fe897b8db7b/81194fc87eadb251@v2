@@ -1,0 +1,122 @@
+# ADR-0029: `fiber_check_event` 從 dlmod 搬到 framework subagent —— evtPort 的第 6 組
+
+Status:
+  **Accepted(2026-08-12)** —— 已建置、燒錄(`2026_0812_1136`)並完成四項驗收。
+  沿用 ADR-0020 / ADR-0021 的 dlmod 退出機制,不取代任何既有 ADR。
+
+Date: 2026-08-12
+
+Context:
+  `plugin_moxa_fiber_check` 有**兩個** SNMP plugin,ADR-0021 只搬了一個:
+
+  | plugin | OID | ADR-0021 之後 |
+  |---|---|---|
+  | `plugin_snmp_fiber_check.c` | `.603.5.3.{1,2}`(fiber check 本體) | 已搬到 framework |
+  | `plugin_snmp_fiber_check_event.c` | `.602.7.1.2.1.6.`(port event 側) | **仍在 dlmod**,明確排除 |
+
+  使用者 2026-08-11 裁示把第二個也搬過去。
+
+Decision:
+  **關鍵發現:它不是獨立子系統,是 `evtPort` 那張表的第 6 組。**
+
+  `plugin_snmp_fiber_check_event.c:14` 註冊在 `.1.3.6.1.4.1.8691.602.7.1.2.1`,
+  與 `mx_event_port_MibEntry`(evtPort)**完全同一段**;而 evtPort 的
+  `MOX_SNMP_INIT_ENTRY` 已註解、framework 獨佔,已經在服務 `.1`–`.5`、`.7`–`.11`。
+  兩者結構逐位元組同型(`.N.1` enable、`.N.2.1`–`.N.2.5` action、
+  `.N.3.1.1`/`.N.3.1.2` portsPbmp 表)。
+
+  → **只是同一個陣列的延伸:不需要新註冊、不需要新機制、不需要移植取值邏輯**
+  (全部是布林值,不像 `fiber_check.c` 有陣列兩端與 resetToDefault 那類非葉子欄位)。
+
+  **① 改動**
+
+  | repo | commit | 內容 |
+  |---|---|---|
+  | `3rdparty_net_snmp` | `d4e35b8` | `net_mx_event_port.h` 加入 group `.6` 的 8 筆 entry(80 → 88) |
+  | `plugin_moxa_fiber_check` | `f9164c3` | `fiber_check_event.conf` 的 dlmod 行註解掉 |
+
+  **② 兩處刻意與 dlmod 不同**
+
+  - **補回 `.6.3.1.1`**(`porteConfigPortWarningByFiberCheckPortNum`)。MIB 定義為
+    read-only,**dlmod 從來不回它**。所以這是補回宣告過的物件,不是新增 MIB 外的欄位 ——
+    性質同 ADR-0012 拿回 mxPort 的兩個 portStatus index 欄,**不適用 ADR-0022 的
+    「不夾帶 MIB 相容性修正」原則**。walk 多 12 個 varbind。
+  - **relay0 加 `MOXA_DO_RELAY` 護欄、relay1/2 再加 MDS_G4000 家族護欄**,與九個兄弟組一致。
+    dlmod 完全沒有護欄,在沒有 relay 的產品上會露出硬體沒有的物件。
+    本產品所有護欄皆為真(live walk 顯示兄弟組的 `.N.2.4`/`.N.2.5` 都有回值),
+    **這台機器上行為不變**;對 EDS 移植才是正確做法。
+
+  **③ 驗收(image `2026_0812_1136`,DUT p1)**
+
+  **完整性 —— 以欄位集合判定(ADR-0017),差集逐一列 OID:**
+
+  | | 搬遷前 | 搬遷後 |
+  |---|---|---|
+  | map 宣告 | 80 | **88** |
+  | walk 欄位 | 73 | **74** |
+  | map 有但 walk 沒回 | 14 | **14**(同一份 `.10`/`.11` 清單) |
+  | walk 有但 map 沒有 | 7 | **0** |
+  | varbind | 282 | 294 |
+
+  **新出現的欄位只有 `.6.3.1.1` × 12,消失 0 個。** 那 7 欄從「map 外由 dlmod 服務」
+  變成「map 內由 framework 服務」,一欄沒少。
+
+  **服務者 —— pcap 判定(`fwdcheck.sh`,`PEER=app_moxa_framew`,N=150):**
+
+  ```
+  背景(= NEGATIVE burst) : 55
+  net POSITIVE : 198    net TARGET : 182    TARGET / POSITIVE = 91%
+  VERDICT: SERVED BY 'app_moxa_framew'
+  ```
+
+  兩次獨立執行重現(237/253/55 與 239/257/51)。
+
+  **SET 路徑 —— 實際寫入並讀回:** `.6.3.1.2.3` 由 1 → 2 → 讀回 2 → 還原 1 → 讀回 1;
+  index 欄 `.6.3.1.1.3` 寫入正確回 `notWritable`。
+
+  **dlmod 計數:** 啟用行 33 → **32**(基數 36 不變)。
+
+  **效能:** `.602.7.1.2.1` walk = **1.270s 中位數 / 294 vb / 9 輪**
+  (best 1.257 / worst 1.313)。⚠️ **這是新基準,不是 before/after 比較** ——
+  搬遷前沒有用同一協定量過 9 輪,而真正的單一變數對照需要把 `2026_0811_1349`
+  重新燒回 p1 再燒回來(兩次燒錄)。依 ADR-0028 的教訓,與其給一個不同基準相減的數字,
+  不如明說沒有。
+
+Consequences:
+  - dlmod 路徑再少一個模組。搬遷進度:**原 dlmod 併入 framework = 3 個**
+    (`mx_Mms`、`mxFiberCheck`、`fiberCheckEvent`),dlmod 啟用 **32**(基數 36)。
+  - `plugin_moxa_fiber_check` 這個 repo **兩個 plugin 都搬完了**。
+    `plugin_snmp_fiber_check_event.so` 仍有編有裝,只是不再載入。
+  - **evtPort 仍有 14 欄宣告了但無人服務**(`ringProtectEvent` 的 `.10`/`.11`,
+    每組 8 欄中只有 index 欄 `.N.3.1.1` 有回應)。**與本次搬遷無關,是既有缺口**,
+    但任何「evtPort 完整性」的敘述都要講清楚:**宣告 88 / 實際 74**。
+  - 對外敘述必須精確:**74 不是「多了 8 個功能」**,而是
+    **「7 欄換了服務者 + 1 欄補回宣告過但從沒回過的物件」**。
+
+Alternatives considered:
+  - **另開 `net_mx_fiber_check_event.h` + 加進 `g_reuse_srcs[]`** —— 可行但沒有好處。
+    `.6` 與其餘九組同表同型,分檔會讓「同一張表的十一個群組散在兩個檔」,
+    而且要多維護一筆 `g_reuse_srcs[]`。
+  - **壓掉 `.6.3.1.1` 以維持與 dlmod 逐位元組相同** —— 已捨棄。查 MIB 後發現它是
+    宣告過的 read-only 物件,壓掉等於刻意不服務一個 MIB 物件;而且會讓 `.6` 與
+    `.1`–`.5` 在同一張表裡行為不一致。
+  - **照 dlmod 不加條件編譯護欄** —— 已捨棄,理由見 ②。
+
+方法論(踩到並已寫入 memory):
+  **跨 package header 改動不會觸發 `lib_moxa_ies_auto_mibs` 重編,而且錯的那個 `.so`
+  會通過檢查。** 第一次建置 `make` exit 0、`libnetsnmpmibs.so` md5 變了、字串 8 筆 ——
+  但那是 in-master 的**死碼**那側(`MOX_SNMP_INIT_ENTRY` 註解掉);真正生效的
+  `libmoxaiesautomibs.so` **md5 完全沒變、字串 0 筆**。原因是該 package 的
+  `HEADER_FILES=$(shell find ${INCLUDE_PATH} ${SRC_PATH})` 只掃自己的目錄,
+  而外部 header 是經 `-I$(TOPDIR)/dl/3rdparty_net_snmp/ies-auto-mibs` 拉進來的。
+  若照燒,`.6.x` 會全回 `No Such Object`,最自然的解讀是「map 寫錯」——
+  往完全錯的方向查。→ **動到跨 package header 後,兩個 `.so` 都要比 md5 並 grep 新字串。**
+
+  **`fwdcheck.sh` 的判準也在本輪修正**:原本用 `TARGET/NEGATIVE`,但背景隨**時間**累積、
+  burst 長度隨 N 等比增加,**該比值不會因 N 變大而改善**,所以忙碌的 subagent 會讓
+  真正被服務的 OID 一直被判 INCONCLUSIVE(本輪實測 TARGET 239 / POSITIVE 257 /
+  NEGATIVE 51,舊判準給 4× 與 INCONCLUSIVE)。改為**以負對照為背景估計,兩邊扣除後
+  比 TARGET / POSITIVE**。新判準回套先前兩次(`trustedIpTable`、`l3VlanIfTable`)
+  結論不變,未推翻既有結果。
+
+相關:ADR-0012、ADR-0017、ADR-0020、ADR-0021、ADR-0022、ADR-0028。

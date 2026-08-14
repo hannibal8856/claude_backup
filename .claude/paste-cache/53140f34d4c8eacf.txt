@@ -1,0 +1,15 @@
+$ TOKEN=$(cat /moxa/run/auto_mibs/s_token)
+$ echo "===== turboringv2 (<e6><95><b4><e5><8c><85>) ====="
+curl -s -H "Authorization: $TOKEN" http://127.0.0.1/api/v1/status/turboringv2
+
+echo; echo "===== turboringv2/ring1 ====="
+curl -s -H "Authorization: $TOKEN" http://127.0.0.1/api/v1/status/turboringv2/ring1
+
+echo; echo "===== turboringv2/ring2 ====="
+curl -s -H "Authorization: $TOKEN" http://127.0.0.1/api/v1/status/turboringv2/ring2
+===== turboringv2 (整包) =====
+{"ring1":{"brokenStatus":0,"masterStatus":false,"designatedMaster":"00:00:00:00:00:00","firstPortStatus":1,"secondPortStatus":1},"ring2":{"brokenStatus":0,"masterStatus":false,"designatedMaster":"00:00:00:00:00:00","firstPortStatus":1,"secondPortStatus":1},"coupling":{"couplingMode":0,"portStatus":1}}
+===== turboringv2/ring1 =====
+{"brokenStatus":0,"masterStatus":false,"designatedMaster":"00:00:00:00:00:00","firstPortStatus":1,"secondPortStatus":1}
+===== turboringv2/ring2 =====
+{"brokenStatus":0,"masterStatus":false,"designatedMaster":"00:00:00:00:00:00","firstPortStatus":1,"secondPortStatus":1}#                                       $ 

@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "plugins": {
+    "code-review@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/claude-plugins-official/code-review/unknown",
+        "version": "unknown",
+        "installedAt": "2026-04-14T10:36:17.342Z",
+        "lastUpdated": "2026-08-14T06:04:22.208Z"
+      }
+    ],
+    "code-simplifier@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-04-14T10:36:17.367Z",
+        "lastUpdated": "2026-04-14T10:36:17.367Z"
+      }
+    ],
+    "github@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/claude-plugins-official/github/unknown",
+        "version": "unknown",
+        "installedAt": "2026-04-14T10:36:17.397Z",
+        "lastUpdated": "2026-08-14T06:04:22.208Z"
+      }
+    ],
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0",
+        "version": "6.3.0",
+        "installedAt": "2026-04-16T08:51:58.807Z",
+        "lastUpdated": "2026-08-13T00:33:19.761Z",
+        "gitCommitSha": "c4bbe651cb1bc5e7bec6f7effae2b946571f3258"
+      }
+    ],
+    "andrej-karpathy-skills@karpathy-skills": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/karpathy-skills/andrej-karpathy-skills/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-05-18T03:14:08.832Z",
+        "lastUpdated": "2026-05-18T03:14:08.832Z",
+        "gitCommitSha": "2c606141936f1eeef17fa3043a72095b4765b9c2"
+      }
+    ],
+    "rust-analyzer-lsp@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/moxa/.claude/plugins/cache/claude-plugins-official/rust-analyzer-lsp/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-05-25T10:29:25.440Z",
+        "lastUpdated": "2026-05-25T10:29:25.440Z"
+      }
+    ]
+  }
+}

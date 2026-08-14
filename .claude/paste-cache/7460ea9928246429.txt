@@ -1,0 +1,10 @@
+$ ss -antp  | grep $(pidof app_moxa_framework)
+LISTEN     0      0          127.0.0.1:9759       0.0.0.0:*     users:(("app_moxa_framew",pid=402,fd=15))                                         
+ESTAB      0      0          127.0.0.1:54734    127.0.0.1:1883  users:(("app_moxa_framew",pid=402,fd=13))                                         
+ESTAB      0      0          127.0.0.1:59904    127.0.0.1:705   users:(("app_moxa_framew",pid=402,fd=62))                                         
+$ ss -antp | grep ":705"
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+ESTAB      0      0          127.0.0.1:59904    127.0.0.1:705   users:(("app_moxa_framew",pid=402,fd=62))                                         
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59904 users:(("snmpd",pid=1330,fd=49))     

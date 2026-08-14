@@ -1,0 +1,26 @@
+#!/usr/bin/expect -f
+# dutssh.exp "<cmd1>" "<cmd2>" ...  -- runs each command as root on the DUT.
+# root's login shell is zsh; do not sync on a plain "# " prompt, use markers.
+# a long fwdcheck run (large N) exceeds a 300 s timeout and the output is lost
+set timeout 900
+log_user 1
+set host [expr {[info exists env(DUT)] ? $env(DUT) : "192.168.127.253"}]
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no admin@$host
+expect -re {[Pp]assword:} { send "moxa\r" }
+expect -re {\$ $}
+send "su\r"
+expect -re {[Pp]assword:}
+sleep 2
+send "moxa\r"
+sleep 3
+set n 0
+foreach c $argv {
+    incr n
+    send "$c ; echo MRK$n\_EN\"\"D\r"
+    expect { -re "MRK$n\_END" {} timeout { puts "\n***TIMEOUT cmd $n" } }
+}
+send "exit\r"
+sleep 1
+send "exit\r"
+expect eof

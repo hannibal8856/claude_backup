@@ -1,0 +1,186 @@
+# Handoff — SNMP AgentX 簡報文件(2026-08-10)
+
+取代 `session-handoff-snmp-confluence-doc-2026-08-08.md`(該份已過時,可忽略)。
+
+---
+
+## 1. 在做什麼
+
+替使用者撰寫一份 **Confluence 頁面**,主題是「用 AgentX 優化 SNMP GET 效能」,**使用者會拿去向主管簡報**(聽眾另有 RD / SQA / PM)。
+
+這是文件工作,不是寫程式。但**所有數字都必須有實測依據** —— 使用者明確要求「所有的推論都不能用猜測的」。
+
+---
+
+## 2. 檔案
+
+全部在 `~/WORK/SNMP_50ms/outline_CIC/`:
+
+| 檔案 | 用途 |
+|---|---|
+| **`confluence-snmp-agentx-v1.md`** | **工作版**,改內容改這份 |
+| **`confluence-snmp-agentx-CLEAN.md`** | **貼上版**,由工作版以腳本產生(見 §7) |
+| `original-architecture-4paths.drawio` | 四條路 |
+| `enhanced-architecture-2paths.drawio` | 收斂後兩條路 |
+| `reuse-composition.drawio` | 改良的組成(重用比例) |
+| `confluence-snmp-agentx-get-optimization.md` | 早期素材庫 |
+| `confluence-snmp-agentx-SKELETON.md` | 原始骨架,已無用 |
+
+工具在 `~/WORK/SNMP_50ms/tools/`:
+
+| 工具 | 用途 |
+|---|---|
+| `latency_stats.sh <pcap>` | 從 pcap 算 平均 / 最壞 / >50ms 佔比 |
+| `drawio_audit.py *.drawio --allow=a:b,...` | 版面稽核:重疊、箭頭穿越、出入點對齊、HTML 跳脫 |
+
+---
+
+## 3. 已定案,不要重新討論
+
+| 項目 | 決定 |
+|---|---|
+| **Confluence 版本** | **Data Center,不是 Cloud** —— Markdown **不會**自動轉換(見 §6) |
+| 效能指標 | **平均 / 最壞 / 超過 50 ms 佔比**,對外不用中位數 |
+| 讀者 | 主管為主,另有 RD / SQA / PM |
+| FAQ 呈現 | Confluence Expand macro(貼上後手動轉) |
+| **報告不提 ADR** | 使用者指示全數移除。`~/mds4xgl3/.adr/` 的檔案仍維護,只是報告不引用 |
+| **不提 Plan C / D** | 只講 Plan E;圖與文字都不出現 Plan 編號 |
+| `outline.txt` | 不採用 |
+
+---
+
+## 4. 架構的正確說法(過程中被更正過數次)
+
+**收斂目標:四條路 → 兩條**
+
+| 原本 | 收斂後 |
+|---|---|
+| ① 在 snmpd 內取值 / 呼叫 shared library | **維持原狀** —— ns 等級,不需改變 |
+| ② 問 ISS | **AgentX** |
+| ③ 問 framework | **AgentX** |
+| ④ dlmod 模組 | **AgentX** |
+
+判斷規則一句話:**資料在 snmpd 行程內的就留在 snmpd,在別的行程的一律走 AgentX。**
+
+**AgentX 側只有兩個 subagent**:ISS subagent(承接原②)、framework subagent(承接原③ **與原④**)。dlmod 是**併入 framework subagent**,不是自成一個。
+
+**GET / SET 分流**:subagent 註冊為**唯讀**、in-master 保留**可寫**,net-snmp 依能力自動分流,**不需任何路由程式碼**。原本自己寫的 forward 邏輯上機後發現從未執行,已判定死碼移除。
+
+**dlmod 搬遷進度**:`mxMms` 已完成(建置燒錄驗收通過),下一個目標 `mxFiberCheck`。
+
+---
+
+## 5. 關鍵數據(不可遺失)
+
+**單次 GET(mxPort,13 OID,n=100,逐筆配對)**
+
+| 指標 | 前 | 後 |
+|---|---|---|
+| 平均 | 267.2 ms | 15.4 ms(−94.2%)|
+| 最壞 | 301.1 ms | 48.8 ms(−83.8%)|
+| >50 ms 佔比 | 100% | **0%** |
+
+**整棵 walk(每 varbind)**:mxRstp 131.9 → 2.9 ms(−97.8%)、ifXTable 4.8 → 2.8、ifTable 4.4 → 2.7、mxPort 5.7 → 3.6。改善後收斂到 2.7–3.8 ms,同線路 ping RTT 平均 3.3 ms → **網路受限,不是 agent 受限**。
+
+> walk 的「最壞」是**最慢那一輪的平均**,不是單筆最大值 —— 嚴謹度低於單次 GET。逐筆分布需錄 walk 期間封包(**尚未做,見 §8**)。
+
+**Binary size(真 before/after,mainline 取自 `NOS_v7.0_develop` 樹)**
+
+| 產物 | mainline | 導入後 | 差 |
+|---|---|---|---|
+| `snmpd` | 25.3 KB | 25.3 KB | **0** |
+| `libnetsnmpmibs.so` | 4,100.0 KB | 4,104.0 KB | +4.0 KB |
+| `app_moxa_framework` | 14,794.7 KB | 14,826.8 KB | +32.1 KB |
+| `libmoxaiesautomibs.so` | — | 1,035.5 KB | 新增 |
+| `libmoxasnmpagentx.so` | — | 9.1 KB | 新增 |
+| rootfs.squashfs | 69.18 MB | 70.67 MB | +1.49 MB |
+
+> 1,035 KB 那塊**不是新邏輯**:914 行 C 之所以產出 1 MB,是它 `#include` 既有 `net_*.h` 把 OID 對映表實體化。兩棵樹差異不限於 SNMP,rootfs 增量大於元件加總約 470 KB,已在文件中標註。
+
+**OID 分布**:`ies-auto-mibs` 70 個定義檔、2,140 entry;`iss_build==1` **1,391**(與 DUT 實測「ISS 服務 1391 個 OID」吻合)、`iss_build==0` 749;dlmod 37 個 plugin。
+
+**已委派前綴**:`ifmibdb/ +getfwd`、`stdethdb/`、`mxportdb/`、`mxrstpdb/`
+
+---
+
+## 6. Confluence 貼上(重要)
+
+**使用者的 Confluence 是 Data Center**(畫面有 Calendars、Scroll Word Exporter)。直接 `Ctrl+V` 貼 Markdown **會變成純文字**,已實測失敗。
+
+正確作法:編輯頁面 → **Insert → Markup(`Ctrl+Shift+D`)** → 選 **Markdown** → 貼上。
+
+**使用者尚未回報這條路是否成功。** 若不行,備案是產 **Confluence Wiki Markup** 版(`h2.` 標題、`||` 表頭、`{code}` / `{noformat}` 區塊),使用者已同意這個備案方向但尚未請求產出。
+
+---
+
+## 7. 產生 CLEAN 版的腳本
+
+工作版改動後,用這段重新產生貼上版(會清掉 HTML 註解、內部路徑、素材註記,並把 `<details>` 轉成 `####` 標題):
+
+```python
+import re
+s=open('confluence-snmp-agentx-v1.md',encoding='utf-8').read()
+s=re.sub(r'<!--.*?-->\n?','',s,flags=re.S)
+s=re.sub(r'>\s*\n> \*\*尚待補齊\*\*.*?已完成。\n','',s,flags=re.S)
+s=re.sub(r'^> \*\*已有素材.*(?:\n> .*)*\n','',s,flags=re.M)
+s=re.sub(r'> \*\*簡報用的彩色版\*\*.*?\n(?:> .*\n)*','> 【此處插入彩色架構圖】\n',s)
+s=re.sub(r'<details>\n<summary><b>(.*?)</b></summary>\n',r'#### \1\n',s)
+s=s.replace('</details>\n','')
+s=re.sub(r'\n{3,}','\n\n',s)
+open('confluence-snmp-agentx-CLEAN.md','w',encoding='utf-8').write(s)
+```
+
+---
+
+## 8. 待辦與阻塞
+
+**阻塞中**
+
+- **DUT 的 SNMP 沒有回應** —— `ping` 通(RTT 3.4 ms)但 `snmpget` 逾時(192.168.127.253)。原因未查。**walk 的逐筆量測因此沒跑成。**
+- **跨週末壓力測試尚未執行** —— Test → Stress Test 是唯一「素材本身不存在」的一節。
+
+**等使用者提供**
+
+- **FAQ Q2(ISS AgentX 穩不穩)兩處【待填】**:已修正的缺陷內容、整日壓測的條件與結果。
+- **「目標與限制 → 限制」** 仍是兩個空項目符號。素材:ISS 不可改 / wire 行為不可變 / SET 與 4-phase commit 不受影響 / 量測基準單台 12 埠 DUT。
+
+**待確認**
+
+- **「首次請求 stall 約 10 秒」是否已解。** 2026-08-06 可重複重現、根因未確認;**近期 20 次 walk 最壞 0.67–0.95 s,未再出現**。高度顯示已消除,但**未做專門複驗**。使用者認為應該已解,但目前沒有直接證據。
+
+**使用者已刪除但殘留的**
+
+- `mx_device_io` 的退步案例已從「先講結果」移除,但 **Performance 的效益分布表、Appendix C 的量測方法說明仍引用它**(兩處都有存在理由,已向使用者說明,尚未處理)。
+
+---
+
+## 9. 文件完成度
+
+只剩 **Stress Test** 一節缺數據,其餘皆有內容。Appendix 為 A / B / C 三節(D 已依指示刪除)。
+
+FAQ 三則:Q1 GET/SET 分流(含 `agentx_owned.list` 原理與能力閘門)、Q2 ISS 穩定度、Q3 why not proxy。
+
+---
+
+## 10. 製圖規範(已立為慣例)
+
+三張 draw.io 皆以程式產生。規範與稽核工具已記錄在 `~/mds4xgl3/.adr/ADR-0021`:
+
+1. `exitX` / `entryX` 以座標**精確計算**,能對齊就拉直線;只有方塊無法上下對齊時才允許轉折。
+2. 邊標籤不得落在方塊上;徽章放方塊**外**(標題置中會變長)。
+3. **一律用 XML 解析器操作 `.drawio`** —— 曾用正則改幾何,`vertex="1"` 結尾符合 `x="1"` 被誤傷,方塊在 drawio 中消失。
+4. HTML 內容寫**真實字元**(`<b>`),由序列化器負責跳脫,否則會雙重跳脫顯示成字面標籤。
+5. **每次版面改動後跑 `drawio_audit.py`** —— 改一個方塊的尺寸會波及鄰居(曾因加寬 snmpd 同時撞倒兩張圖的說明框)。
+
+匯出:PNG、200%、**背景白色(不要透明)**、外觀淺色、邊框 10、勾「包含繪圖副本」。
+
+---
+
+## 11. 建議的下一步
+
+1. 先解決 **DUT SNMP 無回應**,然後跑 walk 逐筆量測補上真實的 >50 ms 佔比。
+2. 確認 **Insert Markup** 能否成功;不行就產 wiki markup 版。
+3. 向使用者取得 FAQ Q2 的兩處內容與「限制」四選二。
+4. Stress Test 由使用者決定何時開跑。
+
+**寫作原則**:所有數字要有實測依據,版本歸屬要標清楚(NOS v5.x 與 NOS 7 不可混用),不確定的地方寧可標註也不要推測。

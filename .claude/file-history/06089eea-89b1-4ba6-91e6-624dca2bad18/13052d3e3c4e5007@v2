@@ -1,0 +1,153 @@
+# Rust Clippy 改造:從 by-package 到 by-application 掃描
+
+## TL;DR
+
+把 Rust Clippy 掃描從「每個 package 各掃各的」改成「只由 application（BIN）掃描，並涵蓋其相依的所有本地 library」,核心手法是用 `RUSTC_WRAPPER=clippy-driver cargo check` 取代 `cargo clippy`,因為唯有如此才能同時做到「帶入 app 真實 feature」「掃到相依 library」兩件事。
+
+本文記錄為什麼這樣選、`clippy-driver` 與 `cargo clippy` 的本質差異、以及完整的落地與驗證過程。
+
+---
+
+## 背景與目標
+
+- 原本每個 Rust package(約 173 個 repo)的 Makefile 各自有 `rust_clippy_scan`,用 `cargo clippy` 掃自己。
+- 問題一:**library 是被 application 以實際 feature 組合編譯的**,但 library 自掃時用的是自己的 default feature,`#[cfg(feature=...)]` 關掉的程式碼不會被檢查,覆蓋範圍與實際出貨不一致。
+- 問題二:純 library 自掃時無法反映「被哪個 app、用什麼 feature」使用,診斷脈絡薄弱;且維護 173 份掃描規則成本高。
+- 目標:**讓掃描以 application 為中心**,一次掃描即涵蓋該 app 與其完整本地相依 library closure,且帶入 app 真正啟用的 feature。
+
+這個改動的精神是「library 依附 application」——library 只透過引用它的 app 被檢查,沒有任何 app 用到的 library 不掃也不算錯。
+
+---
+
+## 參考資料 / 來源
+
+- `NOS_v6.0_develop/buildroot` 各 Rust package 的 `dl/<pkg>/Makefile` 之 `rust_clippy_scan` target。
+- buildroot 注入變數來源:`moxa/Config.in`(`BR2_MOXA_RUST_TARGET_DIR`)→ `moxa/package/net/<pkg>/<pkg>.mk` → dl Makefile 的 `${RUST_TARGET_DIR}`。
+- 收尾檢查腳本:`moxa/board/net/common/post-build.sh`(Clippy 覆蓋 gate)。
+- Cargo / Clippy 機制:`cargo clippy` 等價於 `cargo check + RUSTC_WORKSPACE_WRAPPER=clippy-driver`;crates.io 相依被 `--cap-lints allow` 靜音。
+- 驗證資料:`~/WORK/clippy-scan-binary-packages/result_rksg4000.txt`(L2 掃描結果)、L3 機種重跑結果。
+- 自製工具:`~/check_rust_app_lock.sh`(dl ↔ output/build 的 Cargo.lock 漂移檢查)。
+
+以上為本次討論實際引用、執行或修改過的檔案與指令出處。
+
+---
+
+## 討論脈絡
+
+### 轉折一:`cargo clippy -p <library>` 行不行?
+
+- **候選**:在 app 目錄下用 `cargo clippy -p <lib>` 把相依 library 一起掃。
+- **取捨**:實測用 canary(故意埋 deny 級 `clippy::eq_op`)發現——`-p` 對「非 workspace member」的 path dependency **只會印 `Checking`,實際是普通 rustc check,clippy lint 根本沒跑**,canary 沒被抓到。
+- **決定**:`-p` 不可行,放棄。
+
+`cargo clippy` 只把 clippy-driver 套在 workspace member 上(透過 `RUSTC_WORKSPACE_WRAPPER`),path 相依用的是一般 rustc,所以掃不到 library。
+
+### 轉折二:用 `[workspace]` 把 library 變成 member?
+
+- **候選 A**:在 app 的 `Cargo.toml` 加 `[workspace] members=["../../<lib>-custom"]`。失敗——cargo 硬性要求 member 必須位於 workspace root 目錄之下,跨目錄直接報錯。
+- **候選 B(PDF 方案)**:在共同父目錄 `output/build/` 放一個臨時 `[workspace]` root,library 因「位於 workspace 內」自動成為 member。實測可行、canary 抓得到。
+- **取捨**:候選 B 雖可行,但 root 存在期間會「毒化」`output/build` 下所有其他 cargo 指令(報 `believes it's in a workspace`),只能當事後一次性步驟,無法整合進 per-package 平行 build。
+- **決定**:workspace 方案在此佈局下成本/副作用過高,不採用。
+
+### 轉折三:`RUSTC_WRAPPER=clippy-driver cargo check`
+
+- **候選**:用 `RUSTC_WRAPPER` 把 clippy-driver 套到**所有** crate,而非只有 member。
+- **驗證**:canary 正確被抓到,且額外掃出 library 本來就存在的真實警告(`ptr_arg`、`needless_return` 等)。crates.io 第三方相依會被 cargo 自動加上 `--cap-lints allow` 靜音,只有本地 path crate 的 lint 會浮現,輸出乾淨。
+- **決定**:**採用此方案**。它一次滿足三個需求——帶 app 真實 feature、掃到所有本地 library、輸出只含我們在意的本地程式碼。
+
+### 轉折四:掃描覆蓋與 feature 的關聯(canary 驗證)
+
+- 在 15 個 library(7 `plugin_moxa_*` framework + 4 `rust_moxa_*` + 4 `lib_moxa_rust_*`)埋入 `needless_return` canary。
+- L2 機種掃描:15 顆中 14 顆被抓到;唯一漏網的 `interface_vlan` 在 L2 是 **dummy package(未編譯)**,正確地沒被掃到。
+- 結論:**掃描覆蓋 = feature/config 決定的編譯 closure**,不是「源碼存在就會掃」。這顆 canary 成為「覆蓋隨 config 改變」的最佳教材。
+
+---
+
+## 結論與決策
+
+- **採用 `RUSTC_WRAPPER=clippy-driver cargo check` 作為 application 掃描指令。**
+  為什麼:這是唯一能「同時」帶入 app 實際 `--features`、又把 lint 套到所有本地 library 的方法;`cargo clippy -p` 掃不到 library,workspace 方案副作用太大。
+
+- **掃描指令必須帶 app 真實啟用的 `--features`。**
+  為什麼:library 的程式碼是被 app 以特定 feature 組合編譯的,帶錯 feature 會掃到與出貨不一致的程式碼路徑;canary 驗證也證實覆蓋範圍由 feature/config 決定。
+
+- **掃描以 application 為中心,library 自掃全面移除。**
+  為什麼:app 的 closure 已涵蓋所有被使用的 library;保留 library 自掃會重複計數,且維護成本高。最終只有 19 個 BIN repo(22 個 application crate)保留掃描。
+
+- **沒有 app 引用的 library 不掃、不報錯,只在 post-build 印 Note。**
+  為什麼:符合「library 依附 application」的精神;唯一孤兒 `rust_moxa_profiling` 即屬此類,不需維護任何例外清單。
+
+- **過期的 committed Cargo.lock 要同步回 dl。**
+  為什麼:lock 過期會讓每次 clean build 連網重解版本、build 不可重現,且可能踩到 MSRV 失敗。
+
+---
+
+## 後續待辦 / 開放問題
+
+- **6 個 TN-4500B(L2)package 尚未比照處理**:`lib_moxa_rust_poe` 與 5 個 plugin（auto_config、config_name、custom_default、dns_server、mdns),等源碼抓進 dl 後套用 library 移除 + branch + `.mk` 清理。
+- **3 個真實警告待修**:`plugin_moxa_snmp/framework`(×2)、`plugin_moxa_dot1x/framework`(×1)的 `needless_return`——由新掃描制度揪出。
+- **`moxa/` 樹的未 commit 修改待收尾**:164 個 `.mk`(移 scan_result 搬運)、155 個 `.mk`(移 `RUST_TARGET_DIR`)、`post-build.sh`(gate 重寫)、6 份 defconfig(`_REV` 設定)。
+- **v7.0 樹的 canary 驗證**:v7.0 的 dl repo 處於 detached HEAD、未 checkout `clippy-scan-test`,故 L3 重跑時 0/16 canary 被抓到。要驗證需在 v6.0 用 L3 defconfig build,或在 v7.0 補上 checkout 與 `_REV` 設定。
+- **clippy-scan-test canary branch 善後**:16 個 repo 的 canary branch 驗收完可清理。
+
+---
+
+## 附錄
+
+### A. `clippy-driver` vs `cargo clippy`:本質差異
+
+**本質**:`clippy-driver` 是 lint 引擎本體(一個相容 rustc 介面的編譯器,把 clippy 的數百條 lint 掛進編譯 pass);`cargo clippy` 只是調度器,本質約等於 `cargo check + RUSTC_WORKSPACE_WRAPPER=clippy-driver`。lint 全由 clippy-driver 完成,`cargo clippy` 自己不懂任何 lint。
+
+| 面向 | `cargo clippy` | `clippy-driver`(本方案經 RUSTC_WRAPPER) |
+|------|----------------|------------------------------------------|
+| 操作層級 | 整個專案(自動處理相依、feature、target) | 每個編譯單元(crate) |
+| lint 套用範圍 | **只有 workspace member** | **所有 crate**(本地 + 相依) |
+| 對 path 相依(library) | 用普通 rustc,**不 lint** | 用 clippy-driver,**會 lint** |
+| crates.io 第三方相依 | `--cap-lints allow` 靜音 | 同樣被 cargo 靜音(只剩本地浮現) |
+| feature 處理 | cargo 算好傳入 | 經 cargo,故同樣帶入 app 的 feature |
+
+**結論**:同一個 crate、同樣 flag/feature 下,兩者 lint 結果相同(同一顆引擎);差異只在「掃到誰」。`cargo clippy -p <lib>` 掃不到 library,正是因為 library 是 path 相依而非 member,`cargo clippy` 只 lint member。
+
+### B. 最終採用的掃描指令(以 firmware_update 為例)
+
+```makefile
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	# app
+	${SILENCE}cd app && RUSTC_WRAPPER=clippy-driver cargo check --release \
+		--target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES}
+	${SILENCE}cd app && RUSTC_WRAPPER=clippy-driver cargo check --release \
+		--target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES} \
+		--message-format=json > ${PWD}/rust_clippy_scan_result/${PROJECT}.json
+endif
+```
+
+### C. Canary 驗證手法
+
+在 library 的 `src/lib.rs`(或 `framework/src/lib.rs`)末尾附加一個觸發 warn 級 `clippy::needless_return` 的函式:
+
+```rust
+pub fn clippy_scan_canary() {
+    return;
+}
+```
+
+選 warn 級(非 deny 級)是刻意的:不會中斷 build,且此 lint **只有 clippy 會報、`cargo check`/`build` 不會**,正好能區分「真的跑了 clippy」vs「只是普通 check」。
+
+### D. post-build.sh 覆蓋檢查(精神)
+
+```sh
+# 硬性 gate:每個會輸出 scan result 的 app 必須產出 json
+# 資訊性 Note:沒被任何 application 引用的 library 不報錯,只提示
+#   ("<pkg>-custom" 配對 path 相依;"/<pkg>#" 配對 symlink workspace member)
+```
+
+### E. Cargo.lock 漂移檢查工具
+
+```bash
+~/check_rust_app_lock.sh [buildroot路徑]
+# 列出所有 Rust app,比對 dl ↔ output/build 的 Cargo.lock,
+# 不一致則警告;有漂移時 exit 1(可掛 CI gate)。
+```

@@ -1,0 +1,25 @@
+#!/bin/bash
+# For each repo carrying a Plan branch, find the closest develop base and list
+# the Plan commits + files touched.
+DL=/home/moxa/mds4xgl3/buildroot/dl
+REPOS="3rdparty_net_snmp app_moxa_fiber_check app_moxa_framework app_moxa_iss_10_1_0
+lib_moxa_ies_auto_mibs lib_moxa_rust_ies_auto_mibs lib_moxa_rust_snmp_agentx
+lib_moxa_snmp_agentx lib_moxa_utility plugin_moxa_fiber_check plugin_moxa_mms
+plugin_moxa_snmp plugin_moxa_system_information"
+
+for name in $REPOS; do
+    d="$DL/$name"
+    tip=$(git -C "$d" rev-parse --abbrev-ref HEAD)
+    best=""; bestn=999999
+    for base in $(git -C "$d" for-each-ref --format='%(refname:short)' refs/remotes/origin \
+                  | grep -Ei 'develop|_v5\.0|master|main$' | grep -viE 'snmp'); do
+        n=$(git -C "$d" rev-list --count "$base..$tip" 2>/dev/null) || continue
+        [ -z "$n" ] && continue
+        if [ "$n" -lt "$bestn" ] && [ "$n" -gt 0 ]; then bestn=$n; best=$base; fi
+    done
+    echo "======== $name  ($tip)  base=$best  ahead=$bestn"
+    [ -z "$best" ] && { echo "  (no base found)"; continue; }
+    git -C "$d" log --oneline --no-decorate "$best..$tip"
+    echo "  --- files ---"
+    git -C "$d" diff --stat "$best...$tip" | tail -40
+done

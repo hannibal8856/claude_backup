@@ -1,0 +1,1 @@
+- [SNMP 工作筆記 repo](snmp-work-notes-repo.md) — 設計文件與 snmpwalk 基線在 ~/WORK/SNMP_50ms，不在 buildroot 內；舊文件勿逕自引用

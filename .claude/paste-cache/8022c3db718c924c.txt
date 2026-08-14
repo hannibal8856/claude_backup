@@ -1,0 +1,18 @@
+Welcome to MOXA
+moxa login: admin
+ 
+Password: 
+$ su
+Password: 
+$ cat -n /etc/moxa/version/BUILD_TIME
+     1  2026_0729_1641
+$ netstat -antul | grep ":161"
+udp        0      0 0.0.0.0:161             0.0.0.0:*                           
+udp        0      0 :::161                  :::*                                
+$ ss -antp | grep ":705"
+LISTEN    0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1302,fd=46))                                                  
+ESTAB     0      0          127.0.0.1:705      127.0.0.1:57004 users:(("snmpd",pid=1302,fd=47))                                                  
+ESTAB     0      0          127.0.0.1:705      127.0.0.1:57008 users:(("snmpd",pid=1302,fd=48))                                                  
+ESTAB     0      0          127.0.0.1:57004    127.0.0.1:705   users:(("ISS.exe",pid=299,fd=27))                                                 
+ESTAB     0      0          127.0.0.1:57008    127.0.0.1:705   users:(("app_moxa_framew",pid=1228,fd=62))                                        
+$ 

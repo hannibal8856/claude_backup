@@ -1,0 +1,130 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_mxIpifdb_c
+#define _IES_AUTO_MIBS_FLAGS_net_mxIpifdb_c
+
+#define MXCFG_SET_PATH(group)           "/api/v1/setting/data/"group
+#define MXCFG_AGENT_PATH(group)         "/api/v1/setting/agent/"group
+/* # Group: l3VlanIfTable */
+#define MXCFG_GRP_ipInterface                              "ipInterface"
+#define MXCFG_SET_URI_ipInterface                          MXCFG_SET_PATH(MXCFG_GRP_ipInterface)
+#define MXCFG_GRP_ipInterface_l3VlanIfTable                "ipInterface/l3VlanIfTable"
+
+/* # Group: l3VlanIfTable */
+#define MXCFG_GRP_ipInterface_l3VlanIfTable                "ipInterface/l3VlanIfTable"
+#define MXCFG_SET_URI_ipInterface_l3VlanIfTable            MXCFG_SET_PATH(MXCFG_GRP_ipInterface_l3VlanIfTable)
+#define MXCFG_KEY_l3VlanIfTable_adminStatusUpEnable        "adminStatusUpEnable"  /* ipInterface/l3VlanIfTable/{Index}/adminStatusUpEnable */
+#define MXCFG_KEY_l3VlanIfTable_alias                      "alias"               /* ipInterface/l3VlanIfTable/{Index}/alias */
+#define MXCFG_KEY_l3VlanIfTable_ifName                     "ifName"              /* ipInterface/l3VlanIfTable/{Index}/ifName */
+#define MXCFG_KEY_l3VlanIfTable_ipv4                       "ipv4"                /* ipInterface/l3VlanIfTable/{Index}/ipv4 */
+#define MXCFG_KEY_l3VlanIfTable_mtu                        "mtu"                 /* ipInterface/l3VlanIfTable/{Index}/mtu */
+#define MXCFG_KEY_l3VlanIfTable_ipv4_ipAddress             "ipAddress"           /* ipInterface/l3VlanIfTable/{Index}//ipv4/ipAddress */
+#define MXCFG_KEY_l3VlanIfTable_ipv4_netmask               "netmask"             /* ipInterface/l3VlanIfTable/{Index}//ipv4/netmask */
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_net_mxIpifdb
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "ipInterface/l3VlanIfTable/") ) 
+    {
+        
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_READ_CREATE_v2,      entry->flags);
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_READ_CREATE_OID_URI, entry->flags);
+
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : here ...\n", __func__, __LINE__);
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "adminStatusUpEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "proxyArpEnable") ) 
+        {
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TRUTH_VALUE, entry->flags);
+        }
+        
+    }
+    
+    return IES_NOERR;
+}
+
+/**
+ * @brief function body for checking entry existance in IPifdb/ifTable
+
+ * @param[in]    p1IpAddr         ip address
+ * @param[in]    pu4Index              index in URI table
+
+ * @returns      0 means success, others fail.
+ */
+int32_t mxIpifdb_IpifConfigTable_Iftable_isExist ( char *pIfName,
+                                                                  uint32_t* pu4Index)
+{
+    JSON_Value      *jsonVal  = NULL;
+    JSON_Object     *obj      = NULL;
+    JSON_Array      *pjson_array    = NULL;
+    char            uriPath[MOXA_SNMP_MAX_URI_LENGTH] = {0};
+    int32_t         ret     = SEARCH_ERR;
+
+    //Search element
+    snprintf(uriPath, sizeof(uriPath), "%s/FILTER?%s=%s",
+                MXCFG_SET_PATH(MXCFG_GRP_ipInterface_l3VlanIfTable),
+                MXCFG_KEY_l3VlanIfTable_ifName,
+                pIfName);
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get jsonVal From (%s)\n",
+            __func__, __LINE__, uriPath);
+        return (-1);
+    }
+    
+    pjson_array = json_value_get_array(jsonVal);
+
+    if ( NULL == pjson_array )
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get pjson_array from pjson_value\n",
+            __func__, __LINE__ );
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        return SEARCH_ERR;
+    }
+
+    if (json_array_get_count (pjson_array) == 0)
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get json array count\n",
+            __func__, __LINE__);
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        return SEARCH_ERR;
+    }
+
+    obj = json_array_get_object (pjson_array, 0);
+
+    if (obj == NULL)
+    {
+        LibUtil_DbgTrace( kDbgFlgIssUriSNMP, "%% %s@%d : can't get pjson_obj from pjson_array\n",
+            __func__, __LINE__ );
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+        return SEARCH_ERR;
+    }
+
+    // Get the entry index
+    *pu4Index = json_object_dotget_number (obj, "index");
+
+    json_value_free(jsonVal);
+    jsonVal = NULL;
+    ret = SEARCH_HIT;
+
+    return ret;
+}
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_mxIpifdb_c

@@ -1,0 +1,128 @@
+# ADR-0021: 把 `mxFiberCheck` 從 dlmod 搬到 framework,並讓 `lib_moxa_ies_auto_mibs` 承擔資料處理
+
+Status:
+  **Accepted(2026-08-10)** —— 已建置、燒錄 `2026_0810_0021` 到 partition 1 並完整回歸驗收通過。
+  延伸 ADR-0020(dlmod 第一個案例 `mxMms`),第一次處理 dlmod 的**表**與**非葉子欄位**。
+
+Date: 2026-08-10
+
+Context:
+  ADR-0020 搬 `mxMms` 只需要 4 個 scalar,一對一映射就夠。`mxFiberCheck` 是使用者
+  指定的第二個目標,難度跳一級:兩張 per-port index-table、零 scalar、
+  **22 個 MIB 可存取物件中有 6 個不是單純讀葉子**(DUT 實測確認):
+
+  | 欄位 | 實際值 | 背後 |
+  |---|---|---|
+  | status `.12/.13` | `"[-9.00, -1.00]"` | 一個 JSON 陣列欄位,渲染成一欄 |
+  | config `.5/.7` | `""` | 陣列元素 **[1]**(High) |
+  | config `.6/.8` | `""` | 陣列元素 **[0]**(Low) |
+  | config `.9` | `INTEGER: 2` | 動作欄,不對應任何欄位 |
+
+  `ies_auto_mibs_entry` 只有 `uri` / `uri_index` / `val_type` / `oct_type` / `flags`,
+  **沒有「陣列元素索引」也沒有「動作欄」的概念**,所以泛用的
+  `IES_COL_IDXTBL_VALUE` 服務不了這 6 欄。
+
+  初步結論曾是「只搬 status 表」(RO/RW 分界正好落在子樹邊界,與 ADR-0016 的
+  `mxrstpdb` 同型)。**使用者否決,並指出兩件事**:
+  ① `/api/v1/setting` 與 `/api/v1/status` 應該各自送往 config / status layer;
+  ② 取值邏輯應盡量**沿用 plugin 現成的 code**,不要硬寫。
+
+Decision:
+  ① 是**既有能力,不需新工**;② 是正解,並據此擴大 `lib_moxa_ies_auto_mibs` 的職責。
+
+  **① setting/status 分流 —— 框架早就有**
+
+  `mapping_reuse.c` 的 `is_status`(由 `IES_FLAG_SNMP_URI_STATUS` 設定)已經把 GET
+  導向 `get_status_with_snap()`,預設走 `config_operation::get_config_from_path()`。
+  `mx_deviceIO` 就是這樣運作。fiber_check 的 status 表照抄該樣板即可。
+  → **分流從來不是卡點**,卡點是值的取法。
+
+  **② `lib_moxa_ies_auto_mibs` 從「只做映射」擴大為「也做資料處理」**
+
+  新增 `src/fiber_check.c`,**移植** `plugin_snmp_fiber_check.c` 而非重寫:
+
+  - `ies_fc_array_elem()` / `ies_fc_array_pair()` —— 陣列萃取。
+    格式字串逐字照抄(`"[%s, %s]"`,含逗號後空格),所以拿 manager 對 dlmod 版
+    做 diff 會是同樣的 bytes。
+  - `ies_fc_set()` —— `_PatchUri()` 的完整移植:整列 read-modify-write、
+    C/F 換算、空門檻用 SFF 預設回填、reset-to-default 語意。
+
+  新增 4 個 `IES_COL_*`;`uri_index` 用後綴編碼變體(`[0]` / `[1]` / `[]` / `[!]`),
+  `mapping_reuse.c` 解碼後**就地截斷**。就地是必要的:`emit_row()` 存的是指標,
+  映射表比迴圈長壽 —— 初版用區域緩衝區,是懸空指標。
+
+  **③ 唯一沒有照抄的地方:GET 的 fetch**
+
+  plugin 每個 getter 都以 `LibFrameworkUri_GetUri()` 開頭,**每個 OID 一次 loopback HTTP**。
+  一次 mxFiberCheck walk 是 264 個 varbind,照抄等於把 Plan E 要消除的成本原封不動裝回去。
+  → **fetch 留在 Rust in-process,只有 transform 進 C。** 這是本 ADR 唯一刻意偏離
+  「沿用現成 code」的地方,理由是效能而非語意。
+
+Consequences:
+  **驗收(image `2026_0810_0021`,partition 1)**
+
+  | | dlmod 基準 | 搬遷後 |
+  |---|---|---|
+  | 欄位 | 20 | **22** |
+  | varbinds | 240 | **264** |
+  | 耗時 | 1.874s | **1.420s** |
+
+  多出的 2 欄是 `fiberCheckConfigPortIndex` / `fiberCheckStatPortIndex`。
+
+  **對 NOS 7 mainline `2026_0805_2335` 實測(2026-08-10 補做)**:
+
+  | | 欄位 | varbinds | 耗時 |
+  |---|---|---|---|
+  | mainline | 20 | 240 | 2.077s |
+  | Plan E 搬遷前(dlmod) | 20 | 240 | 1.874s |
+  | Plan E 搬遷後 | **22** | **264** | **1.420s** |
+
+  mainline 對這兩個 OID 回 **`No Such Object`** —— 不是 `noSuchInstance`,
+  是**完全沒有註冊**。欄位集合比對:`mainline 有、Plan E 沒有` = **空集合**。
+  兩個多出來的都能用 `snmptranslate` 解出正規名稱、在 `mxFiberCheck.mib` 宣告為
+  `read-only`(非 `not-accessible`),**是 MIB 定義的物件而非多註冊**。
+
+  → 依 ADR-0017 / ADR-0010 這是**修正**,mainline 與 dlmod 都漏實作,
+  與 memory 記的 `mxPort portStatIndex` 完全同型。
+  **驗收基準必須事先講明是 22 欄,否則會被誤判成「多註冊」。**
+
+  6 個特殊欄位與 dlmod 逐位元組相同(`.9` = `INTEGER: 2`、
+  `.12` = `"[-9.00, -1.00]"`、`.13` = `"[-19.00, -1.00]"`)。
+  其餘差異只落在 `temperatureC/F`、`voltage`、`txPower` 四欄 —— 光模組即時讀值。
+
+  **零回歸**:mxMms 4、evtPort 282、stdvladb 159、mxRstp 227、mxPoe 236、
+  mxLp 82、mxMcp 38、ifTable 330、dot3 581,全部與基準線相同。
+  `plugin_snmp_fiber_check.so` 已不在 snmpd 的 maps(0 筆),
+  `plugin_snmp_fiber_check_event` 仍在(4 筆),dlmod 總映射 136 → 132。
+
+  **建置陷阱(代價最高的一項,已寫進 memory)**
+
+  改了 Rust 卻不生效,連三顆 image 的 framework 都是舊碼,成因是三層疊加:
+
+  1. 漏跑 `make app_moxa_framework-rebuild`(`rust_moxa_build` 只 build workspace,
+     **不 rsync 各 crate 原始碼**)。
+  2. 補跑之後 **cargo 仍判定 fresh** —— buildroot 的 rsync 保留 `dl/` 的 mtime,
+     比上次編譯還舊,fingerprint 認為沒變。
+  3. 兩次想 `touch` 強制重編,指令都被 rtk wrapper 擋掉(`find -exec` 不支援)而**靜默沒執行**。
+
+  真正編起來後才看到 2 個 Rust 編譯錯誤。
+  → **改完 Rust 一定要先確認 `output/build/<pkg>-custom/src/` 的內容與 mtime,
+    再看 build log 裡有沒有 `Compiling <pkg>`。**
+
+  **診斷利器**:`libmoxaiesautomibs` 匯出 `ies_map_count()` / `ies_map_entry_at()`,
+  用容器裡的 toolchain 交叉編一支小程式丟上 DUT,可直接印出執行期的
+  `table_col` / `uri_index` / `is_status`。本輪就是靠它證明 **C 端完全正確、
+  問題在 Rust**,少走很多冤枉路。範例留在 `~/sofswap/dumpmap.c`。
+
+Constraints / Assumptions:
+  - `ies_fc_set()` 尚未在 DUT 上實測 SET(本輪只驗 GET 與完整性)。
+    語意來自移植,但**未經 wire 驗證**,標為待辦。
+  - 後綴編碼(`[0]`/`[1]`/`[]`/`[!]`)目前只有 fiber_check 用。若第三個 group
+    也需要,應該重新檢視是否值得在 `ies_auto_mibs_entry` 加正式欄位,
+    而不是繼續往 `uri_index` 塞語意。
+  - `plugin_moxa_fiber_check` 在 branch `snmp-agentx`(既有),
+    不是其他 repo 用的 `snmp-plan-E`。
+
+Related ADRs:
+  ADR-0020(dlmod 第一個案例)、ADR-0017(完整性以 MIB 物件集合判定)、
+  ADR-0016(RO/RW 落在子樹邊界)、ADR-0010(MIB 為權威)。

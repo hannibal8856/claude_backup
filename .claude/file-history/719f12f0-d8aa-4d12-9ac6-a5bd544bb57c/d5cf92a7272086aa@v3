@@ -1,0 +1,147 @@
+# ADR-0010: 以 MIB 為 SNMP 側的權威來源,並以工具比對 ies-auto-mibs 的 OID 表
+
+Status: Accepted（做法 C「查 MIB」與 B「比對工具」已落地；A「由 MIB 產生註冊資料」暫緩。
+  **首次掃描發現的 drift 已記錄於下,收斂方式待決定**）
+Date: 2026-07-29
+
+Context:
+  framework AgentX subagent 的 OID 表(`ies_map`)完全建構自
+  `3rdparty_net_snmp/ies-auto-mibs/net_mx_*.h`,該來源提供 OID↔URI 映射,但：
+  - `mode` 只有 `HANDLER_CAN_RONLY` / `RWRITE`,**沒有 `not-accessible` 的概念**；
+  - `val_type` 是 Moxa 內部 tag,與 MIB 的 SYNTAX 沒有任何對帳機制。
+
+  結果是 2026-07-29 為 mxTurboRingV2 反覆繞路：「ring index 欄該不該回」「designatedMaster
+  要幾個 byte」「turboRing 是 named-key 還是陣列」全靠 DUT walk 實驗猜,並且一度**以 NOS v7.0
+  mainline 的行為當作正確基準**去反推 —— 而 mainline 不是規格。
+
+  查閱 `buildroot/dl/snmp_moxa_mib/private/mxTrv2.mib`（目錄為**單數** `snmp_moxa_mib`）後,
+  當場推翻一個已寫入 memory 的結論：`trv2ConfigRingTableEntryIndex` 與
+  `trv2StatRingTableEntryIndex` 的 **MAX-ACCESS 是 `read-only`**（應可被 walk）,而同一份 MIB 的
+  `trv2StatDynamicRingCouplingTableEntryGroupIndex` 才是 `not-accessible`。
+  → **「與 mainline 不同」不等於「我們錯」；MIB 才是判準,而且它逐欄定義,不可一概而論。**
+
+  ## framework 引用 lib_moxa_ies_auto_mibs 之後的結構：一份資料源、兩套投影與展開
+
+  常見誤解是「framework 另外建了一份 SNMP→URI mapping table」。**並非如此** ——
+  `lib_moxa_ies_auto_mibs/src/mapping_reuse.c` 的開頭註解即為
+  「Single source of truth: instead of hand-copying OID<->URI rows, #include the …」,
+  它 `#include` 的正是 in-master 那批 `3rdparty_net_snmp/ies-auto-mibs/net_mx_*.h`
+  與對應的 `ies_auto_mibs_setup_net_*.c`（填 flags/mod_uri）。**mapping 資料只有一份。**
+
+  但要區分三層,額外建立的是後兩層：
+
+  | 層 | 份數 | 內容 |
+  |---|---|---|
+  | **① 資料源** | **1 份（共用）** | `net_mx_*.h` + setup fn → `struct ies_auto_mibs_entry`（OID、URI、val_type、mode、flags、mod_uri） |
+  | **② 投影** | **2 份（各自）** | framework：`build_reuse_table()` → `struct ies_map_entry`；in-master：直接使用原 struct |
+  | **③ 展開** | **2 份（各自）** | framework：`is_index_table()` / `is_turboring_ring()` / `is_ports_pbmp()` 等啟發式判斷推導 `table_col` 並展列；in-master：`snmp_script/src/generate_uri_snmp_table.py` 依 URI 分派到 **per-table 手寫函式** |
+
+  **② 投影存在的正當理由**：`ies_auto_mibs_entry` 使用 net-snmp 的 `oid` 型別與 `HANDLER_CAN_*` 巨集；
+  `ies_map_entry` 改用 `moxa_oid`(= `unsigned long`),使 Rust FFI 端無須依賴 net-snmp 的型別定義
+  （ADR-0002 的「純資料層」）。**投影是刻意的,不是重複。**
+
+  **但 2026-07-28～30 所有 drift 都出在 ② 與 ③,無一出在 ①：**
+  - **OID↔URI 從未出錯**（同源,結構上不可能分岔）。
+  - **② 是有損投影**：`flags`（bit array）未帶過來 → coupling port 值少 1（本 ADR 的 #3）。
+    修法只能「逐個語意再挖一個欄位」：先有 `is_status`,2026-07-30 又加 `is_iface`。
+  - **③ 兩邊各寫一套**：framework 用啟發式判斷,in-master 是一張表一個手寫 python 函式 →
+    turboRing 被誤判為陣列 index-table（named-key 才對）、`interface` 欄產生 16 個永遠無值的 OID、
+    ring index 欄該不該回,全部源自這一層。
+
+  **結論**：「讓 framework 參照 `.h`」不足以解決問題 —— framework 早就參照了。真正缺的是 ② ③ 的
+  正確性約束；而 ② ③ 分屬 Rust in-process 與 C+Python shell-out 兩套實作,合併成本極高,現實上會繼續並存。
+  → **MIB 是唯一能同時約束兩邊、且不屬於任何一邊的外部判準**,而 `not-accessible` / `SYNTAX`
+  正好就是 ② 丟掉、③ 猜錯的那些資訊。這是本 ADR 採「MIB 為權威」的根本理由。
+
+Decision:
+  1. **（C,已採用）開發與除錯時以 MIB 為權威**：遇到 framework 與 mainline 的 SNMP 行為差異,
+     第一步是查 `snmp_moxa_mib/private/<group>.mib` 的 MAX-ACCESS 與 SYNTAX,而不是比對兩邊 walk。
+  2. **（B,已完成）建立比對工具 `~/mds4xgl3/tools/check_ies_map_vs_mib.py`**：
+     純 Python、零外部相依（環境無 `smidump`；`snmptranslate` 為 pysnmp 版,只吃編譯過的
+     MIB,無法解析 ASN.1,故自寫 MIB 與 `.h` 兩個 parser）。
+     比對三件事：MIB 標 `not-accessible` 卻被註冊（ERROR）、`val_type` 與 SYNTAX 不符（WARN）、
+     OID 在任何 MIB 都找不到（INFO）。
+     預設只檢查 `iss_build == 0`；`--all` 含 ISS 服務者；`--group PREFIX` 限範圍；
+     **有 ERROR 時 exit 1,可作為 CI gate**。
+  3. **（A,暫緩）** build 時由 MIB 產生註冊資料（libsmi/smidump 之類）：
+     等 `Subtree` 註冊推廣到更多 group、drift 累積到值得自動化時再評估。
+     屆時亦須先決定「MIB 與 `.h` 衝突時誰贏」。
+  4. 型別對帳的判準：整數類（INTEGER/Gauge/Counter/TimeTicks/RowStatus）之間、
+     字串類（OCTET STRING/DisplayString）之間視為可互換,不報。
+     **`MacAddress` 必須對應 `SNMP_DATA_TYPE_MAC_ADDRESS`(0xF4)** —— 它是 `OCTET STRING (SIZE(6))`,
+     須輸出 6 個 raw byte；而 `PhysAddress` 無 SIZE 限制,對應 `OCTET_PRIM`(0x04) 即可
+     （初版曾把 PhysAddress 也要求 0xF4,造成 2 筆誤報,已修正）。
+
+Verification (2026-07-29):
+  - 解析 3131 個 MIB 物件（private/standard/product）。
+  - **`GROUPS` 註冊表四筆全數通過核對**：root OID、col 範圍、型別皆與 MIB 相符
+    （trustedIp `.602.1.4.1.2` 1..4 / snmpTrapHost `.602.7.2.1.3` 1..5 /
+    l3VlanIf `.605.1.1.1.1` 1..8 / mxTurboRingV2 `.603.3.4` subtree）。
+  - 附帶證實 `ipifConfigIfVlanId` 的 SYNTAX 為 `Integer32 (0..4094)` →
+    **in-master 以 `atoi("vlanN")` 回 `0` 不符 MIB**,framework 的 strip `"vlan"` 才正確。
+
+## 首次掃描發現的 drift（**尚未收斂,待決定**）
+
+`iss_build == 0`（framework 服務）：**6 ERROR / 1 WARN / 4 INFO**（745 個 entry）
+`--all`（含 ISS）：**7 ERROR / 5 WARN / 487 INFO**
+
+### ERROR — 註冊了 MIB 標 `not-accessible` 的 OID
+| OID | `.h` 名稱 | MIB 物件 | iss0? |
+|---|---|---|---|
+| `.8691.602.2.1.1.1.5` | deviceDnsServer1 | `mxMiConfigIpv4DnsServerTable`(mxManagementIp) | ✔ |
+| `.8691.602.8.6.2.2.1.1` | deviceIOStatusPoePowerTableIndex | `deviceioStatPoePowerIndex`(mxDeviceIo) | ✔ |
+| `.8691.602.8.6.2.4.1.1` | deviceIOStatusPoePowerTableIndex | `deviceioStatRelayIndex`(mxDeviceIo) | ✔ |
+| `.8691.602.4.1.2.1.1.1` | userAccountTableIndex | `snmpServerUserIndex`(mxSnmp) | ✔ |
+| `.8691.602.8.2.1.2.1.1` | syslogServer_syslogServerTable_index | `syslogConfigServerNum`(mxSyslog) | ✔ |
+| `.8691.603.3.4.3.3.1.1` | stat_turboringv2_dynRingCoupTable_index | `trv2StatDynamicRingCouplingTableEntryGroupIndex`(mxTrv2) | ✔ |
+| `.1.3.6.1.2.1.17.7.1.2.2.1.1` | Dot1qTpFdbAddress | `dot1qTpFdbAddress`(Q-BRIDGE-MIB) | ISS |
+
+### WARN — 型別與 MIB SYNTAX 不符（**其中兩組是 OID 語意錯位,不只是型別問題**）
+- **`.8691.602.2.1.1.1.6` deviceDnsServer2** → MIB 為 `mxMiConfigIpv4DhcpBootfileEnable`(TruthValue)。
+  MIB 的 `mxMiConfigIpv4` 底下 `.5` 已改為 `DnsServerTable`(一張表)、`.6` 被 `DhcpBootfileEnable` 佔用,
+  但 `.h` 仍當成兩個 scalar。→ **會用 `IP_ADDR_PRIM` 去回答一個 TruthValue 物件（錯的 OID + 錯的型別）**。
+- **`.8691.605.2.1.1.1.1.4/5/6` UcastRoutingTbl 三欄整排錯位**（ISS 服務）：
+  `.h` col4=NexthopIp / col5=VlanInterface / col6=Distance,
+  MIB col4=`rttblStatNexthopInterface`(DisplayString) / col5=`rttblStatNexthopIp`(IpAddress) /
+  col6=`rttblStatADMetric`(DisplayString) —— **整排差一位**。
+- `.1.3.6.1.2.1.17.7.1.2.2.1.1` Dot1qTpFdbAddress：`.h`=OCTET_PRIM,MIB=`MacAddress`（應為 6 raw byte）。
+
+### INFO — OID 在載入的 MIB 中找不到
+`iss_build==0` 僅 4 筆:`snmpv3_engine*`(`.1.3.6.1.6.3.10.2.1.x`,SNMP-FRAMEWORK-MIB)。
+`--all` 達 487 筆,集中在 **標準 MIB 未收錄於本 repo**：LLDP(`1.0.8802.1.1.2.x` 等)、
+IEEE802.1(`1.3.111.2.802.1.1.x`)、`1.2.840.10006.300.43.1.2`、VRRP(`1.3.6.1.2.1.68.x`)、
+IP-FORWARD(`1.3.6.1.2.1.4.24`) 等 → **屬工具涵蓋範圍限制,非 OID 錯誤**；
+若要檢查這些,需把對應標準 MIB 放進 `snmp_moxa_mib/standard/`。
+
+Alternatives Considered:
+  - **繼續以 mainline 行為當基準比對**：已證實會得到錯誤結論（ring index 欄那次判斷反了）。
+  - **只做 C(人工查 MIB),不寫工具**：turboRing 一組尚可,但 745 個 entry 的系統性 drift
+    （如 deviceDnsServer 的 OID 語意過時）人工不可能發現。
+  - **直接做 A(由 MIB 生成註冊資料)**：工程量大,且在 `.h` 與 MIB 已知存在多處衝突的情況下,
+    先要決定衝突仲裁規則,不宜先行。
+
+Consequences:
+  - 取得一個可重複執行、可進 CI 的 drift 檢查；`GROUPS` 表的 root/col 從此有客觀依據。
+  - **drift 的收斂方式尚未決定**,兩條路各有代價：
+    - 改 `net_mx_*.h`：最根本,但**in-master 與 framework 共用同一份 `.h`**,會同時改變 in-master 行為;
+    - 在 `mapping_reuse.c` 過濾：只影響 framework,in-master 不動,但 `.h` 的錯誤留著、下次仍會誤導。
+  - `deviceDnsServer1/2` 與 `UcastRoutingTbl` 這兩組**不是單純多回 OID**,而是 OID 語意/欄位順序
+    已與 MIB 脫節；單純過濾不會讓功能正確,須先確認 MIB 改版後的正確 OID 與欄位對應。
+  - 工具目前僅涵蓋 `snmp_moxa_mib/` 收錄的 MIB；標準 MIB 大量缺漏（487 筆 INFO）為已知限制。
+
+Constraints / Assumptions:
+  - MIB 檔為 SNMP 行為的權威;若 MIB 本身過期,結論同樣會錯（本 ADR 未驗證 MIB 與韌體實際版本的一致性）。
+  - 工具的 MIB parser 為自寫的輕量實作（狀態機 + 符號表遞迴解析),不支援完整 ASN.1;
+    目前對 3131 個物件解析成功,但非 SMI 標準實作。
+
+Related Files / Modules:
+  - ~/mds4xgl3/tools/check_ies_map_vs_mib.py（本案工具）
+  - buildroot/dl/snmp_moxa_mib/{private,standard,product}/*.mib（權威來源）
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_mx_*.h（OID↔URI 映射,含 val_type/iss_build）
+  - buildroot/dl/3rdparty_net_snmp/snmp_tools/inc/ies_auto_mibs_handle.h（`SNMP_DATA_TYPE_*` 定義）
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c（ies_map 建構與過濾,可能的收斂點之一）
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs（`GROUPS` 註冊表,已通過 MIB 核對）
+
+Related ADRs:
+  - 支撐 ADR-0009：`GROUPS` 表的 root / min_col / max_col 以 MIB 為準,已核對通過。
+  - 補充 ADR-0002（lib_moxa_ies_auto_mibs 為純資料層）：本案指出該資料層缺少 MAX-ACCESS 維度。

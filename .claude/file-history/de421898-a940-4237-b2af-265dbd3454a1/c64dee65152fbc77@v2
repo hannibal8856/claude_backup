@@ -1,0 +1,44 @@
+################################################################################
+#
+# lib_moxa_ies_auto_mibs
+#
+################################################################################
+
+LIB_MOXA_IES_AUTO_MIBS_SITE="$(TOPDIR)/dl/lib_moxa_ies_auto_mibs"
+LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING=YES
+LIB_MOXA_IES_AUTO_MIBS_DEPENDENCIES=3rdparty_net_snmp lib_moxa_utility
+
+# The lookup table is compiled from ies-auto-mibs, so this package builds
+# against 3rdparty_net_snmp's source tree rather than a copy.
+LIB_MOXA_IES_AUTO_MIBS_IES_SRC_DIR=$(TOPDIR)/dl/3rdparty_net_snmp
+
+# The -D set MUST be identical to snmpd's, or the two entry sets differ with no
+# error message. Rather than duplicating the twenty-odd `ifeq (${BR2_...}, y)`
+# conditions from 3rdparty_net_snmp.mk - which would then have to be kept in
+# sync by hand - take the result straight from that package. Every Buildroot
+# .mk is read into the same make process, and _BUILD_CMDS is expanded when the
+# recipe runs, so this does not depend on include order.
+#
+# Only -D% is taken: 3RDPARTY_NET_SNMP_CFLAGS also carries -I$(@D)/... paths
+# that are relative to net-snmp's own build directory.
+LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS=$(filter -D%,$(3RDPARTY_NET_SNMP_CFLAGS))
+
+define LIB_MOXA_IES_AUTO_MIBS_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) CC=$(TARGET_CC) \
+		IES_SRC_DIR="$(LIB_MOXA_IES_AUTO_MIBS_IES_SRC_DIR)" \
+		MOXA_DEFS="$(LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS)"
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(STAGING_DIR) install CC=$(TARGET_CC) \
+		IES_SRC_DIR="$(LIB_MOXA_IES_AUTO_MIBS_IES_SRC_DIR)" \
+		MOXA_DEFS="$(LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS)"
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_TARGET_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install CC=$(TARGET_CC) \
+		IES_SRC_DIR="$(LIB_MOXA_IES_AUTO_MIBS_IES_SRC_DIR)" \
+		MOXA_DEFS="$(LIB_MOXA_IES_AUTO_MIBS_MOXA_DEFS)"
+endef
+
+$(eval $(generic-package))

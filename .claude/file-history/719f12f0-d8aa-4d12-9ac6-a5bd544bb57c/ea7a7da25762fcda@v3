@@ -1,0 +1,36 @@
+---
+name: framework-vs-mainline-snmp-diffs
+description: snmp-plan-E branch 的 framework subagent 與 NOS v7.0 mainline 的已知 SNMP 行為差異(mxTurboRingV2 實測三處)
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 719f12f0-d8aa-4d12-9ac6-a5bd544bb57c
+  modified: 2026-07-29T10:01:54.145Z
+---
+
+`snmp-plan-E` branch(framework AgentX subagent 服務 mxTurboRingV2)與 **NOS v7.0 mainline**(in-master 服務)的 `snmpwalk .1.3.6.1.4.1.8691.603.3.4` 實測差異,2026-07-29:**我們 25 個 OID、mainline 23 個**。
+
+| # | OID | 我們 | mainline | 依 MIB 誰正確 |
+|---|---|---|---|---|
+| 1a | `.1.2.1.1.x` config ring index | `1`,`2` | 無 | **我們對** |
+| 1b | `.2.1.1.1.x` stat ring index | `1`,`2` | 無 | **我們對** |
+| 2 | `.1.2.1.4.x` ring interface | 無 | `01 02`,`03 04` | **mainline 對**(我們缺功能) |
+| 3 | `.1.3.3.0` coupling port | `4` | `5` | **mainline 對**(我們值錯) |
+
+**權威來源 = `buildroot/dl/snmp_moxa_mib/private/mxTrv2.mib`**(不是 `snmp_moxa_mibs`,目錄是單數 `snmp_moxa_mib`)。
+
+**#1 index 欄 —— 我們是對的,mainline 不符 MIB**:
+`trv2ConfigRingTableEntryIndex` 與 `trv2StatRingTableEntryIndex` 的 **MAX-ACCESS 都是 `read-only`**,依 MIB **應該**能被 walk 到。同一份 MIB 裡 `trv2StatDynamicRingCouplingTableEntryGroupIndex` 才是 `not-accessible` —— 證明它有明確區分,不是「INDEX 欄一律 not-accessible」。
+mainline 的 `generate_mxTr2_configPortTable()` 明明有寫出 `## tableEntryIndex` 的值,walk 卻不回,**原因未明(mainline 側的缺失)**。framework 這邊由 `mapping_reuse.c::is_turboring_ring()` 納入 `uri_index=="index"` 而正確回出。
+
+**#2 interface(REDUNDANT_PORT)**:framework 未實作,mapping 註解本就標 deferred。2026-07-29 修 `is_index_table()`(排除 named-key ring)讓 deferred 真正生效。**修正前那 16 個 `.1.2.1.4.1~16` 路徑被組成 `"turboringv20/interface"`、全是 noSuchInstance,從未有正確值** → 非 regression。mainline 編碼:`port_index+1`(iftype 為 PORT_CHANNEL 再 `+MAX_PORT_NUM`),兩埠 `"%02x%02x"` 成 2-byte OCTET STRING。
+
+**#3 最重要 —— flag 語意未搬移**:in-master `ies_auto_mibs.c::entry_handle_generate_uri_value_file()` 對帶 `IES_FLAG_SNMP_URI_INTERFACE` 的 entry 做 **`uri_iface + 1`**(0-based config port → 1-based SNMP interface)。framework 直接回 config 原值,少 1。
+**根因:`struct ies_map_entry` 根本沒有 flags 欄位** —— in-master 的 flag 只有 `is_status` 被搬到 framework(`emit_row()`),`URI_INTERFACE`、`FIXED_VALUE`、`TR2_REPLACE_URI`(靠 baked 進 uri 的 mod_uri 間接處理)等都沒帶過來。`REPLACE_TRUTH_VALUE` 的效果剛好被 handler 的 bool→1/2 涵蓋,屬巧合。
+
+**Why:** 「與 mainline 不同」≠「我們錯」。實際三處中有一處是 mainline 不符 MIB。#3 是**一類**問題 —— 任何帶 `IES_FLAG_SNMP_URI_INTERFACE` 的 OID 都會少 1,需清查還有哪些 group 用到該 flag。
+
+**⚠️ 最重要的教訓:先查 MIB,不要靠 walk 實驗猜。**
+`snmp_moxa_mib/private/*.mib` 是 SNMP 側的**權威定義**(MAX-ACCESS 決定該不該出現在 walk、SYNTAX 決定型別與編碼、INDEX 子句決定 table 結構),而 `3rdparty_net_snmp/ies-auto-mibs/net_mx_*.h` 是 URI 側的映射(uri / uri_index / flags)。**framework 的 ies_map 只用了後者,完全沒有參照 MIB** —— 所以「index 欄該不該回」「designatedMaster 要 6-byte」「turboRing 是 named-key 還是陣列」全靠實驗反覆試,2026-07-29 為此繞了很多路。`.h` 的 `mode` 只有 RONLY/RWRITE,**沒有 not-accessible 的概念**,這正是 MIB 能補上的缺口。
+
+**How to apply:** 遇到 framework vs mainline 的 SNMP 行為差異,**第一步是開 `snmp_moxa_mib/private/<group>.mib` 查該 OID 的 MAX-ACCESS 與 SYNTAX**,再判斷誰對。收斂順序:#3 優先(值是錯的,在 `ies_map_entry` 補 flags 欄位並實作 `URI_INTERFACE` 的 +1);#2 實作 REDUNDANT_PORT(MIB: OCTET STRING、read-write、兩 octet 分別為 primary/secondary interface);#1 我們已正確,不需改。相關:[[project_snmp_walk_slow_diagnosis]]、[[project_mxipif_col2_inmaster_deferred]]、[[project_snmp_framework_subagent_migration]]。

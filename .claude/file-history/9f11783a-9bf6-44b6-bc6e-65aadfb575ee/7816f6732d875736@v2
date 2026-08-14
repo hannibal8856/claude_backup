@@ -1,0 +1,40 @@
+#!/usr/bin/expect -f
+# Run a local shell script on the DUT as root, non-interactively.
+# Avoids the DUT's interactive zsh (ZLE redraws corrupt fast input).
+#   usage: dutrun.exp <local_script> [timeout_s]
+set script [lindex $argv 0]
+set tmo    [expr {[llength $argv] > 1 ? [lindex $argv 1] : 300}]
+set host "192.168.127.253"
+set user "admin"
+set pw   "moxa"
+
+set SSHOPT "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=password -o HostKeyAlgorithms=+ssh-rsa -o KexAlgorithms=+diffie-hellman-group14-sha1 -o LogLevel=ERROR"
+
+log_user 0
+# --- 1. copy the script over (stdin redirect, no interactive shell) ---
+set timeout 60
+set cmd1 "ssh $SSHOPT $user@$host 'cat > /tmp/_dutrun.sh' < $script"
+spawn sh -c $cmd1
+expect { -re "(P|p)assword: " { send "$pw\r" } timeout { puts "*** ssh(copy) no prompt"; exit 3 } }
+expect eof
+catch {wait}
+
+# --- 2. run it as root under a tty so su can prompt ---
+log_user 1
+set timeout $tmo
+set cmd2 "ssh -t $SSHOPT $user@$host \"su -c 'sh /tmp/_dutrun.sh'\""
+spawn sh -c $cmd2
+expect { -re "(P|p)assword: " { send "$pw\r" } timeout { puts "*** ssh(run) no prompt"; exit 3 } }
+# second Password: is su's
+expect {
+    -re "(P|p)assword: " { send "$pw\r" }
+    -re "__DUTRUN_BEGIN__" { }
+    timeout { puts "*** su no prompt"; exit 4 }
+}
+expect {
+    -re "__DUTRUN_END__" { }
+    timeout { puts "\n*** TIMEOUT after ${tmo}s ***"; exit 5 }
+}
+expect eof
+catch {wait}
+exit 0

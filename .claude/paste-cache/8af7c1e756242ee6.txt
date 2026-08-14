@@ -1,0 +1,53 @@
+Welcome to MOXA
+moxa login: admin
+ 
+Password: 
+$ su
+Password: 
+$ cat -n /etc/moxa/version/BUILD_TIME 
+     1  2026_0727_1240
+$ netstat -antul | grep ":161"
+udp        0      0 0.0.0.0:161             0.0.0.0:*                           
+udp        0      0 :::161                  :::*                                
+$ ss -antp | grep ":705"
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1288,fd=46))                                                  
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:48866 users:(("snmpd",pid=1288,fd=48))                                                  
+ESTAB      0      0          127.0.0.1:48850    127.0.0.1:705   users:(("ISS.exe",pid=301,fd=28))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:48850 users:(("snmpd",pid=1288,fd=47))                                                  
+ESTAB      0      0          127.0.0.1:48866    127.0.0.1:705   users:(("app_moxa_framew",pid=1204,fd=62))       
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:16 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.3
+iso.3.6.1.4.1.8691.602.7.3.1.1.0 = STRING: "0.0.0.0"
+iso.3.6.1.4.1.8691.602.7.3.1.2.0 = INTEGER: 25
+iso.3.6.1.4.1.8691.602.7.3.1.3.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.4.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.5.0 = STRING: "admin@localhost.com"
+iso.3.6.1.4.1.8691.602.7.3.1.6.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.7.3.1.7.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.8.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.9.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.10.0 = ""
+iso.3.6.1.4.1.8691.602.7.3.1.11.0 = ""
+
+$ grep 'PocEmail-DBG' /run/util_debug/debug_log_5 | tail
+$ 
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:16 $ /usr/bin/snmpset  -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.7.3.1.2.0 i 2626
+Error in packet.
+Reason: notWritable (That object does not support modification)
+Failed object: iso.3.6.1.4.1.8691.602.7.3.1.2.0
+
+
+$ cat /moxa/run/flask-moxa-config-layer/RunningConfig/email.json
+{"serverAddress":"0.0.0.0","serverPort":25,"userName":"","password":"","senderAddress":"admin@localhost.com","enableTls":false,"recipientEmailAddress1":"","rec
+ipientEmailAddress2":"","recipientEmailAddress3":"","recipientEmailAddress4":"","recipientEmailAddress5":""}#                                                  
+$ 
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:21 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.3.1.2.0 
+iso.3.6.1.4.1.8691.602.7.3.1.2.0 = INTEGER: 25
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:23 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.7.3.1.1.0 
+iso.3.6.1.4.1.8691.602.7.3.1.1.0 = STRING: "0.0.0.0"
+

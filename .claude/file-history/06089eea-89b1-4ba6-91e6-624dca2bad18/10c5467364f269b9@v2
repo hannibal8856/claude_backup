@@ -1,0 +1,23 @@
+#!/bin/bash
+set -u
+M=$HOME/edsg4000/buildroot/moxa
+BR=clippy-scan-binary-packages-3
+cd "$M" || exit 1
+[ "$(git branch --show-current)" = "$BR" ] || { echo "ABORT: 不在 $BR"; exit 1; }
+
+# 只 add 預期類型:.mk / post-build.sh / defconfig
+git add 'package/*/*/*.mk' board/net/common/post-build.sh configs/edsg4000_defconfig
+
+echo "=== staged 檔案分類 ==="
+echo "  .mk: $(git diff --cached --name-only | grep -c '\.mk$')"
+echo "  post-build.sh: $(git diff --cached --name-only | grep -c 'post-build.sh')"
+echo "  defconfig: $(git diff --cached --name-only | grep -c 'defconfig')"
+echo "  其他(應0): $(git diff --cached --name-only | grep -vE '\.mk$|post-build.sh|defconfig' | wc -l)"
+git diff --cached --name-only | grep -vE '\.mk$|post-build.sh|defconfig'
+echo "  未 staged 的改動(應只剩 untracked build 產物):"
+git status --porcelain | grep -v '^??' | grep -v '^M  \|^A  ' | head
+
+git commit -q -m "Issue: #4451: Remove Clippy scans for Rust library packages" && \
+  echo "✓ committed: $(git rev-parse --short HEAD)  msg=$(git log -1 --format=%s)"
+echo "領先 base: $(git rev-list --count origin/NOS_v6.0_EDS_develop..HEAD) commit"
+echo "本 commit 改動檔數: $(git show --stat --format= HEAD | grep -c '|')"

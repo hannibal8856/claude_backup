@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# lat.py <pcap> [label] : pair SNMP req/resp by request-id, report latency per OID group.
+import subprocess, sys, statistics as st
+
+path  = sys.argv[1]
+label = sys.argv[2] if len(sys.argv) > 2 else path.split("/")[-1]
+
+out = subprocess.run(
+    ["tshark", "-r", path, "-Y", "snmp", "-T", "fields",
+     "-e", "frame.time_epoch", "-e", "udp.dstport", "-e", "snmp.request_id", "-e", "snmp.name"],
+    capture_output=True, text=True).stdout
+
+GROUPS = [("ifTable",   "1.3.6.1.2.1.2.2."),
+          ("ifXTable",  "1.3.6.1.2.1.31."),
+          ("fiberCheck","1.3.6.1.4.1.8691.603.5.3.")]
+
+req = {}
+lat = {g: [] for g in ["ifTable","ifXTable","ifTable+ifXTable","fiberCheck","other"]}
+
+for line in out.splitlines():
+    f = line.split("\t")
+    if len(f) < 4 or not f[2]:
+        continue
+    t, dport, rid, names = float(f[0]), f[1], f[2], f[3]
+    if dport == "161":                      # request
+        ift = "1.3.6.1.2.1.2.2." in names
+        ifx = "1.3.6.1.2.1.31." in names
+        fc  = "1.3.6.1.4.1.8691.603.5.3." in names
+        grp = ("ifTable+ifXTable" if (ift and ifx) else
+               "ifTable" if ift else "ifXTable" if ifx else
+               "fiberCheck" if fc else "other")
+        req[rid] = (t, grp)
+    else:                                   # response
+        if rid in req:
+            t0, grp = req.pop(rid)
+            lat[grp].append((t - t0) * 1000.0)
+
+print(f"=== {label} ===")
+print(f"{'group':<12}{'n':>6}{'median':>10}{'p95':>10}{'max':>10}   (ms)")
+for g in ["ifTable", "ifXTable", "ifTable+ifXTable", "fiberCheck", "other"]:
+    v = sorted(lat[g])
+    if not v:
+        continue
+    p95 = v[min(len(v) - 1, int(len(v) * 0.95))]
+    print(f"{g:<12}{len(v):>6}{st.median(v):>10.2f}{p95:>10.2f}{max(v):>10.2f}")
+allv = [x for g in lat for x in lat[g]]
+if allv:
+    s = sorted(allv)
+    print(f"{'ALL':<12}{len(s):>6}{st.median(s):>10.2f}"
+          f"{s[min(len(s)-1,int(len(s)*0.95))]:>10.2f}{max(s):>10.2f}")

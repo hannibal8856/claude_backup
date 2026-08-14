@@ -1,0 +1,94 @@
+# ADR-0017: 「委派表的第 1 欄從連續 walk 消失」在 NOS 7 mainline 同樣存在;完整性一律以「MIB 物件集合」判定
+
+Status:
+  **Accepted（2026-08-09）** —— 純判準與事實更正,未產生任何 repo 改動。
+  本 ADR **補正 ADR-0011 的一項事實判斷**(ADR-0011:134 稱該現象「不是已上線的既有缺陷」),
+  但 **ADR-0011 的決策本身(委派 `stdethdb/`)仍然成立、未被取代**。
+  依規則不改寫 ADR-0011 的 Context / Decision / Alternatives。
+
+Date: 2026-08-09
+
+Context:
+  ADR-0011:131 由 `stdethdb/` 的實測歸納出一條實用規則:
+
+  > 被委派的表中,若 in-master 保留的 RW 欄剛好是第 1 欄,整棵樹連續 walk 會漏掉該欄。
+
+  並在 :134 明確判定:「`ifmibdb/` 經實測**不受影響** …… 所以這**不是**已上線的既有缺陷,
+  是 stdethdb 這個特定形狀才踩到。」該判定的證據是「Plan E 內部另一個群組不受影響」,
+  **沒有與 NOS 7 mainline 對照過**。
+
+  2026-08-08 為了驗收 `+getfwd` 逐行 opt-in(ADR-0014)而切到 mainline `2026_0805_2335`
+  重量 dot3 時,發現這個前提不成立。
+
+Decision:
+  記錄兩件事,並確立一條驗收判準。
+
+  **① 事實更正:該現象在 mainline 同樣存在,不是 Plan E 特有。**
+
+  受測欄位 `dot3PauseAdminMode`(`.1.3.6.1.2.1.10.7.10.1.1`,13 列):
+
+  | image | `.10.7` 連續 walk 是否含該欄 | targeted walk / exact GET |
+  |---|---|---|
+  | planE `2026_0808_0844` | **否**(逐欄統計 `.10.1.1` = 0 筆) | 13 筆,正常 |
+  | **mainline `2026_0805_2335`** | **否**(逐欄統計 `.10.1.1` = 0 筆) | 13 筆,正常 |
+
+  同一份 walk 裡 `.10.1.2`–`.10.1.6` 兩邊都是 13 筆,證明不是整張表消失,就是第 1 欄。
+  機制側佐證(planE):`getnext .10.7.9.1.3.12` 直接回 `.10.7.10.1.2.1`,越過整個
+  `.10.1.1.*`;但 `getnext .10.7.9.9.9.9` 與 `getnext .10.7.10` 都能正確落在
+  `.10.7.10.1.1.1`。→ 只有「從 ISS 服務的區段連續走出來」這條路徑會跳過孤島。
+
+  → ADR-0011 的**現象描述與機制推論正確**,但「不是既有缺陷」這個判斷,
+  在以 mainline 為基準時**不成立**。委派沒有製造這個缺陷。
+
+  **② 驗收判準:完整性一律比「MIB 物件集合」,不比 varbind 總數。**
+
+  程序:
+  1. 取兩側 walk 輸出,`sed 's/ =.*//'` 去值、`sort -u` 得 OID 集合,`comm -23` 求差集。
+  2. 再 `sed 's/\.[0-9]*$//' | sort -u` 得**欄位(MIB 物件)集合**,同樣求差集。
+  3. **凡是消失的欄位,一律回 `snmp_moxa_mib/private/<group>.mib` 查 MAX-ACCESS**
+     (依 ADR-0010,MIB 是 SNMP 側的權威)。
+  4. 消失但仍可 targeted walk / exact GET 的,要標明是「連續 walk 不可見」而非「資料消失」
+     —— 兩者對使用者的意義完全不同。
+
+Alternatives Considered:
+  - **改寫 ADR-0011:134 那句話** —— 違反 ADR 規則(不得為了配合後來的認知而改寫舊 ADR 內文),
+    且會抹掉「當時憑什麼這樣判斷」這個唯一不可替代的資訊。改採本 ADR 補正 + 在 ADR-0011
+    的 Status 加一行指標。
+  - **把 ADR-0011 標成 Superseded** —— 不正確。被補正的只是其中一項事實判斷,
+    委派 `stdethdb/` 的決策與其餘結論都仍然有效。
+  - **以 varbind 總數作為完整性標準** —— 已兩度造成誤判:dot3 由 594 變 581 一度被我判成回歸
+    (實際 mainline 只有 329,且集合差集為 0);mxRstp 由 235 變 227 一度被判成回歸
+    (實際欄位數 25 → 27,唯一消失的欄位 MIB 標 `not-accessible`)。否決。
+
+Consequences:
+  - **`stdethdb/` 委派後 dot3 少的那 13 筆不算回歸**,因為 mainline 同樣不在連續 walk 回它。
+    對 mainline 的集合差集是 **0**(`comm -23` 實測),planE 反而多 17 個欄位
+    (含整張 `dot3CollTable`)。
+  - ADR-0011 的實用規則仍應遵守 —— 它仍是**選候選時的形狀判準**(避開「RW 欄為表第 1 欄」
+    的群組),只是不能再被當成「Plan E 引入的回歸」來記帳。
+  - 本判準的第二個實例見 ADR-0016:`mxRstp` 的 `rstpStatPortIndex` MAX-ACCESS 是
+    `not-accessible`,委派後消失是**修正**,mainline 回那 11 個 instance 才不符 MIB。
+    兩個實例方向相反(一個 mainline 少回、一個 mainline 多回),證明**不能預設哪一側是對的**,
+    只能查 MIB。
+  - 尚未評估:要真正修掉這個 walk 缺陷,得讓「該子樹已委派時不要合成 index」,
+    但會影響 in-master 自己表註冊的可走性。ADR-0011 已記此為待評估項,本 ADR 不改變其狀態。
+
+Constraints / Assumptions:
+  - 上述比對都是 PC 端 `/usr/bin/snmpwalk -v2c -On -t 5`,逐 varbind GETNEXT
+    (pcap 實測 970 requests / 970 responses 對應 5×193+5,無 GETBULK)。
+  - mainline 側數據取自 partition 2 的 `2026_0805_2335` 對照組;
+    切換 partition 不具破壞性,但仍受 ADR/護欄約束:燒錄一律從 p2 側跑。
+  - `vrrpdb/` / `vrrp3db/` 這類**樹裡沒有對應 .mib** 的群組,本判準的第 3 步無法執行,
+    因此依 ADR-0010 不得委派,須先補 MIB。
+
+Related Files / Modules:
+  - `buildroot/dl/snmp_moxa_mib/private/*.mib` —— 判定 MAX-ACCESS 的權威來源
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c`
+    —— `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()`,合成 index 欄的來源
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list` —— 委派清單
+  - `~/mds4xgl3/tools/walkmeasure.sh` —— 量測
+
+Related ADRs:
+  補正 ADR-0011(第 1 欄消失的「非既有缺陷」判斷);
+  ADR-0010(MIB 為權威,本判準的依據)、ADR-0014(`stdethdb/` forward 關閉後的 dot3 驗收)、
+  ADR-0016(第二個實例:`rstpStatPortIndex` 為 not-accessible)

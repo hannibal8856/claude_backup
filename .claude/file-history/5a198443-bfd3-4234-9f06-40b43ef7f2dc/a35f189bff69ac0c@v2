@@ -1,0 +1,189 @@
+RESULT-phase3-task6.txt — mx_device_io moved to the framework subagent
+=======================================================================
+Date:  2026-08-05 / 2026-08-06
+DUT:   192.168.127.253, MDS-G4000-L3-4XGS
+
+HEADLINE
+
+    Correctness: PASS.  missing=0, surplus=0, every value matches the oracle.
+    Latency:     NO IMPROVEMENT, and this pilot cannot show one.
+
+        before  in-master        n=100  p50=113.3ms  p95=135.7ms  p100=153.5ms
+        after   framework        n=100  p50=112.9ms  p95=159.6ms  p100=10134ms
+
+    Phase 4's go/no-go must not read this pair as a Plan E verdict. See
+    "Why there is no speedup" below - the cost of this MIB is not the cost
+    Plan E removes.
+
+
+WHAT MOVED
+
+  Four tables, status column only, served in-process from the framework's
+  status layer. Registered with netsnmp_register_table_iterator through
+  lib_moxa_snmp_agentx, one registration per table, priority 100.
+
+    .1.3.6.1.4.1.8691.602.8.6.2.1   io/power/system/    2 rows
+    .1.3.6.1.4.1.8691.602.8.6.2.2   io/power/poe/       2 rows
+    .1.3.6.1.4.1.8691.602.8.6.2.3   io/di/              1 row
+    .1.3.6.1.4.1.8691.602.8.6.2.4   io/relay/           2 rows
+
+  The read is StatusOperation::get_status_from_path() directly - no HTTP, no
+  nginx, no ies_uri_handle_client, no fork+exec (D15).
+
+  net_mx_device_io.h declares 8 entries; only these 4 status columns are
+  served. mxDeviceIo.mib declares all four index columns not-accessible
+  (poe:168, relay:258) or accessible-for-notify (systemPower:125, di:211), and
+  under SMI neither may be returned by GET or GETNEXT. Bounding the iterator's
+  column range to 2..2 is what enforces that - a column outside the range is
+  never asked for.
+
+
+STEP 4 — no OID moved
+
+  Walked on the flashed image 2026_0806_0011, cold boot, framework serving:
+
+    .1.3.6.1.4.1.8691.602.8.6.2.1.1.2.1 = INTEGER: 1     io/power/system  "on"
+    .1.3.6.1.4.1.8691.602.8.6.2.1.1.2.2 = INTEGER: 2                      "N/A"
+    .1.3.6.1.4.1.8691.602.8.6.2.2.1.2.1 = INTEGER: 0     io/power/poe     "off"
+    .1.3.6.1.4.1.8691.602.8.6.2.2.1.2.2 = INTEGER: 2                      "N/A"
+    .1.3.6.1.4.1.8691.602.8.6.2.3.1.2.1 = INTEGER: 0     io/di            "open"
+    .1.3.6.1.4.1.8691.602.8.6.2.4.1.2.1 = INTEGER: 0     io/relay         "open"
+    .1.3.6.1.4.1.8691.602.8.6.2.4.1.2.2 = INTEGER: 0                      "open"
+
+  Identical to the in-master baseline in ORACLE-phase3-task7.txt: missing=0,
+  surplus=0, no value differs. The string -> integer mapping matches
+  mxDeviceIo.mib's own enums (off(0) on(1) notApplicable(2), open(0) short(1)),
+  which is also what generate_uri_snmp_table does.
+
+  ISS regression check: .1.3.6.1.4.1.8691.603.1.1.1.1.1 walks normally, so
+  registering a second subagent did not disturb the 1391 OIDs ISS serves.
+  Two ESTAB pairs on 127.0.0.1:705 after cold boot.
+
+  ONE DELIBERATE DIFFERENCE FROM IN-MASTER, invisible to walkdiff:
+
+    snmpget .1.3.6.1.4.1.8691.602.8.6.2.1.1.1.1   (an index column)
+      in-master   INTEGER: 1
+      framework   No Such Object
+
+  The MIB says not-accessible, so noSuchObject is correct and in-master is the
+  one that disagrees with it. Not reproduced on purpose. A walk never showed
+  these OIDs on either side, so no walkdiff can see this.
+
+
+STEP 5 — the latency pair
+
+  before  ~/pcap/mxdeviceio-7oid-before-20260805_1904.pcapng
+  after   ~/pcap/mxdeviceio-7oid-back2back-20260806_0530.pcapng
+
+  Same script both sides, tools/mx_device_io_latency.sh: 100 rounds of one GET
+  carrying the 7 served OIDs, wire time paired by snmp.request_id, varbind
+  count verified from the capture (7 on both). Held constant: same DUT, same
+  running config, same 7 OIDs, same host, no other SNMP traffic.
+
+  NOT held constant, and it matters: the "before" run is in-master on image
+  2026_0805_1738; the "after" run is the framework on 2026_0806_0011 with the
+  AgentX ping interval at 30s. The first "after" attempt, at 5s, gave
+  p95=7014.6ms - see below.
+
+
+WHY THERE IS NO SPEEDUP
+
+  mx_device_io's cost is the status plugin, not the transport.
+
+  plugin_moxa_io's get_cache_timeout_in_second() returns 0, so nothing is
+  cached and every read re-reads the hardware. One status read measured ~43ms
+  over HTTP on the DUT (including curl startup and nginx). The in-master path
+  called the same plugin through the same status layer; Plan E removes the HTTP
+  hop, and that hop was a few ms of the 113ms.
+
+  The implementation also reads more often than it needs to: one 7-varbind PDU
+  does one read per varbind in answer_get plus one per table in count_rows,
+  about 11 status reads. Batching per PDU would help, but it would be
+  optimising the wrong layer - the plugin's uncached read is the cost.
+
+  So this pilot demonstrates that the move is SAFE, not that it is FAST. Task 6
+  chose mx_device_io because all 8 entries are read-only and SET could not be
+  affected; safe and representative-of-the-benefit are different properties,
+  and the plan conflated them. D19 has to say so rather than present this pair
+  as a pass. Phase 4 needs a pilot whose cost is actually in the path Plan E
+  removes - the Phase 2 mxPortdb pair (RESULT-phase2-task4.txt, 20x) is the
+  shape of evidence it wants.
+
+
+THE TAIL, AND ONE THING STILL UNEXPLAINED
+
+  The first measurement, with the ping interval at 5s, had a catastrophic tail:
+
+    ping 5s    n=98   p50=114.5ms  p95=7014.6ms  p100=10016.0ms
+    ping 30s   n=100  p50=112.9ms  p95= 159.6ms  p100=10134.5ms
+
+  Diagnosed from the pcap rather than guessed. The slow requests form a
+  descending staircase that all completes at one instant:
+
+    sent 21.2s  waited 10010ms  done 31.21s
+    sent 23.2s  waited  8137ms  done 31.34s
+    sent 25.2s  waited  6128ms  done 31.33s
+    sent 27.2s  waited  4123ms  done 31.32s
+    sent 29.2s  waited  2116ms  done 31.32s
+
+  That is a queue draining, not slow processing: something blocked ~10s while
+  requests piled up 2s apart (snmpget -t2 gives up and the loop starts the
+  next), then everything cleared together. The reported p95 is queueing time.
+
+  10s is snmpd's own patience for a subagent: agentXTimeout 5 x (1 +
+  agentXRetries 1) in /moxa/run/snmp/snmpd.conf. The blocker is the AgentX
+  ping: it is synchronous (agentx_synch_response) and runs on the same tokio
+  task that answers requests, so nothing is served while it is in flight.
+
+  Confirmed by changing only that constant. At 5s the cycle was 10s stalled +
+  5s working, twice in a 31s run. At 30s the recurring stalls disappear
+  entirely and p95 drops from 7014.6ms to 159.6ms - the same order as
+  in-master's 135.7ms. Interval kept at 30s (user's decision, 2026-08-06),
+  accepting up to 30s to notice a master that has gone away.
+
+  STILL UNEXPLAINED: one ~10s stall on the FIRST request of every burst
+  survives the change. It reproduces back-to-back, so it is not idle-related
+  and not ping timing landing there by chance:
+
+    ping30     sent 0.0s waited 10009ms
+    warm       sent 0.0s waited 10137ms
+    back2back  sent 0.0s waited 10135ms
+
+  Same 10s, so snmpd's patience again - the subagent takes 10s to answer the
+  first request and then answers the queue instantly. Not diagnosed. The next
+  step is the technique that cracked the registration bug: timestamps at
+  select_info / handle_read / handle_timeout / answer_get, and see which
+  segment holds the 10s. One suspect is named in snmp_agentx.rs's own comment -
+  tokio's epoll registration is edge-triggered and rebuilding it can lose a
+  readiness edge - but that is a comment, not evidence.
+
+  This matters beyond the benchmark: a 10s first-request stall would be visible
+  to any real NMS polling this arc.
+
+
+HOW IT WAS BUILT AND VERIFIED
+
+  Image 2026_0806_0011, flashed to partition 1 with the examinate-plan-e-swu
+  skill from partition 2, so the mainline control group (2026_0805_2335) was
+  preserved. BUILD_TIME confirmed changed after reboot before any measurement.
+
+  Cold boot matters here and hot-swap cannot test it: the framework always
+  starts before snmpd (config loader decides whether to start SNMP at all), so
+  the subagent always loses the startup race and reconnects on the ping. All
+  four tables registered correctly after a cold boot.
+
+  Commits, all on snmp-plan-E2:
+    lib_moxa_snmp_agentx        register_iter_table + row-count callback
+    lib_moxa_rust_snmp_agentx   the Rust surface for both
+    app_moxa_framework          the four registrations and the GET path
+    buildroot/moxa              lib_moxa_rust_ies_auto_mibs in the package .mk
+
+  Two mistakes worth keeping, both written up in
+  phase3-task6-attempt-2026-08-05.md:
+
+  - The table_iterator registration root is the Table node, not the Entry;
+    net-snmp appends the Entry subidentifier itself. Passing the Entry made the
+    whole arc answer noSuchObject with no registration error anywhere.
+  - Adding a path dependency to Cargo.toml without adding it to the package .mk
+    builds the package fine and fails only at target-finalize, at the very end
+    of a full image build.

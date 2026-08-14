@@ -1,0 +1,116 @@
+---
+name: examinate-plan-e-swu
+description: Examine, upload and flash a Plan E .swu firmware image on the Moxa MDS-G4000-L3-4XGS DUT. Reports which dual-image partition the update will overwrite before touching anything, refuses to overwrite the mainline control group, scp's the .swu to /tmp, hard-gates on an md5 comparison, then runs swupdate + sync + reboot. Use when the user wants to check a .swu, put a new Plan E build on the device, verify a full image (not a hot-swapped binary), or asks which partition is about to be overwritten.
+---
+
+# Examinate Plan E SWU
+
+Full-image firmware verification for the DUT at `192.168.127.253`.
+
+Reach for this only when a hot-swap is not enough — a big change, something
+that needs a cold boot, or verifying the shipping image. For one freshly built
+binary or `.so`, `~/.claude/skills/dut-console/dut_hotswap.sh` is the default:
+under a minute, no reboot, no partition risk.
+
+## Partition policy — read this first
+
+The device is dual-image, and `swupdate` **always writes the partition you are
+NOT running**, then flips the boot pointer to it. From `preinstall.sh` inside
+the .swu:
+
+| booted on | `root=` | writes kernel | writes rootfs | then `fwrbootpart` → |
+|---|---|---|---|---|
+| partition 1 | `/dev/sda7` | `/dev/sda3` | `/dev/sda8` | 2 |
+| partition 2 | `/dev/sda8` | `/dev/sda2` | `/dev/sda7` | 1 |
+
+The consequence people get backwards: **booting the image you want to keep is
+what destroys it.**
+
+On this bench:
+
+- **partition 1 = Plan E** — the development image, the one to overwrite
+- **partition 2 = mainline control group** (`2026_0805_2335`) — **must survive**;
+  it is the reference for every before/after comparison
+
+So a new Plan E build must be flashed **from partition 2**, not from Plan E
+itself. The script defaults to `--protect 2` and refuses to run any destructive
+stage while that would overwrite partition 2. Override with `--protect none`
+only if the control group is genuinely expendable.
+
+## Usage
+
+```bash
+S=~/.claude/skills/examinate-plan-e-swu/swu_examine.sh
+
+# Stage 1 — examine only. Changes nothing. Safe to run any time.
+bash $S /tftpboot/FWR_MDS-G4000-L3-4XGS_v7.0_....swu
+
+# Stage 2 — also scp to the DUT /tmp and compare md5 (local vs remote).
+bash $S --upload /tftpboot/FWR_....swu
+
+# Stage 3 — also swupdate -i, sync, reboot.
+bash $S --flash /tftpboot/FWR_....swu
+```
+
+Options: `--host IP` (default `192.168.127.253`), `--protect N|none`
+(default `2`), `--keep` (leave `/tmp/<name>.swu` on the device afterwards).
+
+**Always run stage 1 and show the user its output before flashing.** It is the
+only step that names the image about to be destroyed, and that is the one
+irreversible thing here.
+
+## Full procedure for flashing a new Plan E build
+
+1. Stage 1 from wherever the DUT currently is — read `running` and `will WRITE`.
+2. If it refuses (currently booted on Plan E, victim = the control group),
+   switch partitions on the DUT as root:
+   `printf 'Y\nY\n' | /moxa/fwr_change.sh` — the two `Y`s answer its two
+   interactive prompts, they are not arguments. Wait ~40 s for the reboot.
+3. From the mainline side, `--flash` the new .swu. It lands on partition 1 and
+   `fwrbootpart` flips back to 1.
+4. Reboot puts the new Plan E build up. Confirm `BUILD_TIME` changed.
+
+### Known gap
+
+Step 3 is not yet automated. The mainline image drops ssh logins into `moxash`,
+not a Linux shell, and this script only drives a Linux shell — it detects
+`moxash`, prints why, and exits 7 rather than hanging. Flash by hand from there
+until the moxash → Linux root path is wired in.
+
+## Why the md5 gate exists
+
+`/tmp` on the DUT is a RAM-backed overlay (~505 MiB free). A truncated `.swu`
+written to a partition bricks that partition. The script fails hard on an md5
+mismatch and refuses to flash.
+
+The device's own `/moxa/upload_my_file.sh` does the same transfer in the other
+direction — it `scp`s *from* `moxa@192.168.127.209:/tftpboot/`, which is this
+development host. That path needs the host account's password and only *prints*
+the md5 without comparing it. This skill pushes instead, using the DUT's
+`admin`/`moxa`, and compares automatically. **Do not ask the user for their
+workstation password.**
+
+`postinstall.sh` inside the .swu sha256-verifies both written partitions before
+flipping `fwrbootpart`, so a bad write leaves the device booting the old image.
+
+Note `/moxa/fwr_update.sh` does **not** exist. The only two scripts under
+`/moxa/` are `fwr_change.sh` (partition switch) and `upload_my_file.sh`.
+
+## After flashing
+
+The reboot drops the ssh session; that is expected. Boot takes roughly 40 s.
+
+```bash
+bash ~/.claude/skills/dut-console/run.sh "cat /etc/moxa/version/BUILD_TIME" "fw_printenv fwrbootpart"
+```
+
+Always confirm `BUILD_TIME` actually changed before starting any measurement —
+a silently failed update leaves the old build running and every number
+collected afterwards comes from the wrong image.
+
+## Prerequisites
+
+`expect` on the host and ssh reachability to the DUT. Credentials are
+`admin`/`moxa`, with `su` (same password) for root; root ssh is blocked by
+`PermitRootLogin prohibit-password`. The DUT's sshd stops granting new sessions
+after a number of connections — if probes start timing out, reboot the DUT.

@@ -1,0 +1,34 @@
+#!/bin/bash
+set -u
+M=$HOME/edsg4000/buildroot/moxa
+SRC=clippy-scan-binary-packages-3
+TARGET=NOS_v6.0_EDS_develop
+TITLE="Remove Clippy scans for Rust library packages"
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' ~/moxa_gitlab_scm_token | head -1)
+enc="moxa%2Fsw%2Fswitch%2Fgeneral%2Fbuildsystem%2Fmoxa"
+api(){ curl -sS --max-time 30 --header "PRIVATE-TOKEN: $TOKEN" "$@" </dev/null; }
+cd "$M" || exit 1
+
+[ "$(git branch --show-current)" = "$SRC" ] || { echo "ABORT: 不在 $SRC"; exit 1; }
+sha=$(git rev-parse HEAD)
+echo "local $SRC HEAD = $(git rev-parse --short HEAD) \"$(git log -1 --format=%s)\""
+
+# idempotency:已有 target=NOS_v6.0_EDS_develop 的 clippy open MR?
+exist=$(api "https://gitlab.com/api/v4/projects/$enc/merge_requests?state=opened&target_branch=${TARGET}&per_page=100" \
+        | jq '[.[]|select(.source_branch|test("clippy-scan-binaries-only$"))]|length')
+[ "${exist:-0}" -gt 0 ] && { echo "EXISTS: 已有 EDS clippy MR,跳過"; exit 0; }
+
+iid=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/issues" --data-urlencode "title=$TITLE" | jq -r '.iid')
+[ -n "$iid" ] && [ "$iid" != null ] || { echo "ABORT: 開 issue 失敗"; exit 1; }
+echo "EDS issue iid=$iid"
+newbr="${iid}-clippy-scan-binaries-only"; msg="Issue: #${iid}: ${TITLE}"
+git branch -f "$newbr" "$sha"
+git checkout -q "$newbr"
+git commit -q --amend -m "$msg"
+echo "branch=$newbr  msg=$(git log -1 --format=%s)  改動檔=$(git show --stat --format= HEAD | grep -c '|')"
+git push -q -u origin "$newbr" 2>&1 | tail -1
+resp=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/merge_requests" \
+  --data-urlencode "source_branch=$newbr" --data-urlencode "target_branch=$TARGET" \
+  --data-urlencode "title=Draft: $msg" --data-urlencode "description=Closes #${iid}" --data "remove_source_branch=true")
+echo "MR: $(echo "$resp" | jq -r '.web_url // .message')"
+echo "draft=$(echo "$resp" | jq -r '.draft')  target=$(echo "$resp" | jq -r '.target_branch')"

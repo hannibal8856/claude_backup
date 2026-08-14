@@ -1,0 +1,208 @@
+# Handoff — 2026-08-05, Phase 3 at the Tasks 1–5 seam
+
+給接手的 session。**先讀這份**，再讀 `plan-e-phase3-PLAN-2026-08-05.md`（今天改了很多，
+不要用記憶中的版本）。設計文件是 `plan-e-agentx-get-offload-design-2026-08-03.md`，
+§10.2 定義 Phase 3。
+
+前一份 handoff 是 `phase3-handoff-2026-08-05.md`（Task 1 做到 3/4 時寫的），已經被這份取代。
+
+---
+
+## 1. 現在在哪
+
+**Tasks 1–5 全部完成，停在計畫刻意留的 seam。**
+
+| Task | 內容 | 狀態 | 證據 |
+|---|---|---|---|
+| 1 | `agentx/subagent` 編進 net-snmp | 完成 | `RESULT-phase3-task1.txt`，p50 13.1ms |
+| 2 | `lib_moxa_snmp_agentx`（C shim） | 完成 | `RESULT-phase3-task2.txt`，NEEDED 無 libnetsnmpmibs |
+| 3 | `lib_moxa_ies_auto_mibs`（OID→URI） | 完成 | `RESULT-phase3-task3.txt`，1936 entries |
+| 4 | 兩個 Rust FFI | 完成 | `RESULT-phase3-task4.txt`，target 編譯 + clippy 乾淨 |
+| 5 | framework subagent 骨架 | 完成 | `RESULT-phase3-task5.txt`，冷開機兩條 session |
+| **6** | **`mx_device_io` 試點** | **下一個** | |
+| 7 | `mx_portmirror` 試點 | | |
+| 8 | D19 + ledger | | |
+
+計畫說 1–5 跑完先 review 再開 6。**Tasks 6–8 會改變行為**，這是分界線的意義。
+
+DUT 現在跑 `2026_0805_1738`（Plan E），framework 以 subagent 身分連著 snmpd，
+註冊零個 OID。
+
+---
+
+## 2. 開 Task 6 之前，先做一件不能補做的事
+
+**Task 7 Step 1 的 oracle 要現在抓，不是等做到 Task 7 才抓。**
+
+`mx_portmirror` 有 4 筆 `REPLACE_TRUTH_VALUE`。Task 7 之後那 4 筆由 framework 服務，
+in-master 的舊路徑就不在了，沒有東西可以對比。趁現在 in-master 還在服務它們，
+把值記下來：
+
+```bash
+# 那 4 筆的 OID 要從 net_mx_portmirror.h 讀，不要從 MIB 文件抄
+snmpget -v2c -c public -On 192.168.127.253 <4 個 OID>
+```
+
+寫反了會產生**看起來很合理的錯值**，`missing`/`surplus` 抓不到——這是整個 Phase 3
+最容易無聲出錯的地方。
+
+---
+
+## 3. 今天學到的四個坑，每個都害過一次
+
+### (a) 新 `dl/` package 要四項 wiring，少一項會安靜失敗
+
+`moxa/package/net/<pkg>/{Config.in,<pkg>.mk}` 之外還要：`Config.in.Product_Packages`
+加 source 行、**`moxa/local.mk` 加 `<PKG>_OVERRIDE_SRCDIR`**、`.config` 重整。
+
+少了 `OVERRIDE_SRCDIR`，build 會印 `Extracting`、留下空目錄，然後死在
+`No targets specified and no makefile found`。**每個 sibling `.mk` 都有的 `_SITE` 行
+不是讓原始碼出現的東西。** build 目錄有 `-custom` 後綴才代表 override 生效。
+
+### (b) 三個 make target 都要跑，而且要看產物不是看 exit code
+
+```bash
+make lib_moxa_rust_<crate>-rebuild app_moxa_framework-rebuild rust_moxa_build-rebuild
+```
+
+- `app_moxa_framework.mk` **沒有 build 指令**，cargo build 是 `rust_moxa_build` 的事。
+  單跑前者會回傳 0、印 `Building`、什麼都沒編。
+- 改了 crate 只跑 framework，framework 會拿**舊的** crate 編——crate 原始碼只有在它
+  自己的 package rebuild 時才同步到 `-custom`。這次是 `E0061` 大聲失敗，但相容的
+  簽章改動會是安靜的。
+
+驗證方式：`strings <binary> | grep <你剛加的字串>`、`readelf -d | grep NEEDED`、看檔案大小。
+
+### (c) image build 前先確認 `/tmp/.moxa_gitlab_scm_token`
+
+HSM 簽章（`Makefile:816` `target-post-image`）靠它認證 GitLab，而 `/tmp` 會被清。
+少了它整輪 build 跑完才在最後一步失敗，`rootfs.squashfs` 是好的、**沒有 `.swu`、
+而且舊的 `.swu` 已經被清掉**。今天為此白跑兩輪。
+
+```bash
+test -s /tmp/.moxa_gitlab_scm_token || echo "!! token missing"
+```
+
+### (d) net-snmp subagent 初始化全程不回報連線狀態 ← 最重要的一個
+
+Task 5 出了**三顆不能用的 image，每一顆都全程回報成功**：
+
+1. AgentX 位址沒設 → 連到編譯預設的 `/var/agentx/master`
+2. （我誤判成 `subagent_init` 沒被呼叫，其實 `init_agent()` 本來就會呼叫）
+3. `agentXPingInterval` 是 0 → 只嘗試連線一次，永不重試
+
+`mx_agentx_init()` 回 0 只代表「subagent 模式已啟用、callback 已註冊」。連線嘗試
+發生在 `init_agent()` 返回之後的 callback 裡，結果不往任何地方傳。
+
+**所以這條路徑的驗證只能落在 master 那側：`ss -tnp | grep 705`。**
+framework 的回傳值和 log 都答不了這個問題，Task 6 之後每次動到它都適用。
+
+關於 (3)：**framework 一定比 snmpd 早起**（config loader 先跑、決定要開 SNMP service、
+才起 snmpd，使用者確認的系統設計）。所以那不是競賽而是必然，沒有 ping interval
+就是 100% 連不上。現在設 **5 秒**（使用者決定，與 snmpd.conf 的 `agentXTimeout` 一致）。
+
+ping 的細節，因為不直觀：每次 alarm 送 1 個 ping，但那個 ping 是**同步**的
+（`agentx_synch_response`），帶著 net-snmp 自己的預設 **1s timeout × 5 retries**
+（`agentx_config.c:211,219`）——所以 master 不在時一次 ping 會**阻塞那條 task 約 6 秒**，
+然後立刻拆 session 重連（沒有「連續 N 次才判定」的計數器）。5 秒的間隔比 6 秒短，
+等於 master 掛掉時 task 幾乎一直卡在 ping 裡。已接受：master 不在時本來也沒東西可服務。
+
+**DUT 上跑的 `2026_0805_1738` 還是 15 秒**，5 秒要等下一顆 image。
+
+---
+
+## 4. 計畫今天被改了八處以上，全部是從原始碼對回來的
+
+不要用記憶中的計畫版本。實際被更正的：
+
+- Task 2 的 `mx_agentx_init` 簽章（現在收 socket 與 ping interval）
+- Task 3 的 build rule（**只 include `net_*.h` 做不出 flags，會是全零而且無聲**）
+- Task 3 Step 2 的 macro 清單（改成從 `3RDPARTY_NET_SNMP_CFLAGS` 取，不抄）
+- Task 3 Step 4 的一致性檢查（`snmpwalk | wc -l` 跟 `iesmap_entry_count()` 不是同一種量）
+- Task 3 Step 5 的 URI（`io/di/` → `io/power/system/`）
+- `struct iesmap_result` 的 flags 型別（`unsigned int` → `unsigned char`）
+- Global Constraints：新 package 四項 wiring、簽章 token、**AgentX 重連要自己打開**
+- File Structure 多了 `ies-auto-mibs` 那列
+
+另外兩個常數是被編譯期 assertion 擋下來的，不是測試抓到的：
+`REPLACE_TRUTH_VALUE` 實際是 **16** 不是 18（18 是 `REPLACE_BIT_2OCT`），
+`IESMAP_FLAG_BYTES` 是 5 不是 8。那些 assertion 留在 `iesmap.c` 裡，上游改編號會編譯失敗。
+
+---
+
+## 5. 留著沒解決的
+
+### LLDP GETNEXT loop（不是 Plan E 的帳）
+
+`lldp-getnext-loop-2026-08-05.md`。`GETNEXT(.1.0.8802.1.1.2.1.5.3791.1.1.1.1.1.1)`
+回傳自己，walk 卡死，約 993 個 LLDP OID 到不了。**已測過不是 subagent 造成的**
+（停掉 framework、705 只剩 ISS，行為完全不變）。
+
+欠的是**與 NOS 7 mainline 的對比**——一樣就是產品既有缺陷，不一樣就是這棵樹引入的。
+
+對 Task 6/7 的影響：兩個 pilot 都不在 `1.0.8802` 底下，所以不擋驗證，
+**但 walkdiff 比對時要明確排除 LLDP 子樹**，否則它會被截斷後靜靜地報 993 個 missing。
+`capture_baseline.sh` 目前在這台機器上跑不完（會在 LLDP 空轉到逾時，15 分鐘寫 14MB）。
+
+### 其他
+
+- `portConfigTid`（`…603.1.1.1.1.1.7`）可 walk 到但不在出貨 MIB 裡，產品層級決定。
+- 設計文件 §2.5 的「26 個 mandatory objects」從來沒真的數過。
+- Phase 4 的 benchmark 需要兩組前後對比：Phase 2 的已有（`RESULT-phase2-task4.txt`），
+  Phase 3 的要等 Task 6。
+
+---
+
+## 6. 程式碼在哪
+
+| repo | branch | HEAD | 已 push |
+|---|---|---|---|
+| `dl/lib_moxa_snmp_agentx`（新） | `snmp-plan-E2` | `d79db70` | ✅ |
+| `dl/lib_moxa_ies_auto_mibs`（新） | `snmp-plan-E2` | `304e710` | ✅ |
+| `dl/lib_moxa_rust_snmp_agentx`（新） | `snmp-plan-E2` | `e759781` | ✅ |
+| `dl/lib_moxa_rust_ies_auto_mibs`（新） | `snmp-plan-E2` | `c38259b` | ✅ |
+| `dl/app_moxa_framework` | `snmp-plan-E2` | `06e99b9` | ✗ |
+| `dl/3rdparty_net_snmp` | `snmp-plan-E2` | `7f1da33` | ✗ |
+| `buildroot/moxa` | `snmp-plan-E2` | `86dcf3ff4` | ✗ |
+| `~/WORK/SNMP_50ms`（筆記） | `develop` | `f12458a` | ✗ |
+
+四個新 repo 已 push 到 `snmp-plan-E2`（都是**新分支**，沒有覆蓋遠端既有的任何東西）：
+
+```
+git@gitlab.com:moxa/sw/switch/personal/oscarmh.tu.switch/{lib_moxa_snmp_agentx,
+  lib_moxa_ies_auto_mibs, lib_moxa_rust_snmp_agentx, lib_moxa_rust_ies_auto_mibs}.git
+```
+
+本機分支也從 `develop` 改名為 `snmp-plan-E2`，與其他 Plan E repo 一致；
+`Config.in` 的 URL 與 `_REV` 已同步更正（原本是照 sibling 慣例猜的，是錯的）。
+
+**`app_moxa_framework`、`3rdparty_net_snmp`、`moxa` 這三個還沒 push**，
+它們本來就有 remote、也已經在 `snmp-plan-E2` 上，但使用者只授權推那四個新的。
+
+註：那四個 remote URL 是從 `~/mds4xgl3/buildroot/dl/*/.git/config` 取得的。
+使用者要求**暫時不要看那棵樹做了什麼**，所以只讀了 remote URL，沒有碰原始碼或歷史。
+CLAUDE.md 本來也有這條邊界。
+
+commit message 格式：`[Plan E Task 3-N] ...`。
+
+---
+
+## 7. 工作方式
+
+- **做到一個段落直接 commit、build、測，不要停下來問。** push 和開 MR 仍然要問。
+- build 一律在 `mx_SNMP_PLAN_E` 容器（`/usr/local/bin/run_in_docker.sh`）。
+- DUT 用 SSH + expect 比序列埠安全（有 pty，`moxash` 也能跑），但 **sshd 連幾次之後
+  就不再完成新 session**，試三次就停手改請使用者用 console。
+- 燒韌體是使用者的動作。`ss`、`grep` 這類單行檢查請使用者在 console 貼回來最快。
+
+---
+
+## 8. 新 session 建議開場
+
+1. 讀本檔 → `plan-e-phase3-PLAN-2026-08-05.md`（Task 6、7 那兩節）
+2. `cat /etc/moxa/version/BUILD_TIME` 應該是 `2026_0805_1738`；
+   `ss -tnp | grep 705` 應該有兩對 ESTAB
+3. **先抓 Task 7 的 oracle**（見 §2），趁 in-master 還在服務那 4 筆
+4. 再開 Task 6
+
+沒有未回覆的問題。

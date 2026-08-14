@@ -1,0 +1,42 @@
+---
+name: feedback-build-order
+description: Buildroot rebuild order — plugin_moxa_snmp must be rebuilt before rust_moxa_build (then final make)
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+  modified: 2026-08-09T15:22:03.129Z
+---
+
+Buildroot rebuild order for mds4xg (and likely other Moxa products on this tree):
+
+```
+make 3rdparty_net_snmp-rebuild
+make plugin_moxa_snmp-rebuild        # MUST be before rust_moxa_build-rebuild
+make rust_moxa_build-rebuild
+make                                  # final image
+```
+
+**Why:** User corrected my initial ordering (which had rust_moxa_build before plugin_moxa_snmp). Likely because rust_moxa_build consumes generated/installed artifacts from plugin_moxa_snmp (or the rust glue depends on snmp plugin headers/.so being in staging first). Reversing the order risks a stale-link or rust-build-against-old-snmp-plugin situation, even if neither errors visibly.
+
+**How to apply:** Any time the user asks for a chained rebuild that touches both `plugin_moxa_snmp` and `rust_moxa_build`, put `plugin_moxa_snmp-rebuild` first. The full chain above is the canonical sequence after editing C in 3rdparty_net_snmp + plugin_moxa_snmp.
+
+**Rust binaries (`app_moxa_framework`, `app_moxa_iss_config_loader`, …) are compiled ONLY by `rust_moxa_build` (2026-07-14):** their own package (`app_moxa_framework-custom`) has an EMPTY Makefile and NO `_BUILD_CMDS` in the `.mk` — `make app_moxa_framework-rebuild` only rsyncs source + installs, it does NOT run cargo, so the installed binary stays stale. The actual `cargo build --workspace` lives in `rust_moxa_build` (`dl/rust_moxa_build/Cargo.toml` `[workspace] members=["app_moxa_framework", …]`; it symlinks/uses the sibling `output/build/<pkg>-custom` dirs). So after editing any Rust binary/crate source: `make <pkg>-rebuild` (to rsync the new source into `output/build/<pkg>-custom`) THEN `make rust_moxa_build-rebuild` (to recompile), THEN `make` (image). Skipping `rust_moxa_build` = old binary in the image → symptom looked like "code change had no effect" (e.g. new AgentX subagent OID returned No Such Object because the framework binary was never recompiled).
+
+⚠️ **2026-08-09:踩到的是另一半 —— 漏掉 `make app_moxa_framework-rebuild`(只跑了 `rust_moxa_build-rebuild`)。**
+`rust_moxa_build` 只 build workspace,**不會 rsync 各 crate 的原始碼**,所以
+`output/build/app_moxa_framework-custom/src/` 停在幾天前,cargo 編的是舊碼、還 exit 0。
+症狀:C 端 mapping 完全正確,但 SNMP 回 noSuchInstance,像是 Rust handler 沒認得新的 table_col。
+浪費了一次完整 build + 燒錄。
+
+**30 秒自檢(改完 Rust、build 前一定要做):**
+```bash
+grep -c '<你剛加的識別字>' output/build/<pkg>-custom/src/<file>.rs
+ls -ld output/build/<pkg>-custom          # 日期應該是「剛剛」
+```
+0 命中或日期是舊的 → 先 `make <pkg>-rebuild`。
+
+**查「C 對但 Rust 不對」的利器**:`libmoxaiesautomibs` 有匯出 `ies_map_count()` /
+`ies_map_entry_at()`,用容器裡的 toolchain 交叉編一支小程式丟到 DUT 上跑,
+就能直接印出執行期的 `table_col` / `uri_index` / `is_status`,一眼分辨是 C 還是 Rust 的問題。
+範例留在 `~/sofswap/dumpmap.c`。

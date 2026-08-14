@@ -1,0 +1,123 @@
+RESULT-phase3-task4.txt — Rust FFI for both C libraries
+=======================================================
+Date: 2026-08-05
+
+WHAT WAS CREATED
+
+  dl/lib_moxa_rust_ies_auto_mibs/{Cargo.toml,Makefile,src/lib.rs}
+  dl/lib_moxa_rust_snmp_agentx/{Cargo.toml,Makefile,src/lib.rs}
+  moxa/package/net/lib_moxa_rust_{ies_auto_mibs,snmp_agentx}/{Config.in,*.mk}
+  + the source line, OVERRIDE_SRCDIR and defconfig entry each package needs
+
+  Both follow dl/lib_moxa_rust_system: source-only packages whose Buildroot
+  recipe runs clippy and nothing else, linking through `#[link(name = "...")]`
+  on the extern block rather than a build.rs. No sibling here has a build.rs.
+
+  THAT MEANS `make <crate>` PROVES ALMOST NOTHING. The package build does not
+  compile the crate; the real compile happens when app_moxa_framework picks it
+  up as a path dependency in Task 5. So both crates were also built and linted
+  directly against the target:
+
+    cargo build  --release --target=armv7-unknown-linux-gnueabihf   both OK
+    cargo clippy --release --target=armv7-unknown-linux-gnueabihf   0 warnings
+
+  That matters beyond ceremony: c_ulong is 32-bit on the target and 64-bit on
+  the host, and the OID conversions sit exactly on that seam.
+
+TESTS — lib_moxa_rust_ies_auto_mibs                               5/5 PASS
+
+    test_lookup_device_io            ok
+    test_lookup_is_longest_prefix    ok
+    test_known_flag_is_set           ok
+    test_unknown_oid                 ok
+    test_entry_count_is_not_empty    ok
+
+  Run against a host build of the C library:
+
+    gcc -fPIC -c iesmap.c <snmpd's -D set> ; ar rcs libmoxa_ies_auto_mibs.a
+    RUSTFLAGS="-L native=<dir>" cargo test
+
+  test_known_flag_is_set is the one that earns its place. Rust re-declares the
+  flag numbers as `enum Flag`, and nothing in the type system ties them to
+  IESMAP_FLAG_* in the C header. Asserting the constant would only restate the
+  Rust side, so the test looks up portMirror/enable and asserts
+  ReplaceTruthValue is set and UriStatus is not - which fails if either the
+  numbering or the bit layout drifts. The C side is already tied to
+  ies-auto-mibs by compile-time assertions (Task 3).
+
+A REAL BUG THE RUST TESTS FOUND IN TASK 3's C CODE
+
+  iesmap_load_once() set its "loaded" flag BEFORE building the table:
+
+      if (g_loaded) return;
+      g_loaded = 1;
+      ies_auto_mibs_load_mibs();
+
+  A second thread arriving mid-build saw "loaded", skipped the wait, and
+  scanned a table that was still filling - so lookups returned no match while
+  iesmap_entry_count() looked healthy. Fixed with pthread_once. After
+  initialisation the table is read-only, so lookups still take no lock.
+
+  cargo runs tests on parallel threads by default, which is why this surfaced
+  here and not in Task 3's single-threaded C test. The library is advertised
+  for "app_moxa_framework and other daemons", so this was a real defect and not
+  a test artefact.
+
+  DIAGNOSIS NOTE, because it cost time and would cost it again: after
+  rebuilding the .a, cargo did NOT relink the test binary - it does not track
+  an external library it was only told about through RUSTFLAGS. Three
+  consecutive runs at 2, 4 and 8 threads gave identical results and looked like
+  a deterministic non-race, which is what a stale binary looks like. Touch a
+  source file (or cargo clean) after rebuilding the C side.
+
+ONE ADDITION TO THE TASK 3 C API
+
+    size_t iesmap_flag_bytes(void);
+
+  So the binding can copy the flag array without hardcoding IESMAP_FLAG_BYTES
+  and drifting from it. Three lines, and it removes a duplicated constant
+  permanently. NEEDED is unchanged (libnetsnmp, libmoxa_util, libgcc_s, libc);
+  pthread_once needs no extra link on this toolchain.
+
+DESIGN DECISIONS
+
+  Entry is owned, not a view. The C table lives for the life of the process, so
+  borrowing would be sound, but copying the strings keeps Entry free of raw
+  pointers, so it can be held across an await and moved between tasks. Two
+  String allocations per lookup against a 13ms budget is not worth optimising.
+
+  Request is consumed by reply(). Answering twice is not expressible in the
+  type system rather than being rejected at runtime, and dropping a Request
+  without replying gives noSuchObject - the same thing the C dispatcher does
+  when a handler returns without delivering a value.
+
+  Session is neither Send nor Sync. Every net-snmp call must stay on one thread
+  (D5 / section 5.3); holding Box<dyn FnMut> makes that a compile error rather
+  than a comment.
+
+  The trampoline catches every panic. Unwinding across extern "C" is undefined
+  behaviour. A panicking handler is reported as "no value", which the C side
+  turns into noSuchObject.
+
+  Two boxes for the handler, not one. The inner Box erases F; the outer one
+  gives a stable thin address to hand to C as ctx. Session owns it, and both
+  clear_get_handler() and Drop unregister the callback before releasing it, so
+  the C side can never call through a freed pointer.
+
+  MAX_FDS = 32 for select_info. net-snmp watches the AgentX socket and little
+  else; the C side returns -1 rather than truncating if that is ever too small,
+  so a wrong guess is loud rather than silent.
+
+CLIPPY NOTE
+
+  `u64::from(v)` on the c_ulong -> u64 conversion is a genuine widening on the
+  target and a no-op on the host, so host clippy flags it and target clippy
+  does not. It carries a scoped #[allow(clippy::useless_conversion)] with that
+  reason, because the project's gate runs against the target.
+
+NOT DONE
+
+  lib_moxa_rust_snmp_agentx has no FFI tests. Its unit tests cover only Rust-side
+  shapes; exercising init/register/select would need a live AgentX master, which
+  is Task 5's acceptance test. Linking it at all is also Task 5 - nothing
+  depends on either crate until app_moxa_framework does.

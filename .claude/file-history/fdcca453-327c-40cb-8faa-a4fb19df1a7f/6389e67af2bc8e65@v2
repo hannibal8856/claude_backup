@@ -1,0 +1,20 @@
+---
+name: project_plan_e_iss0_get_forward
+description: "Plan E — iss_build==0 SNMP GET forwards to framework AgentX, SET stays in-master; supersedes Plan D ownership/SET (ADR-0003 Proposed)"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: fdcca453-327c-40cb-8faa-a4fb19df1a7f
+---
+
+**Plan E** (design 2026-07-23, user-approved shape): for **all iss_build==0** MIB groups —
+- **SET stays in-master** (net-snmp table reg + `readCreate_v2` multi-stage) → rowStatus atomic create/destroy works natively; **no Rust valid-toggle reimplementation** (dodges ADR-0002's hard boundary).
+- **GET forwarded to framework AgentX subagent** (in-process config read, fast) via a new `mox_snmp_forward_get_to_framework()` in `mox_snmp_handle_entry` MODE_IS_GET branch, gated by `moxaSnmpHandle_UtilMibEntryCheckFromUri()` (iss_build==0). Mirrors Plan C's `mox_snmp_forward_get_to_iss` (`ies_auto_mibs.c:3062-3168`).
+- Key improvement over Plan C: **no hardcoded probe table** — because in-master + framework **dual-register the same OID**, iterate subtrees at that OID and pick the one whose `reginfo->handler` is NOT self (`mox_snmp_handle_entry`) = the framework registration. Generalizes by flag, not per-group probes.
+- **Dual registration by priority**: in-master priority higher → wins wire (SET + GET intercept); framework serves only forwarded GET. Supersedes ADR-0001/0002's "avoid dual registration + comment out INIT_ENTRY handoff".
+
+**Supersedes** ADR-0001/0002 ownership+SET decisions; **keeps** ADR-0002 data-layer decision (`lib_moxa_ies_auto_mibs` = pure data, framework reuses it). Captured as **ADR-0003 (Proposed)**.
+
+**PoC gate before rollout** (3 unverified risks): (1) net-snmp 5.9.3 lets same-OID dual registration coexist by priority (not MIB_DUPLICATE_REGISTRATION); (2) correct subtree-iteration API to find non-self handler; (3) framework registering ALL iss_build==0 OIDs as GET-only serving cost. PoC target = one rowStatus group (trustAccess or mxTrap). On pass → ADR-0003 Accepted + flip ADR-0001/0002 to Superseded (**ask user before mutating accepted ADRs**).
+
+Docs: `~/plan-e-iss0-get-forward-framework-set-in-master-design-2026-07-23.md`, `~/mds4xgl3/.adr/ADR-0003-*.md`. Next step: writing-plans skill. Related: [[project_agentx_owned_two_axis_design]], [[project_plan_d_two_subagent_oid_reachability]], [[project_plan_c_agentx_set_path_and_framing]].

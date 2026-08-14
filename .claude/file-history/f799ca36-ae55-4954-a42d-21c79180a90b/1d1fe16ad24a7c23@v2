@@ -1,0 +1,105 @@
+SILENCE=@
+
+# common
+PWD=${shell pwd}
+APP_NAME=plugin_moxa_snmp
+BUILD_PATH=${PWD}/build
+SBIN_PATH?=/sbin
+USR_BIN_PATH?=/usr/bin
+
+# app
+APP_PATH=${PWD}/app
+APP_DOC_PATH=${PWD}/app/document
+APP_SCRIPT_PATH=${PWD}/app/script
+MOXA_CONFIG_CHANGE_TARGET_WANTS_PATH?=/etc/systemd/system/moxa_config_change.target.wants
+PROJECT_PATH?=/etc/moxa/config-moxa-snmp
+
+# rust_clippy_scan
+CARGO_FEATURES := MOXA_PASSWORD_POLICY_CHECK
+
+# config - python
+# CONFIG_PATH=${PWD}/python/config
+# CONFIG_PLUGIN_PATH?=/etc/moxa/flask-moxa-config-layer/Plugin/
+
+# lib - python
+# LIB_PATH=${PWD}/python/lib
+
+# status - python
+# STATUS_PATH=${PWD}/python/status
+# STATUS_PLUGIN_PATH?=/etc/moxa/flask-moxa-status-layer/Plugin/
+
+# export_cli - python
+# EXPORT_CLI_PATH=${PWD}/python/export_cli
+# EXPORT_CLI_PLUGIN_PATH?=/etc/moxa/moxa-cli-export/Plugin/
+
+.PHONY: all install clean test
+
+all: ${BUILD_PATH}/config_moxa_snmp_control rust_clippy_scan
+
+install:
+	# utility
+	${SILENCE}mkdir -p $(DESTDIR)/${USR_BIN_PATH}
+	$(SILENCE)install -m 755 ${APP_SCRIPT_PATH}/moxa_get_snmpv3_engine_time.sh $(DESTDIR)/${USR_BIN_PATH}
+	# app
+	${SILENCE}mkdir -p ${DESTDIR}/${SBIN_PATH}
+	${SILENCE}cp ${BUILD_PATH}/config_moxa_snmp_control ${DESTDIR}/${SBIN_PATH}/config_moxa_snmp_control
+
+	# app - document
+	${SILENCE}mkdir -p ${DESTDIR}/usr/lib/systemd/system
+	${SILENCE}install -m 644 ${APP_DOC_PATH}/app_moxa_snmp_server.service ${DESTDIR}/usr/lib/systemd/system
+	${SILENCE}install -m 644 ${APP_DOC_PATH}/config_moxa_snmp.service ${DESTDIR}/usr/lib/systemd/system
+
+	${SILENCE}mkdir -m 740 -p ${DESTDIR}/${MOXA_CONFIG_CHANGE_TARGET_WANTS_PATH}
+	${SILENCE}ln -fs /usr/lib/systemd/system/config_moxa_snmp.service ${DESTDIR}/${MOXA_CONFIG_CHANGE_TARGET_WANTS_PATH}
+
+	# app - script
+	${SILENCE}mkdir -p ${DESTDIR}/${PROJECT_PATH}
+	${SILENCE}install -m 755 ${APP_SCRIPT_PATH}/init_snmpd.sh ${DESTDIR}/${PROJECT_PATH}
+
+	# AgentX-owned URI prefix list — consumed by ies-auto-mibs in
+	# /bin/snmpd to decide which RO entries skip local registration
+	# and route to the ISS subagent via AgentX.
+	${SILENCE}mkdir -p ${DESTDIR}/etc/moxa/netsnmp
+	${SILENCE}install -m 644 ${APP_SCRIPT_PATH}/agentx_owned.list ${DESTDIR}/etc/moxa/netsnmp/agentx_owned.list
+
+	# config - python
+	# ${SILENCE}mkdir -m 740 -p ${DESTDIR}/${CONFIG_PLUGIN_PATH}
+	# ${SILENCE}install -m 550 ${CONFIG_PATH}/plugin*.py ${DESTDIR}/${CONFIG_PLUGIN_PATH}
+
+	# lib - python
+	# ${SILENCE}mkdir -p ${DESTDIR}/${PYTHON_MODULE_PATH}/lib_moxa_snmp/
+	# ${SILENCE}cp ${LIB_PATH}/moxa_snmp_engine.py ${DESTDIR}/${PYTHON_MODULE_PATH}/lib_moxa_snmp/
+
+	# status - python
+	# ${SILENCE}mkdir -p ${DESTDIR}/${STATUS_PLUGIN_PATH}
+	# ${SILENCE}install -m 550 ${STATUS_PATH}/plugin*.py ${DESTDIR}/${STATUS_PLUGIN_PATH}
+
+	# export_cli - python
+	# ${SILENCE}mkdir -m 740 -p ${DESTDIR}/${EXPORT_CLI_PLUGIN_PATH}
+	# ${SILENCE}install -m 550 ${EXPORT_CLI_PATH}/plugin*.py ${DESTDIR}/${EXPORT_CLI_PLUGIN_PATH}
+
+
+clean:
+
+
+test:
+
+${BUILD_PATH}:
+	mkdir -p $@
+
+# app
+${BUILD_PATH}/config_moxa_snmp_control: ${BUILD_PATH} \
+		${BUILD_PATH}/config_moxa_snmp_control.o
+	${CC} -lparson -lmoxa_util -lmoxa_system -lmoxa_encrypt -o $@ $(filter %.o,$^)
+
+${BUILD_PATH}/config_moxa_snmp_control.o: ${BUILD_PATH}\
+		${APP_PATH}/config_moxa_snmp_control.c
+	${CC} ${CFLAGS} ${MOXA_CMTFLAGS} -c -fPIC -o $@ $(filter %.c,$^)
+
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	${SILENCE}cd framework && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES}
+	${SILENCE}cd framework && cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --features ${CARGO_FEATURES} --message-format=json > ${PWD}/rust_clippy_scan_result/${APP_NAME}.json
+endif

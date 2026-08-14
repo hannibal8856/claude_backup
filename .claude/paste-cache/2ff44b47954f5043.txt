@@ -1,0 +1,87 @@
+Welcome to MOXA
+moxa login: admin
+ 
+Password: 
+$ su
+Password: 
+$ moxash
+sh ru Welcome to MOXA command shell
+Current time is Friday, April 14, 2023, 02:02 PM
+
+
+Please change the password in order to enhance security.
+
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-04-14 14:02:13
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0716_1348
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+description "222"
+snmp-server access enable
+interface ethernet 1/1
+!
+interface ethernet 1/2
+!
+interface ethernet 1/3
+!
+moxa# exit
+$ mv /etc/moxa/netsnmp/config/snmpd_system_information.conf /tmp/
+$ moxash
+Welcome to MOXA command shell
+Current time is Friday, April 14, 2023, 02:02 PM
+
+
+Please change the password in order to enhance security.
+
+moxa# con t
+moxa(config)# snmp-ser acc dis
+moxa(config)# snmp-ser acc en
+Are you sure you want to enable a non-secure interface (HTTP, Telnet, or SNMPv1/v2c)? [y/N] y
+moxa(config)# end
+moxa# exit
+$ systemctl restart app_moxa_framework
+$ 
+$ 
+$ netstat -antul | grep ":705"
+tcp        0      0 127.0.0.1:705           0.0.0.0:*               LISTEN      
+tcp        0      0 127.0.0.1:51498         127.0.0.1:705           TIME_WAIT   
+tcp        0      0 127.0.0.1:51492         127.0.0.1:705           ESTABLISHED 
+tcp        0      0 127.0.0.1:705           127.0.0.1:51506         ESTABLISHED 
+tcp        0      0 127.0.0.1:705           127.0.0.1:51468         TIME_WAIT   
+tcp        0      0 127.0.0.1:705           127.0.0.1:51452         TIME_WAIT   
+tcp        0      0 127.0.0.1:705           127.0.0.1:51492         ESTABLISHED 
+tcp        0      0 127.0.0.1:51506         127.0.0.1:705           ESTABLISHED 
+$ snmpget -v2c -c public  192.168.127.253 .1.3.6.1.2.1.1.5.0
+.1.3.6.1.2.1.1.5.0 = STRING: "moxa"
+$ snmpset -v2c -c private 192.168.127.253 .1.3.6.1.2.1.1.5.0 s "MyTestName"
+.1.3.6.1.2.1.1.5.0 = STRING: "MyTestName"
+$ snmpget -v2c -c public  192.168.127.253 .1.3.6.1.2.1.1.5.0
+.1.3.6.1.2.1.1.5.0 = STRING: "MyTestName"
+evName"
+.1.3.6.1.4.1.8691.602.1.1.1.6.0 = STRING: "MyDevName"
+$ 
+$ 
+$ snmpset -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.1.1.1.6.0 s "MyDevName"
+.1.3.6.1.4.1.8691.602.1.1.1.6.0 = STRING: "MyDevName"
+$ moxash
+Welcome to MOXA command shell
+Current time is Friday, April 14, 2023, 02:04 PM
+
+
+Please change the password in order to enhance security.
+
+MyDevName# exit
+$ snmpset -v2c -c private 192.168.127.253 .1.3.6.1.2.1.1.5.0 s "moxa"
+.1.3.6.1.2.1.1.5.0 = STRING: "moxa"
+$ snmpget -v2c -c public  192.168.127.253 .1.3.6.1.2.1.1.5.0
+.1.3.6.1.2.1.1.5.0 = STRING: "moxa"

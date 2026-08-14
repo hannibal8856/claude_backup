@@ -1,0 +1,206 @@
+/*
+ * lib_moxa_ies_auto_mibs - OID -> URI lookup, compiled from snmpd's own source.
+ *
+ * The whole design of this file is the three #defines below plus one #include.
+ * Everything that decides WHICH entries exist and WHAT flags they carry stays
+ * in ies-auto-mibs; this file only changes what is done with each array.
+ */
+
+/* Exclude the in-master handler bodies. See IES_AUTO_MIBS_TABLE_ONLY in
+ * snmp_tools/inc/ies_auto_mibs_handle.h for what this covers and why. */
+#define IES_AUTO_MIBS_TABLE_ONLY 1
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+#include <stdlib.h>
+#include <string.h>
+
+#include <libmoxa_util/util_debug.h>
+
+#include "ies_auto_mibs_handle.h"
+#include "lib_moxa_ies_auto_mibs/iesmap.h"
+
+/*
+ * A lookup table registers nothing, so the three registration calls the shared
+ * flag setup makes are defined away. The macros discard their arguments, which
+ * is what keeps the handler symbols from ever being referenced.
+ */
+#define moxaSnmpHandle_RegEntryGetValue(...) (0)
+#define moxaSnmpHandle_RegEntrySetValue(...) (0)
+#define moxaSnmpHandle_RegEntryDep(...)      (0)
+
+/*
+ * ies_auto_mibs_load_mibs() clears these two before registering with net-snmp.
+ * Nothing here registers or reads them, so one element is enough - snmpd's own
+ * MAX_BUF_REGINFO is a #define private to ies_auto_mibs.c and is not the size
+ * this build needs.
+ */
+netsnmp_handler_registration *buf_reginfo[1] = { 0 };
+int                           cnt_reginfo;
+
+/* Defined further down by ies_auto_mibs_setup.c, but called before that from
+ * iesmap_collect(). */
+ies_handle_t ies_auto_mibs_setup_entry_flags(struct ies_auto_mibs_entry *entry);
+
+/* Collect instead of register. The array list and its #if guards stay in
+ * ies_auto_mibs_setup.c. */
+#undef MOX_SNMP_INIT_ENTRY
+#define MOX_SNMP_INIT_ENTRY(ARRAY_NAME) \
+    iesmap_collect(ARRAY_NAME, (int) (sizeof(ARRAY_NAME) / sizeof(ARRAY_NAME[0])));
+
+static struct ies_auto_mibs_entry *g_entries;
+static size_t                      g_count;
+static size_t                      g_capacity;
+static int                         g_loaded;
+static int                         g_load_failed;
+
+static void
+iesmap_collect(struct ies_auto_mibs_entry *array, int len)
+{
+    int i;
+
+    if (g_load_failed || array == NULL || len <= 0) {
+        return;
+    }
+
+    if (g_count + (size_t) len > g_capacity) {
+        size_t want = (g_capacity == 0) ? 1024 : g_capacity * 2;
+        struct ies_auto_mibs_entry *grown;
+
+        while (want < g_count + (size_t) len) {
+            want *= 2;
+        }
+        grown = realloc(g_entries, want * sizeof(*grown));
+        if (grown == NULL) {
+            g_load_failed = 1;
+            return;
+        }
+        g_entries  = grown;
+        g_capacity = want;
+    }
+
+    for (i = 0; i < len; i++) {
+        struct ies_auto_mibs_entry *dst = &g_entries[g_count];
+
+        memcpy(dst, &array[i], sizeof(*dst));
+        dst->magic = IES_AUTO_MIBS_MAGIC_ENTRY;
+
+        /* Same call, same order as mox_snmp_init_entry() (ies_auto_mibs.c).
+         * This is where flags come from - they are not in the net_*.h. */
+        if (IES_NOERR != ies_auto_mibs_setup_entry_flags(dst)) {
+            g_load_failed = 1;
+            return;
+        }
+
+        g_count++;
+    }
+}
+
+#include "ies_auto_mibs_setup.c"
+
+/* The public API's view of the flag array has to match the real one. */
+typedef char iesmap_flag_bytes_check
+    [(IESMAP_FLAG_BYTES == IES_SNMP_FLAG_NUM) ? 1 : -1];
+typedef char iesmap_flag_status_check
+    [(IESMAP_FLAG_URI_STATUS == IES_FLAG_SNMP_URI_STATUS) ? 1 : -1];
+typedef char iesmap_flag_chain_check
+    [(IESMAP_FLAG_URI_CONFIG_CHAIN == IES_FLAG_SNMP_URI_CONFIG_CHAIN) ? 1 : -1];
+typedef char iesmap_flag_truth_check
+    [(IESMAP_FLAG_REPLACE_TRUTH_VALUE == IES_FLAG_SNMP_REPLACE_TRUTH_VALUE)
+         ? 1 : -1];
+/* The API passes OID subidentifiers as unsigned long so callers need no
+ * net-snmp headers; that holds only while net-snmp's oid is the same width. */
+typedef char iesmap_oid_width_check
+    [(sizeof(oid) == sizeof(unsigned long)) ? 1 : -1];
+
+static void
+iesmap_load_once(void)
+{
+    if (g_loaded) {
+        return;
+    }
+    g_loaded = 1;
+
+    ies_auto_mibs_load_mibs();
+
+    if (g_load_failed) {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP,
+                         "%% %s: failed to build the OID lookup table\n",
+                         __func__);
+        free(g_entries);
+        g_entries  = NULL;
+        g_count    = 0;
+        g_capacity = 0;
+    }
+}
+
+size_t
+iesmap_entry_count(void)
+{
+    iesmap_load_once();
+    return g_count;
+}
+
+int
+iesmap_flag_is_set(const struct iesmap_result *result, int flag)
+{
+    if (result == NULL || result->flags == NULL ||
+        flag < 0 || flag >= IES_FLAG_SNMP_MAX) {
+        return 0;
+    }
+    return IES_FLAG_BITS_CHK(flag, result->flags) ? 1 : 0;
+}
+
+int
+iesmap_lookup(const unsigned long *query, size_t oid_len,
+              struct iesmap_result *out)
+{
+    const struct ies_auto_mibs_entry *best = NULL;
+    size_t i;
+
+    if (query == NULL || oid_len == 0 || out == NULL) {
+        return -1;
+    }
+
+    iesmap_load_once();
+
+    /* Linear scan on purpose. An index is not worth building until something
+     * measures that this is too slow (plan Task 3 Step 3). */
+    for (i = 0; i < g_count; i++) {
+        const struct ies_auto_mibs_entry *e = &g_entries[i];
+        size_t elen = (size_t) e->oid_len;
+        size_t j;
+
+        if (elen == 0 || elen > oid_len) {
+            continue;
+        }
+        if (best != NULL && elen <= (size_t) best->oid_len) {
+            continue;
+        }
+        for (j = 0; j < elen; j++) {
+            if ((unsigned long) e->oid_list[j] != query[j]) {
+                break;
+            }
+        }
+        if (j == elen) {
+            best = e;
+        }
+    }
+
+    if (best == NULL) {
+        return -1;
+    }
+
+    out->uri       = best->uri;
+    out->mod_uri   = (best->mod_uri[0] != '\0') ? best->mod_uri : NULL;
+    out->uri_index = best->uri_index;
+    out->iss_build = (int) best->iss_build;
+    out->val_type  = best->val_type;
+    out->oid_index = best->oid_index;
+    out->mode      = best->mode;
+    out->flags     = best->flags;
+
+    return 0;
+}

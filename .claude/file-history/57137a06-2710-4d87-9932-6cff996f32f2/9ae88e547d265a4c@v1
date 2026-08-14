@@ -1,0 +1,1 @@
+- [rtk fabricates ls output](rtk-fabricates-ls-output.md) — hook-rewritten `ls`/`grep` invented directory names that don't exist; verify with `rtk proxy` or `test -d`.

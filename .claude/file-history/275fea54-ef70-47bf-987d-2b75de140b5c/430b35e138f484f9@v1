@@ -1,0 +1,42 @@
+.bvt:
+  # Currently we use default docker image on the RDVM runner, no neeed to specify image here.
+  # image: $SRE_DEPENDENCY_PROXY_GITLAB_IMAGE_PREFIX/moxa/sw/sre/share/runner-img/docker-git:latest
+  # Use RDVM runner instead of autoscale runner for safe SSH connection to testbed.
+  # Runner tag from pipeline variables: default in autobuild_config_prefill_global_var.yml;
+  # override in product autobuild_config.yml. Do not set BVT_RUNNER_TAG here — job variables
+  # would override the product and force every project onto the same RDVM.
+  tags:
+    - $BVT_RUNNER_TAG
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 1h50m     # Leave 10 mins for after script operation
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 10m # Change after script timeout from 5m (default) to 10m
+  before_script:
+    # Skip this stage if FWR_FORCE_BUILD is false AND no new changes
+    - |
+      if [ "${FWR_FORCE_BUILD}" == "false" ] && [ ! -s "$FWR_CHANGE_LOG_FILE" ]; then
+        echo "${LOG_INFO}No new changes today, skip BVT stage.${LOG_END}"
+        exit 3
+      fi
+    # Get BVT parameters
+    # Model name is case insensitive
+    - BVT_FWR_URL=$(sed -n 's/^SCM_URL=//p' "$FWR_PIPELINE_INFO_FILE" | head -n 1)
+    - BVT_PRODUCT_MODEL=$(echo "$BVT_FWR_URL" | sed -n 's#.*[Ff][Ww][Rr]_\([^_]*\)_v.*#\1#p' | head -n 1)
+    # Export BVT parameters as environment variables for ssh command
+    - export BVT_PRODUCT_MODEL=${BVT_PRODUCT_MODEL}
+    - export BVT_FWR_URL=${BVT_FWR_URL}
+  script:
+    - |
+      echo "${LOG_INFO}Start BVT${LOG_END}"
+      echo "${LOG_INFO}BVT parameters:${LOG_END}"
+      echo "Product model = ${BVT_PRODUCT_MODEL}"
+      echo "SCM Firmware URL = ${BVT_FWR_URL}"
+    - eval "$(ssh-agent -s)"
+    - chmod 600 "$BVT_TESTBED_SSH_PRIVATE_KEY"
+    - ssh-add "$BVT_TESTBED_SSH_PRIVATE_KEY"
+    - ssh -o StrictHostKeyChecking=no ${BVT_TESTBED_SSH_USERNAME}@${BVT_TESTBED_SSH_IP} "bash ./run_bvt.sh $BVT_PRODUCT_MODEL $BVT_FWR_URL" || exit_code=$?
+    - |
+      if [ "${exit_code}" -ne "0" ]; then
+        echo "${LOG_ERR}BVT failed, please refer to test log for details. (exit_code=${exit_code})${LOG_END}"
+        exit 1
+      fi
+      echo "${LOG_INFO}BVT succeed.${LOG_END}"

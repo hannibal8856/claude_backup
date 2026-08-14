@@ -1,0 +1,96 @@
+/*
+ * lib_moxa_ies_auto_mibs — config SET via the framework's own REST endpoint.
+ *
+ * Design C: the framework AgentX subagent owns config OIDs (GET + SET). GET is
+ * done in-process (Rust config_operation); SET reuses the *exact* loopback REST
+ * path the dlmod uses today — PATCH /api/v1/setting/data/<uri>?save (deviceName
+ * is POST /api/v1/setting/agent/...) authenticated with the admin token file —
+ * so it is byte-identical and runs the whole setting_write pipeline (validation,
+ * reload, save, opmode coordination). SET is rare; the loopback cost is moot.
+ *
+ * Mirrors plugin_moxa_system_information/snmp_config/snmp_system_information.c
+ * (SET branch) + lib_moxa_snmp_plugin token/handle bootstrap.
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+
+#include "lib_moxa_framework_uri/lib_moxa_framework_uri.h"
+#include "parson/parson.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/* Same admin token file the dlmod reads (lib_moxa_snmp_plugin.c). */
+#define IES_TOKEN_FILE "/moxa/run/auto_mibs/s_token"
+#define IES_TOKEN_SIZE 1024
+
+static struct LibFrameworkUri_Handle *s_handle = NULL;
+static char s_token[IES_TOKEN_SIZE] = {0};
+
+/* Lazily create the URI handle + read the admin token (once). Returns 0 on ok. */
+static int
+ies_set_init(void)
+{
+    FILE *fp;
+    char *r;
+
+    if (s_handle != NULL)
+    {
+        return 0;
+    }
+
+    fp = fopen(IES_TOKEN_FILE, "r");
+    if (fp == NULL)
+    {
+        return -1;
+    }
+    r = fgets(s_token, sizeof(s_token), fp);
+    fclose(fp);
+    if (r == NULL)
+    {
+        return -1;
+    }
+
+    s_handle = LibFrameworkUri_CreateHandle("127.0.0.1", 80);
+    return (s_handle != NULL) ? 0 : -1;
+}
+
+int
+ies_config_set(const char *config_uri, const char *value)
+{
+    JSON_Value *set_value;
+    JSON_Value *resp = NULL;
+    char uri[256] = {0};
+    int32_t result;
+
+    if (config_uri == NULL || value == NULL)
+    {
+        return -1;
+    }
+    if (ies_set_init() != 0)
+    {
+        return -1;
+    }
+
+    set_value = json_value_init_string(value);
+    if (set_value == NULL)
+    {
+        return -1;
+    }
+
+    /* deviceName is applied through the "agent" POST endpoint (dlmod parity). */
+    if (strcmp(config_uri, "systemInformation/deviceName") == 0)
+    {
+        snprintf(uri, sizeof(uri),
+                 "/api/v1/setting/agent/systemInformation/deviceName?save");
+        result = LibFrameworkUri_PostUri(s_handle, uri, s_token, set_value, &resp);
+    }
+    else
+    {
+        snprintf(uri, sizeof(uri), "/api/v1/setting/data/%s?save", config_uri);
+        result = LibFrameworkUri_PatchUri(s_handle, uri, s_token, set_value, &resp);
+    }
+
+    json_value_free(set_value);
+    json_value_free(resp);
+    return (int) result;
+}

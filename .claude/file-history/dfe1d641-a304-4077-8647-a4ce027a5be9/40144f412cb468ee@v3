@@ -1,0 +1,93 @@
+# ADR-0005: End-state —— 全部 iss_build==0 SNMP 收斂到 GET→framework AgentX / SET→in-master
+
+Status: Proposed
+Date: 2026-07-27
+
+PoC RESULT (2026-07-27, email scalar, BUILD 2026_0727_1240 — DECISIVE, revises this ADR's scope):
+  email(.602.7.3, 11 scalars) dual-registered framework RONLY + in-master RWRITE
+  (INIT_ENTRY restored, verified in image). Result: **GET → framework OK**
+  (walk returns values, PocEmail-DBG trace EMPTY = in-master not consulted for GET);
+  **SET → notWritable, config unchanged** (email is MIB-writable RWRITE, so this is
+  a routing failure, NOT by-design). → **The GET/SET split CANNOT be done for
+  identical-OID SCALARS**: net-snmp resolves a single leaf node to ONE authoritative
+  registration (here the framework AgentX RONLY reg wins GET, and being RONLY rejects
+  SET with no fall-through to the in-master RWRITE reg). trustAccess (a TABLE) works
+  only because in-master(per-column RWRITE .2.1.c) and framework(table RONLY .2)
+  register at DIFFERENT granularities → net-snmp routes GET→table / SET→column on
+  separate nodes. Not fixable by priority (if in-master won the leaf, GET would also
+  go to the slow in-master path — can't split GET vs SET on one node).
+  **=> REVISED END-STATE: the GET-framework/SET-in-master split is a TABLE-ONLY
+  pattern (Plan E via table_iterator + per-column in-master SET). SCALAR iss0 groups
+  CANNOT split; they stay framework-exclusive (Plan D: framework register_instance
+  RWRITE = GET+SET, which already works & is live).** So "ALL iss0 converge to
+  GET-framework/SET-in-master" is only achievable for the TABLE subset. Email PoC
+  edits should be reverted (email back to Plan D framework RWRITE, or its SET stays
+  broken=notWritable). Awaiting user decision on adopting the narrowed end-state.
+Context:
+  ADR-0004 為 trustAccess（一張含 IpAddress/rowStatus 的表）建立並實測了
+  「GET 由 framework AgentX 原生服務（table_iterator，live）、SET 留 in-master」
+  的分流。使用者的終局目標：**全部 iss_build==0 群組最終都應符合同一模型 ——
+  SNMP GET 走 framework、SET 走 in-master。**
+  現況（見 project memory iss0 inventory）：framework 服務 15 個 iss0 群組,
+  其中 14 個是 Plan D「framework 獨佔 GET+SET」（per-instance register_instance
+  RWRITE + moxa_config_handler，in-master INIT_ENTRY 註解掉），只有 trustAccess
+  是 GET/SET 分流。故此 ADR 記錄「把其餘群組也收斂到 GET-framework/SET-in-master」
+  的方向與待解問題。
+  關鍵觀察（更正一項先前推論）：曾以「純 priority」推論 scalar dual-reg 會讓
+  in-master(prio 127) 連 GET 都贏、GET 退回慢路徑。但 trustAccess 實測相反 ——
+  framework 是 prio 200（低於 in-master 127），GET 仍走 framework → net-snmp 實為
+  **依能力（RONLY→GET / RWRITE→SET）分流**，非純 priority。因此 scalar 分流
+  「很可能可行」，但尚未以 scalar 群組實測確認。
+Decision:
+  目標架構：所有 iss_build==0 群組一律
+    - **framework 註冊為唯讀（RONLY）並服務 GET/GETNEXT/GETBULK**
+      （table → net-snmp table_iterator，live callback；scalar → register_instance RONLY）;
+    - **in-master 保留/還原 MOX_SNMP_INIT_ENTRY（RWRITE）並處理 SET**
+      （既有 readCreate_v2 / REST set）；
+    - 路由交給 net-snmp 依能力自然分流（GET 落 framework RONLY、SET 落 in-master RWRITE），
+      如 trustAccess 實測。
+  trustAccess（ADR-0004）為已驗證的 table 範式。其餘群組**逐張收斂**（非一次全改）,
+  每張以 DUT 驗證：GET 仍走 framework（快、live）、SET 落 in-master（config 改動）。
+Alternatives Considered:
+  - 維持 Plan D（framework 一手 GET+SET）：現況可用，但 SET 擁有權與 trustAccess 不一致;
+    使用者以「單一模型、SET 決策集中在 in-master」為維護目標 → 收斂。
+  - 全部退回 in-master（GET+SET 皆 in-master）：達成 SET 一致，但 GET 退回 REST 慢路徑
+    （~600ms），失去 framework in-process live 讀的速度 → 否決。
+  - 只改 table、scalar 群組維持 framework GET+SET：折衷，但仍兩套擁有權模型並存;
+    列為「若 scalar PoC 證實不可行」時的退路。
+Consequences:
+  - 一致後：全部 iss0 GET 快（framework live）、SET 正確集中在 in-master、單一心智模型。
+  - **關鍵開放問題（轉 Accepted 的閘門）：scalar 群組的 GET/SET 分流尚未實測。**
+    需一個 scalar 群組 PoC（候選：mx_email，11 個 scalar，含 1 個 IP_ADDR 欄 serverAddress
+    .602.7.3.1.1.0）確認：framework RONLY register_instance + in-master RWRITE INIT_ENTRY
+    併存時,net-snmp 是否 GET→framework、SET→in-master（依能力分流），而非 in-master 通吃 GET。
+    trustAccess 證據偏向可行，但那是 table 形狀；scalar 為 identical-OID，須實測。
+  - **型別 render 缺口**：framework 的 scalar GET 走 moxa_config_handler，只 render
+    INTEGER / default→OCTET_STR，**無 ASN_IPADDRESS 路徑** → scalar IP 欄（如
+    email/serverAddress）目前被當 STRING 回。若該欄語意確為 IpAddress（非 hostname）,
+    需在 moxa_config_handler 加 IPADDRESS 分支（或改 typed handler）；若允許 hostname,
+    則 STRING 反而正確、MIB 的 IP_ADDR 宣告待商榷。收斂前逐欄釐清。
+  - 14 個 Plan D 群組各需：還原 in-master INIT_ENTRY、framework 由 RWRITE 改 RONLY、
+    逐張 DUT 回歸（GET 仍在 framework、SET 落 in-master）。屬漸進、可逐張回退。
+  - 對「有特殊型別欄的 table」（trustAccess 已做；未來若有）用 table_iterator + 型別自控;
+    對 scalar 用 register_instance RONLY（型別缺口見上）。
+Constraints / Assumptions:
+  - 依賴 net-snmp 5.9.3 對「同 OID region、RONLY(framework) + RWRITE(in-master) 併存」
+    的能力分流行為（GET→RONLY、SET→RWRITE）—— trustAccess table 已證，scalar 待證。
+  - SET 正確性依賴 in-master readCreate_v2 / REST set。
+  - iss_build==0 = framework/config 擁有（不變）。
+Related Files / Modules:
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs
+    (start_snmp_subagent 迴圈 register_instance；register_trustedip_table = iterator 範式；
+     moxa_config_handler 型別 render :238-264)
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c
+    (MoxaAgentX_RegisterInstance / MoxaAgentX_RegisterIterTable；priority 200)
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c (g_reuse_srcs = framework 服務清單)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c
+    (各群組 MOX_SNMP_INIT_ENTRY 註解/還原 = in-master SET 開關)
+  - PoC 候選: net_mx_email.h（scalar，serverAddress .602.7.3.1.1.0 = IP_ADDR）
+Related ADRs:
+  - 機制來源 / 已驗證 table 範式: ADR-0004（native dual-registration + table_iterator）
+  - ADR-0003（forward 機制）: 已被 ADR-0004 Superseded
+  - ADR-0001（mxTrap Plan-D framework-SET）: 與本 end-state 相反（framework 擁 SET），
+    收斂時需連同處理（動 0001 前先與使用者確認）；ADR-0002 資料層決策保留

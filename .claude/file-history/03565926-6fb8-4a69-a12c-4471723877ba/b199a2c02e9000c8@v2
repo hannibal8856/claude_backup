@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# Usage: dutssh.exp <per-cmd-timeout> "<cmd1>" "<cmd2>" ...
+# ssh admin@DUT -> su root -> run commands (sentinel-synced) -> exit
+set tmo [lindex $argv 0]
+set cmds [lrange $argv 1 end]
+set timeout $tmo
+log_user 1
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@192.168.127.253
+expect { -re "assword:" { sleep 1; send "moxa\r" } timeout { puts "\n***NO PW PROMPT"; exit 3 } }
+sleep 3
+send "\r"
+expect { -re {\$ $} { } timeout { puts "\n***NO USER SHELL"; exit 3 } }
+send "su\r"
+expect { -re "assword:" { send "moxa\r" } timeout { puts "\n***NO SU PW"; exit 4 } }
+expect { -re {# $} { } timeout { puts "\n***NO ROOT SHELL"; exit 4 } }
+set n 0
+foreach c $cmds {
+    incr n
+    send "$c ; echo MRK$n\_EN\"\"D\r"
+    expect { -re "MRK$n\_END\r\n" { } timeout { puts "\n***TIMEOUT on cmd $n"; } }
+}
+send "exit\r"
+send "exit\r"
+expect eof

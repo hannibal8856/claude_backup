@@ -1,0 +1,24 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 14:02 $ time /usr/bin/snmpgetnext -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.2.1.3.1
+iso.3.6.1.4.1.8691.603.3.4.1.2.1.3.2 = INTEGER: 2
+
+real    0m0.027s
+user    0m0.005s
+sys    0m0.000s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 14:02 $ time /usr/bin/snmpgetnext -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.2.1.3.2
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+
+real    0m3.915s
+user    0m0.000s
+sys    0m0.005s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 14:02 $ time /usr/bin/snmpgetnext -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.2.1.4
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+
+real    0m2.895s
+user    0m0.003s
+sys    0m0.000s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 14:02 $ time /usr/bin/snmpgetnext -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.3.1.0
+iso.3.6.1.4.1.8691.603.3.4.1.3.2.0 = INTEGER: 2
+
+real    0m0.014s
+user    0m0.003s
+sys    0m0.000s

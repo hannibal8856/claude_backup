@@ -1,0 +1,48 @@
+APP_NAME=rust_moxa_set_iss_management_ip
+SILENCE=@
+PROJECT?=moxa_set_iss_management_ip
+
+# Use DOCKER_VERSION to check if in docker or not
+DOCKER_VERSION := $(shell docker --version &>/dev/null)
+
+# Note: Must be in docker
+ifneq ("$(DOCKER_VERSION)","")
+$(error If you want to build for dut, please run the command in docker)
+endif
+
+# build for dut via local
+DESTDIR?=../../output/target
+ifeq ("$(TARGET)","")
+$(error Please define TARGET in BR2)
+endif
+export PATH := ${PWD}/../../output/host/bin:$(PATH)
+
+USR_SBIN=usr/sbin
+
+.PHONY: all install clean
+all: rust_clippy_scan
+	$(SILENCE)cargo build --release --target=${TARGET}
+
+install:
+	# copy to /tmp for development phase
+	$(SILENCE)cp target/${TARGET}/release/${PROJECT} /tmp/.
+
+	# copy to output/target/usr/bin for release phase
+	$(SILENCE)install -m 550 target/${TARGET}/release/${PROJECT} ${DESTDIR}/${USR_SBIN}/.
+
+clean:
+	rm -rf ${BUILD_PATH}
+
+	# clean /tmp for development phase
+	$(SILENCE)rm -f /tmp/${PROJECT}
+
+	# clean output/target/usr/sbin for release phase
+	$(SILENCE)rm -f ${DESTDIR}/${USR_SBIN}/${PROJECT}
+
+rust_clippy_scan:
+ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")
+	${SILENCE}rm -rf rust_clippy_scan_result
+	${SILENCE}mkdir -p rust_clippy_scan_result
+	${SILENCE}cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR}
+	$(SILENCE)cargo clippy --release --target=${TARGET} --target-dir=${RUST_TARGET_DIR} --message-format=json > rust_clippy_scan_result/${PROJECT}.json
+endif

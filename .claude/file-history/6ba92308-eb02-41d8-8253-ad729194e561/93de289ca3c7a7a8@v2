@@ -1,0 +1,88 @@
+# ADR-0007: framework AgentX subagent 的 GET 重用 in-master 既有的 :80 REST 讀取路徑（新增 ies_config_get / ies_status_get），取代/回退純 in-process running_config 讀取
+
+Status: Proposed（待拍板：hybrid-fallback vs uniform、以及 in-process 速度 vs HTTP 完整性的取捨）
+Date: 2026-07-28
+Context:
+  Plan D/E（app_moxa_framework snmp_subagent.rs "Design C"）讓 framework AgentX subagent
+  的 **GET 直接 in-process** 讀 `config_operation::get_config_from_path(&configs.running_config)`
+  （config OID）與 `status_operation::get_status_from_path`（status OID），刻意**移除**
+  dlmod 時代的 HTTP loopback 以求快；而 **SET 仍走 loopback REST** `ies_config_set`
+  （`lib_moxa_ies_auto_mibs/src/config_set.c`：lazy `LibFrameworkUri_CreateHandle("127.0.0.1",80)`
+  + admin token `/moxa/run/auto_mibs/s_token`，`LibFrameworkUri_PatchUri`）。
+
+  **實測發現 in-process 讀取對某些 module 不完整（2026-07-28, DUT + pcap 證實）：**
+  - **mxIpIf**（`.8691.605.1.1.1.1`）：framework `read_config_value("ipInterface/l3VlanIfTable")`
+    回空 → iterator 0 列 → GetNext 回 endOfMibView（AgentX pcap frame 12 手解 = 0x82）；
+    但 config **檔** `/moxa/run/flask-moxa-config-layer/RunningConfig/ipInterface.json` 有資料、
+    mainline in-master 也讀得到（walk 得 vlan1/vlan222）。
+  - **mxTurboRingV2 ring 狀態表**（`.8691.603.3.4.2.1`）：framework status
+    `get_status("turboringv2")` 回 `{"ring1":{…},"ring2":{…},"coupling":{…}}` **物件**，
+    但 SNMP ies_auto_mibs mapping 把 `stat/turboringv2/ring/` 當**陣列 index-table**
+    （`…/ring/<row-1>/<field>`）→ 找不到 `ring` 陣列鍵 → 0 列；mainline in-master 會把
+    ring1/ring2 展成 row1/row2（walk 得 2 列、designatedMaster=6-byte Hex-STRING）。
+
+  **根因**：framework 的 `running_config` 由 `rust_moxa_config_layer/src/config_loader.rs`
+  依註冊 plugins `check_and_fix_config` 建構，是一份**可能較窄**的 in-memory 視圖；而
+  **in-master 一律走 `LibFrameworkUri` HTTP GET 到 127.0.0.1:80** 的 config/status REST
+  （完整、檔案backed，對所有 module 一致）。SET PATCH :80 能改到 ipInterface.json →
+  **證實 :80 管的是完整 config**（只有 framework 那份 in-memory running_config 是窄的）。
+
+  **共同瓶頸（pattern）**：framework 執行期 in-process read（config 或 status）≠ in-master/
+  mainline 經 :80 能拿到的完整資料。這使得「把更多 iss0 表遷到 framework」每張都要先確保其
+  config/status 進了 framework 的 running_config（或改其 status 形狀）= 高、脆弱的 per-table effort。
+
+  **目標（user, 2026-07-28）**：讓「原有的 in-master 讀取路徑」能被 framework subagent
+  **無痛重用**，降低未來搬移每張表的 effort —— 不必逐表補 running_config / 改 status 形狀。
+Decision:
+  在既有的 REST bridge 上補齊**對稱的 GET**，讓 framework 的 GET 走與 in-master 完全相同的
+  `:80` 讀取路徑：
+  1. `lib_moxa_ies_auto_mibs`（config_set.c 或平行 config_get.c）新增
+     `ies_config_get(uri) -> json` 與 `ies_status_get(uri) -> json`，**重用既有**
+     `s_handle`(127.0.0.1:80) + `s_token`，呼叫 `LibFrameworkUri_GetUri`（setting / status endpoint）
+     —— 即 in-master `ies_auto_mibs.c` 用的同一條 HTTP GET。
+  2. `lib_moxa_rust_ies_auto_mibs/src/lib.rs` 加 Rust FFI wrapper `config_get()` / `status_get()`
+     （對映既有 `config_set*`）。
+  3. `app_moxa_framework/src/snmp_subagent.rs` 的 GET（`handle_get`、`handle_status_get`、
+     以及 iterator 的 `*_rows()`）改用此 REST 讀取。採 **做法 A（建議）= hybrid fallback**：
+     先試 in-process `running_config`，回空/缺鍵時 **fallback 到 :80 REST**；保留 Plan D 對
+     「running_config 已完整」群組的 in-process 速度,對不完整者（ipInterface/turboRing 類）自動走完整來源。
+     **做法 B = uniform**：一律走 :80（最簡單、與 in-master 完全一致、遷移 effort 最低，但放棄 in-process 速度）。
+  本決定**只改 GET 的「拿值來源」**，不動 OID↔URI mapping（ADR-0002）與 registration/routing（ADR-0004）。
+Alternatives Considered:
+  - **逐 plugin 修 running_config 載入**（讓每個要遷移的 plugin 之 config/status 都進 framework
+    in-memory 視圖）：正是要避免的 per-table effort、脆弱；且 turboRing 的 status 形狀不符（物件 vs
+    陣列）不是「載入」能解 → 否決為主要手段（可作個案優化）。
+  - **維持純 in-process、遷移前逐表確保 config 已在 running_config**：effort 高、且 status 形狀問題無解
+    → 不符降低 effort 的目標。
+  - **讓這些表乾脆不遷、留 in-master**：可行但與 iss0 收斂（ADR-0005）方向相反、且無法用 framework 的
+    型別控制（如 MAC/IP typed render）。
+Consequences:
+  - **重新引入 GET 的 HTTP loopback**（每個 GET 一次 :80 round-trip；walk = 大量 GET = 大量 HTTP）→
+    放棄 Plan D 對這些表的 in-process 速度優勢。但這正是 in-master/mainline 一路以來的成本（**不比 mainline 差**），
+    且 SET 早就這樣。做法 A 只在 in-process 缺資料時才付這個代價。
+  - 換來:framework 對**任何** OID 都能拿到與 in-master 完全一致、完整的 config/status →
+    遷移降為「註冊 OID + 用 REST 讀」，**零 per-plugin running_config 依賴**；turboRing status 形狀、
+    mxIpIf config 缺失都被同一機制一次解決。
+  - 做法 A 需要「in-process 回空 → 是『合法空』還是『缺資料』」的判斷，否則每個合法空都多打一次 REST
+    （效能/邏輯風險）；做法 B 無此問題但全程 HTTP。
+  - Thread-safety:`LibFrameworkUri` handle 是 config_set.c 的 lazy singleton，AgentX 在自己的 thread，
+    GET 與 SET 共用 handle 需確認可重入或加鎖。
+  - 依賴 token 檔 `/moxa/run/auto_mibs/s_token` 在 framework 行程可讀（SET 已在用，能動代表 OK）。
+Constraints / Assumptions:
+  - :80 config/status REST 為完整、檔案backed（SET PATCH :80 已改到 ipInterface.json → 證實）。
+  - 不改 mapping（ADR-0002）與 routing/registration（ADR-0004）；trustAccess/mxTrap 這類 in-process
+    已完整的群組，做法 A 下行為不變。
+  - status endpoint 回的形狀即 in-master 期望的形狀（陣列展開）—— 這正是 turboRing 修復的來源。
+Related Files / Modules:
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/config_set.c（既有 ies_config_set + LibFrameworkUri :80 bridge；新增 ies_config_get/ies_status_get）
+  - buildroot/dl/lib_moxa_ies_auto_mibs/include/lib_moxa_ies_auto_mibs.h（宣告）
+  - buildroot/dl/lib_moxa_rust_ies_auto_mibs/src/lib.rs（Rust FFI wrapper config_get/status_get）
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs（handle_get:~209 / handle_status_get:~581 / *_rows() 改走 REST，hybrid fallback）
+  - buildroot/dl/lib_moxa_framework_uri/src/lib_framework_uri.c（HTTP client：CreateHandle/GetUri）
+  - buildroot/dl/rust_moxa_config_layer/src/config_loader.rs（running_config 為何較窄的根源；個案優化點）
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c:158,819（in-master 用 LibFrameworkUri :80 的參照實作）
+Related ADRs:
+  - 延伸: ADR-0002（資料層 lib_moxa_ies_auto_mibs = 純資料 + REST bridge；本案在同層加 GET bridge）
+  - 精修（不 supersede）: ADR-0004（native dual-reg + table_iterator）之「GET in-process」假設 —— routing 不變，只換 GET 拿值來源
+  - 使能: ADR-0005（iss0 end-state 全 GET-framework/SET-in-master）—— 本案是讓更多表低成本遷移的使能器
+  - 個案背景: mxIpIf（config read 空，parked）、mxTurboRingV2（status 形狀，MAC render fix 待此案生效）

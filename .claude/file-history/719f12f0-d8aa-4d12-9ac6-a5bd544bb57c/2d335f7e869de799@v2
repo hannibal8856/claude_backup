@@ -1,0 +1,107 @@
+# ADR-0009: framework AgentX subagent 改用 subtree 註冊並自行回答 GETNEXT（取代逐 OID register_instance）
+
+Status: Accepted（DUT 驗證通過，2026-07-29；先只套用於 mxTurboRingV2，推廣條件見 Consequences）
+Date: 2026-07-29
+
+Context:
+  mxTurboRingV2 的 `snmpwalk` 嚴重卡頓（單次 walk 逾 10 秒、SNMP client 反覆 1 秒逾時重送）。
+  **ADR-0007 / ADR-0008 曾把病因歸給 REST loopback self-loop（~0.8s/GET），但 2026-07-29 的
+  DUT 實測直接推翻該結論**：
+
+  - 單發 `snmpget` 每一個 config scalar（coupling / protection，先前被認定「慢」的那些）
+    一律 **0.011–0.017s** —— **讀值路徑完全不慢**。
+  - `snmpgetnext .1.3.6.1.4.1.8691.603.3.4.1.2.1.3.2` = **3.915s**；
+    `snmpget` 同一批 OID = 0.017s。→ 慢的是 **GETNEXT**，不是取值。
+  - 對照實驗定位到「跨越未註冊區間」：
+    連續已註冊 OID 之間 getnext = 0.027s / 0.014s；跨 gap = 3.915s；直接落在 gap = 2.895s。
+
+  **AgentX loopback pcap（`~/pcap/agentx-trv2-getnext.pcap`，tcpdump port 705）給出機制：**
+  一個 client GETNEXT → master 對 framework（session 8）連續發出 **18 次 GetNext-PDU**
+  （packid 1136…1162 遞增），平均 round-trip **0.107s** → ~2s；加上 client 逾時重送造成
+  三個 transaction（tid 1135/1144/1154）並發競爭 → 3.9s。
+
+  **為什麼是 18 次**：`lib_moxa_ies_auto_mibs/src/mapping_reuse.c` 的 `is_index_table()` 把
+  turboring ring 這種 **named-key**（`{ring1,ring2}`）群組誤判為**陣列 index-table**，於是其
+  不支援的欄位 `interface`（deferred 的 REDUNDANT_PORT）落入 index-table 分支，emit 了
+  `REUSE_MAX_TABLE_ROWS` = **16 列** `.603.3.4.1.2.1.4.1~16`。這些列的路徑被組成
+  `"<uri><row-1>/<col>"` → `"turboringv20/interface"`，**永遠無法解析**。
+  framework 又以 `register_instance` **逐 OID** 註冊，每個 OID 自成一個 AgentX subtree，
+  於是 master 只能**一個一個 probe 過這 16 個無值 OID**，每個 probe 就是一次 IPC round-trip。
+
+Decision:
+  1. **mxTurboRingV2 改用一個 subtree 註冊**：`agentx::register_handler` 註冊
+     `TR2_ROOT = .1.3.6.1.4.1.8691.603.3.4`，取代該範圍內所有逐 OID `register_instance`
+     （註冊迴圈以 `oid_under(&oid, TR2_ROOT)` 跳過）。
+  2. **framework 自行回答 GETNEXT**（`snmp_subagent.rs::handle_getnext`）：
+     以排序後的 mapped OID 索引（`TR2_OIDS`，由 `all_oids()` 過濾 + `sort`）用
+     `partition_point` 找出第一個大於請求的 OID，**並在 in-process 迴圈中跳過「已 mapped 但
+     取不到值」的 OID**（判斷式：`get_var_type() != SNMP_NOSUCHINSTANCE`），直到找到有值者。
+     走到 subtree 盡頭則**還原原始 OID 並 `clear_value()`**，讓 net-snmp 視為本 registration
+     無答案、轉向下一個 registration。
+     — 跳過動作**必須在 framework 內完成**：GETNEXT 若回 noSuchInstance 會直接終止 client 的 walk。
+  3. **修正 mapping**：`is_index_table()` 明確排除 `config/turboringv2/ring/` 與
+     `stat/turboringv2/ring/`（named-key，不是陣列），使不支援的 `interface` 欄
+     **完全不進 ies_map**，那 16 個壞路徑 OID 不再產生。count 與 emit 兩個迴圈共用此函式，
+     自動保持一致。
+  4. **AgentX 層補上 GETNEXT 所需能力**：
+     - C `MoxaAgentX_SetRequestOid()`（`snmp_set_var_objid`）—— GETNEXT 必須回報「用哪個 OID 作答」。
+     - C `MoxaAgentX_ClearValue()`（設 `ASN_NULL`）—— 走出 subtree 時把 varbind 交還。
+     - Rust `MODE_GETNEXT`(161) / `SNMP_NOSUCHINSTANCE`(0x81) 常數 + `set_request_oid()` / `clear_value()`。
+
+Verification (2026-07-29, DUT 192.168.127.253, BUILD_TIME 2026_0729_1500):
+  - `snmpgetnext …603.3.4.1.2.1.3.2` → `…603.3.4.1.3.1.0 = INTEGER: 2`，
+    **3.915s → 0.023s（約 170 倍）**。
+  - `snmpwalk .1.3.6.1.4.1.8691.603.3.4` → **完整 25 個 OID，與修改前逐字相同**
+    （含 designatedMaster 兩列 `Hex-STRING: 00 00 00 00 00 00`、結尾 `.2.2.1.0 = 1`），
+    不再出現任何 `No Such Instance`。
+  - 中途曾出現「只做 subtree、未修 GETNEXT 跳過邏輯」的版本：walk 停在 `.1.2.1.4.1
+    No Such Instance` —— 實證了 Decision 2 的跳過迴圈為正確性必要條件。
+
+Alternatives Considered:
+  - **調查/修正每次 AgentX round-trip 的 107ms**：這是真正的「放大器」（18 × 0.107s）。
+    未執行，因為 subtree 已把次數由 18 降為 1，效果達標。**保留為日後其他 group 仍慢時的
+    首要調查方向**（嫌疑：`lib_moxa_snmp_agentx` 的 framing／事件迴圈，見既有筆記
+    「single recv + partial send」）。
+  - **只修 mapping（Decision 3）、維持逐 OID 註冊**：可消除本案的 gap，但任何「註冊 N 列、
+    實際僅 M 列有值」的 index-table 仍會被 master 逐一 probe → 不通用。
+  - **只做 subtree、不修 GETNEXT 跳過**：已實測失敗（walk 中斷）。
+  - **維持現狀**：walk 逾 10 秒且觸發 client 逾時，不可接受。
+
+Consequences:
+  - GETNEXT 跨越 gap 的成本由「O(gap 內 OID 數) 次 AgentX round-trip」降為 **1 次**。
+  - framework 必須自行維護**有序的 mapped OID 索引**。目前 `TR2_OIDS` 為 mxTurboRingV2 專用；
+    推廣時應改為**單一全域排序表**（`all_oids()` 排序一次），`handle_getnext` 找到 next 後
+    確認仍位於同一 root 之下即可。
+  - **推廣前必須先確認 ISS subagent 的註冊範圍與 priority**：subtree 註冊會一併涵蓋
+    framework 沒有資料的 OID（gap，或 `iss_build==1` 由 ISS 服務者）。目前僅靠 handler 跳過
+    與 priority 200 保護；若某 group 的 subtree 覆蓋到 ISS 服務的 OID，可能遮蔽 ISS 的回答。
+    此為只先套用於 mxTurboRingV2 的原因。
+  - **收尾工項**：目前三種註冊方式並存（`register_iter_table` 3 個表 / `register_handler`
+    1 個 subtree / `register_instance` 其餘），且 skip 條件為手寫的 prefix 比對，每新增一組
+    就要多改一處、漏寫即造成重複註冊。應收斂為**一張宣告式 `GROUPS` 註冊表**，由該表自動
+    推導 skip；新增群組即為新增一行。該表本身即文件，不另立設計文件。
+
+Constraints / Assumptions:
+  - net-snmp 對 `register_instance` 註冊的 OID 會把 GETNEXT 解析為 MODE_GET，故
+    `MODE_GETNEXT` 僅由 subtree 註冊產生；`handle_getnext` 目前只服務 `TR2_ROOT`。
+  - OID 的字典序比較（Rust `Vec<Oid>` 的 `Ord`）即 SNMP OID 排序語意。
+  - priority 200（framework）低於 in-master 的 127，dual-registration 時 in-master 仍優先。
+
+Related Files / Modules:
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs
+    （`TR2_ROOT`、`oid_under()`、`TR2_OIDS`/`tr2_oids()`、`handle_getnext()`、`dispatch` 的
+    `MODE_GETNEXT` 分支、`start_snmp_subagent` 的 `register_handler` 與 skip）
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c + include/lib_moxa_snmp_agentx.h
+    （`MoxaAgentX_SetRequestOid`、`MoxaAgentX_ClearValue`）
+  - buildroot/dl/lib_moxa_rust_snmp_agentx/src/lib.rs
+    （`MODE_GETNEXT`、`SNMP_NOSUCHINSTANCE`、`set_request_oid()`、`clear_value()`）
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c（`is_index_table()` 排除 named-key ring）
+  - ~/pcap/agentx-trv2-getnext.pcap（18 次 round-trip 的證據）
+
+Related ADRs:
+  - **修正 ADR-0007 / ADR-0008 的因果認定**：兩者將 walk 卡頓歸因於 framework REST loopback
+    self-loop，經本案實測推翻（讀值 11–17ms）。兩者的決策皆已於 2026-07-29 revert，
+    狀態改為 Deprecated；config GET 回到 in-process（ADR-0004 的形態）。
+  - 精修: ADR-0004（native dual-reg + table_iterator）之「註冊/routing」面向 —— 讀值來源不變，
+    改的是**註冊粒度**與**誰回答 GETNEXT**。
+  - 使能: ADR-0005（iss0 end-state）—— 降低往後遷移表的 walk 成本。

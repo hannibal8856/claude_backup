@@ -1,0 +1,35 @@
+Occurrences of 'IES_FLAG_SNMP_URI_STATUS' in project 'dl' (13 matches)
+
+dl
+  3rdparty_net_snmp
+    ies-auto-mibs
+
+      ies_auto_mibs_setup_net_mx_device_io.c (4 matches)
+        ies_auto_mibs_setup_entry_flags_net_mx_deviceIo, line 23: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+        ies_auto_mibs_setup_entry_flags_net_mx_deviceIo, line 29: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+        ies_auto_mibs_setup_entry_flags_net_mx_deviceIo, line 35: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+        ies_auto_mibs_setup_entry_flags_net_mx_deviceIo, line 41: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+
+      ies_auto_mibs_setup_net_mx_dhcpSrv.c
+        ies_auto_mibs_setup_entry_flags_net_mx_dhcpSrv, line 71: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+
+      ies_auto_mibs_setup_net_mx_eventLog.c
+
+      ies_auto_mibs_setup_net_mx_turboring_v2.c (2 matches)
+        ies_auto_mibs_setup_entry_flags_mx_turboring_v2, line 71: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+        ies_auto_mibs_setup_entry_flags_mx_turboring_v2, line 81: IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_STATUS, entry->flags);
+
+      ies_auto_mibs.c (2 matches)
+
+    snmp_tools
+      inc
+
+        ies_auto_mibs_handle.h (2 matches)
+          line 22: IES_FLAG_SNMP_URI_STATUS,    // use URI Status Layer
+          line 22: IES_FLAG_SNMP_URI_STATUS,    // use URI Status Layer
+
+  lib_moxa_ies_auto_mibs
+    src
+
+      mapping_reuse.c
+        emit_row, line 267: IES_FLAG_BITS_CHK(IES_FLAG_SNMP_URI_STATUS, e->flags) ? 1 : 0;

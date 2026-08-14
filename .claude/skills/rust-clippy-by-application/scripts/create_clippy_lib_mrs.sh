@@ -1,0 +1,84 @@
+#!/bin/bash
+# Rust LIBRARY package 的 clippy MR 流程(每個 repo):
+#   1. 在該 GitLab project 開 issue,標題 "Clippy scan binaries only" → 取得 issue iid
+#   2. 本地把 clippy-scan-binary-packages-3 建成新分支 <iid>-clippy-scan-binary-packages,
+#      把 commit message amend 成 "Issue #<iid>: Clippy scan binaries only",push 到 origin
+#   3. 開 merge request(source=新分支,target=NOS_v6.0_develop,描述 Closes #<iid>)
+#
+# 預設 DRY-RUN(不開 issue、不改 git、不發 MR);確認後加 --go。
+# 具 idempotency:已有同標題 opened issue 則沿用其 iid;origin 已有對應新分支則跳過。
+#
+#   ./create_clippy_lib_mrs.sh                 # dry-run 預覽
+#   ./create_clippy_lib_mrs.sh --go            # 實際執行
+#   TOKEN_FILE=~/新PAT檔 ./create_clippy_lib_mrs.sh --go
+
+set -u
+DL=/home/moxa/sda2/home/moxa/NOS_v6.0_develop/buildroot/dl
+SRC_BR=clippy-scan-binary-packages-3
+TARGET=${TARGET:-NOS_v6.0_develop}
+TITLE="Clippy scan binaries only"
+TOKEN_FILE=${TOKEN_FILE:-$HOME/moxa_gitlab_scm_token}
+GO=0; [ "${1:-}" = "--go" ] && GO=1
+
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' "$TOKEN_FILE" | head -1)
+[ -n "$TOKEN" ] || { echo "找不到 glpat- token: $TOKEN_FILE"; exit 1; }
+api(){ curl -sS --max-time 30 --header "PRIVATE-TOKEN: $TOKEN" "$@" </dev/null; }
+
+LIST_FILE=${LIST_FILE:-/tmp/lib_list.txt}
+[ -s "$LIST_FILE" ] || { echo "缺清單檔: $LIST_FILE"; exit 1; }
+
+done_n=0; skip_n=0; fail=""
+cd "$DL" || exit 1
+while read -r r; do
+  [ -d "$r/.git" ] || continue
+  git -C "$r" rev-parse --verify -q "$SRC_BR" >/dev/null 2>&1 || { echo "SKIP(無源分支) $r"; skip_n=$((skip_n+1)); continue; }
+  enc=$(git -C "$r" remote get-url origin | sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g')
+
+  # idempotency:origin 已有 *-clippy-scan-binary-packages 分支 → 視為已處理
+  if git -C "$r" ls-remote origin 'refs/heads/*-clippy-scan-binary-packages' 2>/dev/null | grep -q .; then
+    echo "EXISTS(已有新分支) $r"; skip_n=$((skip_n+1)); continue
+  fi
+
+  # 1. 找現有 opened 同標題 issue,沒有才開新的
+  iid=$(api "https://gitlab.com/api/v4/projects/$enc/issues?state=opened&search=$(printf %s "$TITLE" | sed 's/ /%20/g')" \
+        | jq -r --arg t "$TITLE" '[.[]|select(.title==$t)][0].iid // empty')
+  if [ -z "$iid" ]; then
+    if [ "$GO" = 1 ]; then
+      iid=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/issues" \
+            --data-urlencode "title=$TITLE" | jq -r '.iid // empty')
+      [ -n "$iid" ] || { echo "FAIL(開 issue) $r"; fail="$fail $r"; continue; }
+    else
+      iid="<NEW>"
+    fi
+  fi
+  newbr="${iid}-clippy-scan-binary-packages"
+  msg="Issue #${iid}: ${TITLE}"
+
+  if [ "$GO" = 0 ]; then
+    echo "DRY  $r  issue=#$iid  branch=$newbr  → MR to $TARGET"
+    continue
+  fi
+
+  # 2. 建新分支 + amend message + push
+  git -C "$r" branch -f "$newbr" "$SRC_BR" >/dev/null 2>&1
+  git -C "$r" checkout -q "$newbr" || { echo "FAIL(checkout) $r"; fail="$fail $r"; continue; }
+  git -C "$r" commit -q --amend -m "$msg" || { echo "FAIL(amend) $r"; fail="$fail $r"; continue; }
+  git -C "$r" push -q -u origin "$newbr" || { echo "FAIL(push) $r"; fail="$fail $r"; continue; }
+
+  # 3. 開 MR
+  resp=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/merge_requests" \
+    --data-urlencode "source_branch=$newbr" \
+    --data-urlencode "target_branch=$TARGET" \
+    --data-urlencode "title=$msg" \
+    --data-urlencode "description=Closes #${iid}" \
+    --data "remove_source_branch=true")
+  mrurl=$(echo "$resp" | jq -r '.web_url // empty')
+  if [ -n "$mrurl" ]; then echo "OK   $r  issue #$iid  → $mrurl"; done_n=$((done_n+1))
+  else echo "FAIL(MR) $r : $(echo "$resp" | jq -rc '.message // .error // .')"; fail="$fail $r"; fi
+  # 節流:避免連續 POST 觸發 GitLab rate-limit(SLEEP 秒,預設 0)
+  [ "${SLEEP:-0}" != 0 ] && sleep "${SLEEP}"
+done < "$LIST_FILE"
+echo "---------------------------------------------"
+echo "完成=$done_n  跳過=$skip_n  失敗:${fail:- 無}"
+[ "$GO" = 0 ] && echo "(DRY-RUN;確認後加 --go)"
+exit 0

@@ -1,0 +1,558 @@
+//! AgentX subagent for app_moxa_framework (Plan D B).
+//!
+//! B1 (Design C): the framework, as an AgentX subagent, FULLY owns the config
+//! OIDs listed in `lib_moxa_ies_auto_mibs` (the dlmod is removed).
+//! - GET maps OID -> config-layer URI and reads the value in-process via
+//!   `config_operation::get_config_from_path` + `remove_password_from_config` —
+//!   the exact pair the REST `_setting_get` uses (byte-identical, fast).
+//! - SET reuses the framework's own REST PATCH via `ies_config_set` — the exact
+//!   loopback path the dlmod used (byte-identical; SET is rare, latency moot).
+
+use std::os::raw::{c_int, c_void};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use lib_moxa_rust_snmp_agentx as agentx;
+use plugins_moxa_framework::config::Plugins;
+use qstring::QString;
+use rust_moxa_common::config_configs::Configs;
+use rust_moxa_common::user_info::{UserInfo, UserInfoRole};
+use rust_moxa_config_layer::config_operation;
+use rust_moxa_status_operation::StatusOperation;
+
+/// Live handles into the running framework state, shared with the subagent
+/// thread (same `Arc<Mutex<…>>` the actix workers use).
+struct SubagentState {
+    plugins: Arc<Mutex<Plugins>>,
+    configs: Arc<Mutex<Configs>>,
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: Arc<Mutex<plugins_moxa_framework::status::Plugins>>,
+}
+
+static STATE: OnceLock<SubagentState> = OnceLock::new();
+
+/// Fixed read identity for SNMP GETs (Task 5): reads are identity-less — VACM
+/// authorizes at the master and per-OID config values are uniform. Matches the
+/// admin identity `LibUtil_CreateToken` bakes for today's SNMP reads.
+fn sys_read_userinfo() -> UserInfo {
+    UserInfo {
+        username: "snmp@moxa^service".to_string(),
+        role: UserInfoRole::admin,
+        nonce: String::new(),
+        from_ip: "127.0.0.1".to_string(),
+    }
+}
+
+/// Read-only GET handler shared by every registered config OID.
+fn handle_get(requests: *mut c_void) -> c_int {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 1. the requested OID
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 2. OID -> config-layer URI
+    let entry = match lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid) {
+        Some(e) => e,
+        None => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 2b. table columns:
+    //   1 = portsPbmp index (value = port), 2 = portsPbmp value (bool array),
+    //   4 = index-table index (value = row, if the row exists).
+    match entry.table_col {
+        1 => {
+            let port = *oid.last().unwrap_or(&0) as i64;
+            agentx::set_int(requests, port);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        2 => return handle_pbmp_value_get(state, requests, &entry.uri, &oid),
+        4 => return handle_idx_table_index_get(state, requests, &entry.uri, &oid),
+        _ => {}
+    }
+
+    // Status-layer scalar (net_*.h URI had "stat/"): read from the status layer,
+    // not the config layer.
+    if entry.is_status {
+        return handle_status_get(state, requests, &entry.uri, entry.val_type);
+    }
+
+    // config path: index-table value col (3) -> "<uri><row-1>/<column>";
+    // turboring ring col (5) -> "<uri>/ring<row>/<column>" (row 1-based);
+    // a scalar (0) uses the URI as-is.
+    let idx_path;
+    let path: &str = if entry.table_col == 3 {
+        let row = *oid.last().unwrap_or(&0);
+        if row < 1 {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        idx_path = format!("{}{}/{}", entry.uri, row - 1, entry.uri_index);
+        &idx_path
+    } else if entry.table_col == 5 {
+        let row = *oid.last().unwrap_or(&0);
+        if row < 1 {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+        idx_path = format!("{}/ring{}/{}", entry.uri, row, entry.uri_index);
+        &idx_path
+    } else {
+        &entry.uri
+    };
+
+    // 3. read the value in-process — byte-identical to REST `_setting_get`.
+    //    Lock order (configs then plugins) matches config_layer::setting_read.
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+
+    let value = match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        path,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            // Config path not present (missing row / a URI needing a remap we
+            // don't apply) -> noSuchInstance so a walk continues.
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let value = if value.is_null() {
+        value
+    } else {
+        match config_operation::remove_password_from_config(&mut plugins, path, value) {
+            Ok(v) => v,
+            Err(_) => {
+                agentx::set_no_such_instance(requests);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    };
+
+    // 4. set the value per the mapped type (byte-identical to the old handler).
+    match entry.val_type {
+        agentx::ASN_INTEGER => {
+            // Config leaf may be a JSON bool (true->1, false->2, per SNMPv2
+            // TruthValue == ies-auto-mibs get_value.c:95), a number, or a
+            // numeric string; accept all three.
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_bool().map(|b| if b { 1 } else { 2 }))
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()));
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        _ => match value.as_str() {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// GET for a portsPbmp value column: read the per-port boolean array at `uri`
+/// and return `array[port-1]` as a TruthValue (true->1, false->2).
+fn handle_pbmp_value_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    uri: &str,
+    oid: &[agentx::Oid],
+) -> c_int {
+    let port = match oid.last() {
+        Some(&p) if p >= 1 => p as usize,
+        _ => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    let arr = match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        uri,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // `arr` is the JSON boolean array; the SNMP value is array[port-1].
+    match arr.get(port - 1) {
+        Some(v) => {
+            let n = v
+                .as_bool()
+                .map(|b| if b { 1 } else { 2 })
+                .or_else(|| v.as_i64());
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        None => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// SET for a portsPbmp value column: read the per-port boolean array, flip
+/// `array[port-1]` to the incoming TruthValue (1 -> true, else -> false), and
+/// PATCH the whole array back. Returns 0 on success, non-zero on failure.
+fn handle_pbmp_value_set(uri: &str, requests: *mut c_void) -> i32 {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => return -1,
+    };
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => return -1,
+    };
+    let port = match oid.last() {
+        Some(&p) if p >= 1 => p as usize,
+        _ => return -1,
+    };
+    let sv = match agentx::get_set_int(requests) {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    // Read the current array (lock order: configs then plugins).
+    let mut bools: Vec<bool> = {
+        let ui = sys_read_userinfo();
+        let configs = state.configs.lock().unwrap();
+        let mut plugins = state.plugins.lock().unwrap();
+        let arr = match config_operation::get_config_from_path(
+            &mut plugins,
+            &ui,
+            uri,
+            &configs.running_config,
+            None,
+            false,
+        ) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+        match arr.as_array() {
+            Some(a) => a.iter().map(|v| v.as_bool().unwrap_or(false)).collect(),
+            None => return -1,
+        }
+    };
+    if port - 1 >= bools.len() {
+        return -1;
+    }
+    bools[port - 1] = sv == 1;
+
+    // Serialize "[true,false,…]" by hand (no serde_json dep) and PATCH it whole.
+    let json = format!(
+        "[{}]",
+        bools
+            .iter()
+            .map(|b| if *b { "true" } else { "false" })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    lib_moxa_rust_ies_auto_mibs::config_set_json(uri, &json)
+}
+
+/// GET for a config index-table index column: the value is the row number, but
+/// only for rows that exist (the fixed-size array element "<uri><row-1>" is
+/// present). Rows past the array end -> noSuchInstance.
+fn handle_idx_table_index_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    uri: &str,
+    oid: &[agentx::Oid],
+) -> c_int {
+    let row = match oid.last() {
+        Some(&r) if r >= 1 => r,
+        _ => {
+            agentx::set_no_such_instance(requests);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let path = format!("{}{}", uri, row - 1);
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        &path,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) if !v.is_null() => {
+            agentx::set_int(requests, row as i64);
+        }
+        _ => {
+            agentx::set_no_such_instance(requests);
+        }
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// GET for a status-layer scalar: read `path` from the status layer (parallel to
+/// config_operation for config OIDs) and set the value per the mapped SNMP type.
+fn handle_status_get(
+    state: &SubagentState,
+    requests: *mut c_void,
+    path: &str,
+    val_type: c_int,
+) -> c_int {
+    let ui = sys_read_userinfo();
+    let query = QString::from("");
+    let value = {
+        let mut status_op = state.status_operation.lock().unwrap();
+        let mut plugins_status = state.plugins_status.lock().unwrap();
+        match status_op.get_status_from_path(&mut plugins_status, path, &ui, &query) {
+            Ok(v) => v,
+            Err(_) => {
+                agentx::set_no_such_instance(requests);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    };
+    match val_type {
+        agentx::ASN_INTEGER => {
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_bool().map(|b| if b { 1 } else { 2 }))
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()));
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_no_such_instance(requests);
+                }
+            }
+        }
+        _ => match value.as_str() {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_no_such_instance(requests);
+            }
+        },
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Look up the mapping entry for the OID a request targets.
+fn request_entry(requests: *mut c_void) -> Option<lib_moxa_rust_ies_auto_mibs::MapEntry> {
+    let oid = agentx::get_request_oid(requests)?;
+    lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid)
+}
+
+/// Write handler (Design C): SET reuses the framework's own REST PATCH via
+/// `ies_config_set`, byte-identical to the dlmod. Called in MODE_SET_ACTION.
+fn handle_set(requests: *mut c_void) -> c_int {
+    let entry = match request_entry(requests) {
+        Some(e) => e,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    // Read-only: index columns (portsPbmp portIndex = 1, index-table index = 4)
+    // and status-layer entries.
+    if entry.table_col == 1 || entry.table_col == 4 || entry.is_status {
+        agentx::set_error(requests, agentx::SNMP_ERR_NOTWRITABLE);
+        return agentx::SNMP_ERR_NOERROR;
+    }
+    // portsPbmp value column: whole-array read-modify-write.
+    if entry.table_col == 2 {
+        let rc = handle_pbmp_value_set(&entry.uri, requests);
+        if rc != 0 {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+        }
+        return agentx::SNMP_ERR_NOERROR;
+    }
+
+    // Scalar (0) or index-table value column (3): the field is path-addressable,
+    // so SET writes it directly (no read-modify-write).
+    let idx_path;
+    let path: &str = if entry.table_col == 3 || entry.table_col == 5 {
+        match agentx::get_request_oid(requests).and_then(|o| o.last().copied()) {
+            Some(row) if row >= 1 => {
+                idx_path = if entry.table_col == 5 {
+                    format!("{}/ring{}/{}", entry.uri, row, entry.uri_index)
+                } else {
+                    format!("{}{}/{}", entry.uri, row - 1, entry.uri_index)
+                };
+                &idx_path
+            }
+            _ => {
+                agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    } else {
+        &entry.uri
+    };
+
+    let rc = match entry.val_type {
+        agentx::ASN_INTEGER => match agentx::get_set_int(requests) {
+            None => -1,
+            Some(sv) => {
+                // A config field exposed as SNMP INTEGER may be stored as a JSON
+                // boolean (enable/trap/…). Read its current type and write back
+                // the matching one: TruthValue 1 -> true, anything else -> false.
+                if config_field_is_bool(path) {
+                    lib_moxa_rust_ies_auto_mibs::config_set_bool(path, sv == 1)
+                } else {
+                    lib_moxa_rust_ies_auto_mibs::config_set_int(path, sv)
+                }
+            }
+        },
+        _ => match agentx::get_set_string(requests) {
+            Some(s) => lib_moxa_rust_ies_auto_mibs::config_set(path, &s),
+            None => -1,
+        },
+    };
+    if rc != 0 {
+        agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// True if the config leaf at `uri` is currently a JSON boolean (so a SET should
+/// write a boolean, not a number).
+fn config_field_is_bool(uri: &str) -> bool {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => return false,
+    };
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+    config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        uri,
+        &configs.running_config,
+        None,
+        false,
+    )
+    .map(|v| v.is_boolean())
+    .unwrap_or(false)
+}
+
+/// Dispatch by net-snmp mode: GET in-process, SET via loopback REST PATCH.
+fn dispatch(reqinfo: *mut c_void, requests: *mut c_void) -> c_int {
+    match agentx::get_mode(reqinfo) {
+        agentx::MODE_GET => handle_get(requests),
+        agentx::MODE_SET_RESERVE1 => {
+            let entry = request_entry(requests);
+            // Index columns (portsPbmp portIndex = 1, index-table index = 4) are
+            // read-only; value columns (2, 3) are writable (MODE_SET_ACTION).
+            if entry
+                .as_ref()
+                .map(|e| e.table_col == 1 || e.table_col == 4 || e.is_status)
+                .unwrap_or(false)
+            {
+                agentx::set_error(requests, agentx::SNMP_ERR_NOTWRITABLE);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+            // Reject a SET whose type doesn't match the mapped OID's type.
+            let expected = match entry {
+                Some(e) if e.val_type == agentx::ASN_INTEGER => agentx::ASN_INTEGER,
+                _ => agentx::ASN_OCTET_STR,
+            };
+            if agentx::get_var_type(requests) != expected {
+                agentx::set_error(requests, agentx::SNMP_ERR_WRONGTYPE);
+            }
+            agentx::SNMP_ERR_NOERROR
+        }
+        agentx::MODE_SET_ACTION => handle_set(requests),
+        // RESERVE2 / COMMIT / FREE / UNDO: nothing to do (action already applied).
+        _ => agentx::SNMP_ERR_NOERROR,
+    }
+}
+
+/// net-snmp `Netsnmp_Node_Handler`. Panics must never cross into C, so the body
+/// runs under catch_unwind and degrades to genErr.
+extern "C" fn moxa_config_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let res =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(reqinfo, requests)));
+    match res {
+        Ok(code) => code,
+        Err(_) => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            agentx::SNMP_ERR_NOERROR
+        }
+    }
+}
+
+/// Start the AgentX subagent on its own thread (non-blocking). Registers every
+/// mapped config OID read-only and connects to the snmpd master.
+pub fn start_snmp_subagent(
+    plugins: Arc<Mutex<Plugins>>,
+    configs: Arc<Mutex<Configs>>,
+    status_operation: Arc<Mutex<StatusOperation>>,
+    plugins_status: Arc<Mutex<plugins_moxa_framework::status::Plugins>>,
+) {
+    let _ = STATE.set(SubagentState {
+        plugins,
+        configs,
+        status_operation,
+        plugins_status,
+    });
+
+    agentx::init("app_moxa_framework");
+    for oid in lib_moxa_rust_ies_auto_mibs::all_oids() {
+        agentx::register_instance(
+            "moxaIesConfig",
+            &oid,
+            agentx::HANDLER_CAN_RWRITE,
+            moxa_config_handler,
+        );
+    }
+    agentx::run_in_thread();
+}

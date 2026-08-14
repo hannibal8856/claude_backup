@@ -1,0 +1,305 @@
+/********************************************************************
+ *  Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file LICENSE for details.
+ *******************************************************************/
+
+#include "libmoxa_util/util_sem.h"
+#include "libmoxa_util/util_shm.h"
+#include "libmoxa_system/lib_moxa_system_datatypes_def.h"
+#include "libmoxa_system/lib_moxa_system_product_info_api.h"
+#include "libmoxa_system/lib_moxa_system_module_port_info_api.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include "fiber_check_main.h"
+#include "fiber_check_monitor.h"
+#include "fiber_check_defines.h"
+#include "fiber_check_debug.h"
+#include "fiber_check_config.h"
+#include "fiber_check_shm_api.h"
+#include "fiber_check_api.h"
+#include <parson/parson.h>
+
+#define FIBER_CHECK_JSON_CONFIG_FILE "/moxa/run/flask-moxa-config-layer/RunningConfig/mxfiberCheck.json"
+#define JSON_OBJ_GET_NUMBER(obj, name) \
+    ((int)json_object_get_number(obj, name))
+
+struct Configs {
+    JSON_Value *mFiberCheckVal;
+
+    JSON_Object *mFiberCheckObj;
+};
+
+/**
+ * @brief Load runtime config to target structure
+ *
+ * @param[in]  cfg   Fiber Check Config structure
+ * @returns          void
+ */
+static void _ConfigLoad(struct FiberCheckConfig *cfg)
+{
+    struct Configs sRunningConfig;
+
+    JSON_Object *obj = NULL;
+    JSON_Array *port_tbl_arr = NULL;
+    JSON_Array *warn_arr = NULL;
+    /* Get running configs */
+
+    /* Fiber Check */
+    sRunningConfig.mFiberCheckVal = json_parse_file(FIBER_CHECK_JSON_CONFIG_FILE);
+    sRunningConfig.mFiberCheckObj = json_value_get_object(sRunningConfig.mFiberCheckVal);
+    if (!sRunningConfig.mFiberCheckObj) {
+        fprintf(stderr, "%s:%d: json_value_get_object error\n", __func__, __LINE__);
+        exit(1);
+    }
+
+    obj = json_object_get_object(sRunningConfig.mFiberCheckObj, "general");
+    port_tbl_arr = json_object_get_array(obj, "portTable");
+
+    for (int i = 0; i < json_array_get_count(port_tbl_arr); ++i) {
+        JSON_Object *obj = json_array_get_object(port_tbl_arr, i);
+        if (!obj) {
+            continue;
+        }
+
+        /* temperatureWarningC */
+        if (!json_object_has_value(obj, "mode")) {
+            continue;
+        }
+
+        /* temperatureWarningC */
+        if (!json_object_has_value(obj, "temperatureWarningC")) {
+            continue;
+        }
+
+        /* temperatureWarningF */
+        if (!json_object_has_value(obj, "temperatureWarningF")) {
+            continue;
+        }
+
+        /* txPowerWarning */
+        if (!json_object_has_value(obj, "txPowerWarning")) {
+            continue;
+        }
+
+        /* rxPowerWarning */
+        if (!json_object_has_value(obj, "rxPowerWarning")) {
+            continue;
+        }
+
+        cfg->mWarningCfg.mPortWarning[i].mMode = JSON_OBJ_GET_NUMBER(obj, "mode");
+
+        cfg->mWarningCfg.mPortWarning[i].mTemperatureWarningC = atof(json_object_get_string(obj, "temperatureWarningC"));
+        cfg->mWarningCfg.mPortWarning[i].mTemperatureWarningF = atof(json_object_get_string(obj, "temperatureWarningF"));
+
+        warn_arr = json_object_get_array(obj, "txPowerWarning");
+        cfg->mWarningCfg.mPortWarning[i].mTxPowerWarningOver = atof(json_array_get_string (warn_arr, 1));
+        cfg->mWarningCfg.mPortWarning[i].mTxPowerWarningUnder = atof(json_array_get_string (warn_arr, 0));
+
+        warn_arr = json_object_get_array(obj, "rxPowerWarning");
+        cfg->mWarningCfg.mPortWarning[i].mRxPowerWarningOver = atof(json_array_get_string (warn_arr, 1));
+        cfg->mWarningCfg.mPortWarning[i].mRxPowerWarningUnder = atof(json_array_get_string (warn_arr, 0));
+    }
+
+    json_value_free(sRunningConfig.mFiberCheckVal);
+    sRunningConfig.mFiberCheckVal = NULL;
+}
+
+/**
+ * @brief Output Fiber Port ddm status is invalid
+ *
+ * @param[in]  aStatusFile   Fiber Check status output file
+ * @param[in]  aPort         Output port
+ * @returns                  void
+ */
+static void _OutputPortDdmStatusInvalid(FILE* aStatusFile, const uint8_t aPort)
+{
+    if (aStatusFile == NULL) {
+        return;
+    }
+    fprintf(aStatusFile, "txBiasCurrent.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "txPower.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "rxPower.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "voltage.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "temperatureC.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "temperatureF.%u=N/A\n", aPort);
+
+    fprintf(aStatusFile, "temperatureLimitC.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "temperatureLimitF.%u=N/A\n", aPort);
+
+    fprintf(aStatusFile, "txPowerUnderLimit.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "txPowerOverLimit.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "rxPowerUnderLimit.%u=N/A\n", aPort);
+    fprintf(aStatusFile, "rxPowerOverLimit.%u=N/A\n", aPort);
+
+    return;
+}
+
+/**
+ * @brief Output Fiber Port status
+ *
+ * @param[in]  FiberCheckStatus   Fiber Check status instance
+ * @returns                       void
+ */
+static void _OutputStatus(const struct FiberCheckStatus* aFiberCheckStatus)
+{
+    int32_t ret = -1;
+    FILE* status_file = NULL;
+    uint32_t max_port_num;
+    uint32_t max_module_num;
+    char s_tmp[20];
+    struct FiberCheckWarnThreshold warn_th;
+    struct FiberCheckConfig cfg;
+
+
+    ret = LibSystem_GetMaxPortNumInSystem(&max_port_num);
+    if (ret != LIB_SYSTEM_RET_SUCCESS)
+    {
+        FIBER_CHECK_APP_ERR_MSG("LibSystem_GetMaxPortNumInSystems failed with %d\n", ret);
+        return;
+    }
+    ret = LibSystem_GetMaxNumOfEthModules(&max_module_num);
+    if (ret != LIB_SYSTEM_RET_SUCCESS)
+    {
+        FIBER_CHECK_APP_ERR_MSG("LibSystem_GetMaxNumOfEthModules failed with %d\n", ret);
+        return;
+    }
+
+    _ConfigLoad(&cfg);
+
+    status_file = fopen("/etc/moxa/app-moxa-fiber-check/fiberCheck.stat", "w");
+    if(status_file == NULL){
+        FIBER_CHECK_APP_ERR_MSG("open status file fail\n");
+        return;
+    }
+
+    fprintf(status_file, "[status]\n");//section for python plugin
+
+    //output port status
+    for(uint8_t port = 0; port < max_port_num; port++){
+
+        //link status for every port (1=up, 2=down), so the status layer need
+        //not query ISS ifTable for ifOperStatus
+        fprintf(status_file, "linkStatus.%u=%u\n",
+                port, FiberCheck_IsPortLinkUp(port) ? 1 : 2);
+
+        if(!aFiberCheckStatus->mPortStatus[port].mValid) {
+            fprintf(status_file, "supportDdm.%u=N/A\n", port);
+            fprintf(status_file, "modelName.%u=N/A\n", port);
+            fprintf(status_file, "serialNumber.%u=N/A\n", port);
+            fprintf(status_file, "wavelength.%u=N/A\n", port);
+
+            _OutputPortDdmStatusInvalid(status_file, port);
+            continue;
+        }
+
+        fprintf(status_file, "modelName.%u=%s\n", port, aFiberCheckStatus->mPortStatus[port].mModelName);
+        fprintf(status_file, "serialNumber.%u=%s\n", port, aFiberCheckStatus->mPortStatus[port].mSerialNumber);
+        fprintf(status_file, "wavelength.%u=%d\n", port, aFiberCheckStatus->mPortStatus[port].mWaveLength);
+
+        if(aFiberCheckStatus->mPortStatus[port].mSupportDdm){
+            fprintf(status_file, "supportDdm.%u=true\n", port);
+        }else{
+            fprintf(status_file, "supportDdm.%u=false\n", port);
+
+            _OutputPortDdmStatusInvalid(status_file, port);
+            continue;
+        }
+
+        fprintf(status_file, "txBiasCurrent.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mTxBiasCurrent);
+        fprintf(status_file, "txPower.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mTxPower);
+        fprintf(status_file, "rxPower.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mRxPower);
+        fprintf(status_file, "voltage.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mVoltage);
+        fprintf(status_file, "temperatureC.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mTemperatureC);
+        fprintf(status_file, "temperatureF.%u=%.2lf\n", port, aFiberCheckStatus->mPortStatus[port].mTemperatureC * 9 / 5 + 32);
+
+    if (cfg.mWarningCfg.mPortWarning[port].mMode == kAuto) {
+        ret = FiberCheck_GetFiberDefaultThreshold(aFiberCheckStatus->mPortStatus[port].mModelName, &warn_th);
+        if (ret != FIBER_CHECK_OK) {
+            FIBER_CHECK_APP_ERR_MSG("FiberCheck_GetFiberDefaultThreshold failed with %d\n", ret);
+            //Prevent invalid information to status layer
+            warn_th.mTemperatureWarningC = FIBER_CHECK_DDM_STD_TEMP_C_MAX;
+            warn_th.mTemperatureWarningF = FIBER_CHECK_DDM_STD_TEMP_F_MAX;
+            warn_th.mTxPowerWarningUnder = FIBER_CHECK_DDM_STD_DBM_MIN;
+            warn_th.mTxPowerWarningOver = FIBER_CHECK_DDM_STD_DBM_MAX;
+            warn_th.mRxPowerWarningUnder = FIBER_CHECK_DDM_STD_DBM_MIN;
+            warn_th.mRxPowerWarningOver = FIBER_CHECK_DDM_STD_DBM_MAX;
+        }
+
+    } else {
+        warn_th.mTemperatureWarningC = cfg.mWarningCfg.mPortWarning[port].mTemperatureWarningC;
+        warn_th.mTemperatureWarningF = cfg.mWarningCfg.mPortWarning[port].mTemperatureWarningF;
+        warn_th.mTxPowerWarningUnder = cfg.mWarningCfg.mPortWarning[port].mTxPowerWarningUnder;
+        warn_th.mTxPowerWarningOver = cfg.mWarningCfg.mPortWarning[port].mTxPowerWarningOver;
+        warn_th.mRxPowerWarningUnder = cfg.mWarningCfg.mPortWarning[port].mRxPowerWarningUnder;
+        warn_th.mRxPowerWarningOver = cfg.mWarningCfg.mPortWarning[port].mRxPowerWarningOver;
+    }
+
+        fprintf(status_file, "temperatureLimitC.%u=%.2lf\n", port, warn_th.mTemperatureWarningC);
+        fprintf(status_file, "temperatureLimitF.%u=%.2lf\n", port, warn_th.mTemperatureWarningF);
+
+        fprintf(status_file, "txPowerUnderLimit.%u=%.2lf\n", port, warn_th.mTxPowerWarningUnder);
+        fprintf(status_file, "txPowerOverLimit.%u=%.2lf\n", port, warn_th.mTxPowerWarningOver);
+        fprintf(status_file, "rxPowerUnderLimit.%u=%.2lf\n", port, warn_th.mRxPowerWarningUnder);
+        fprintf(status_file, "rxPowerOverLimit.%u=%.2lf\n", port, warn_th.mRxPowerWarningOver);
+    }
+
+    fclose(status_file);
+
+    return;
+}
+
+/**
+ * @brief Read SHM to output status info.
+ *        It will wait till monitor task finish output
+ *
+ * @returns 0 means success, other means fail
+ */
+int32_t FiberCheckShm_OutputShmInfo(void)
+{
+    int32_t ret = 0;
+    char* fiber_check_status_ptr = NULL;
+    struct FiberCheckStatus fiber_check_status;
+    struct FiberCheckStatus* fiber_check_status_shm_ptr;
+
+    // Wait semaphore
+    LibUtil_SemWait(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    // Open share memory
+    ret = LibUtil_ShmOpen(kShmSrvBlkTypeFiberCheckStatusSrv, &fiber_check_status_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm open failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    fiber_check_status_shm_ptr = (struct FiberCheckStatus*) fiber_check_status_ptr;
+
+    memcpy(&fiber_check_status, fiber_check_status_shm_ptr, sizeof(struct FiberCheckStatus));
+
+    // Detach shm segment
+    ret = LibUtil_ShmClose(fiber_check_status_ptr);
+    if (ret != 0) {
+        FIBER_CHECK_APP_ERR_MSG("Error: shm close failed, returned %d.\n", ret);
+        // Release semaphore
+        LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+        return ret;
+    }
+
+    // Release semaphore
+    LibUtil_SemPost(kSemCritSecSrvTypeFiberCheckStatusSrv);
+
+    _OutputStatus(&fiber_check_status);
+
+    return 0;
+}
+
+
+
+
+
+

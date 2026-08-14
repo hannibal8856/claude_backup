@@ -1,0 +1,15 @@
+#!/bin/sh
+echo "### mms_setting.conf 現況"
+cat /etc/moxa/netsnmp/config/mms_setting.conf
+echo "### snmpd 有沒有載入 plugin_snmp_mms_setting.so"
+P=$(pgrep -f '/bin/snmpd' | head -1)
+grep -c 'plugin_snmp_mms_setting' /proc/$P/maps 2>/dev/null
+echo "### 對照:其他 dlmod plugin 仍載入中(應該 > 0)"
+for m in poe mxlp fiber_check; do
+    printf '  %-12s %s\n' "$m" "$(grep -c "plugin_snmp_.*$m" /proc/$P/maps 2>/dev/null)"
+done
+echo "### 目前載入的 dlmod .so 總數"
+grep -c 'netsnmp/plugin/.*\.so' /proc/$P/maps 2>/dev/null
+echo "### framework subagent 是否活著"
+pgrep -l -f 'app_moxa_framew' | head -2
+echo "### DONE"

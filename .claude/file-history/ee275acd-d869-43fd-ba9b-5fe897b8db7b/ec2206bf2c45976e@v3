@@ -1,0 +1,105 @@
+#!/bin/sh
+# fwdcheck_remote.sh <TARGET_OID> <POSITIVE_OID> <NEGATIVE_OID> [N] [IDLE] [PEER]
+#
+# Runs ON THE DUT. Decides whether TARGET_OID's GET is answered by a given
+# AgentX subagent, by counting packets on that subagent's own AgentX TCP stream.
+#
+# PEER selects which subagent to watch, matched against the process name in
+# `ss -tnp` (default ISS):
+#   ISS             -> the ISS AgentX subagent   (agentx_owned.list delegation)
+#   app_moxa_framew -> the framework subagent    (g_reuse_srcs[] groups)
+#
+# Why it is built this way:
+#   - the DUT has no `timeout`, so the capture self-terminates via -G/-W
+#   - :705 carries BOTH subagents, so we filter on the chosen peer's ephemeral
+#     port, re-read here because it changes on every snmpd restart
+#   - the port filter is applied at capture time, so the file stays small and
+#     re-counting it between windows is cheap
+#   - a positive and a negative control are mandatory; without them a broken
+#     capture is indistinguishable from "not forwarded"
+set -u
+
+TARGET=${1:?usage: fwdcheck_remote.sh <target> <positive> <negative> [N] [IDLE] [PEER]}
+POS=${2:?missing POSITIVE control OID}
+NEG=${3:?missing NEGATIVE control OID}
+N=${4:-150}
+IDLE=${5:-15}
+PEER=${6:-ISS}
+
+PCAP=/tmp/fwdcheck.pcap
+COMM=${COMMUNITY:-public}
+SNMPGET=/usr/bin/snmpget
+
+[ -x "$SNMPGET" ] || { echo "FATAL: $SNMPGET missing"; exit 1; }
+
+PEERPORT=$(ss -tnp 2>/dev/null | grep ':705 ' | grep "$PEER" | \
+           sed -n 's/.*127\.0\.0\.1:\([0-9]*\) *127\.0\.0\.1:705.*/\1/p' | head -1)
+if [ -z "$PEERPORT" ]; then
+    echo "INVALID: no ESTABLISHED '$PEER' connection to 127.0.0.1:705."
+    echo "         That subagent is not connected -- nothing it owns can be"
+    echo "         answered over AgentX, and the measurement is meaningless."
+    echo "         Current peers on :705:"
+    ss -tnp 2>/dev/null | grep ':705 ' | sed 's/^/           /'
+    exit 2
+fi
+echo "watching peer '$PEER', AgentX ephemeral port: $PEERPORT"
+
+# Self-terminating capture: exits after one -G period, no kill needed.
+# Duration scales with N -- three bursts of N GETs at ~0.1 s each, plus the two
+# idle windows, plus margin. A fixed duration silently truncates large runs.
+DUR=$(( IDLE * 2 + (N * 3) / 4 + 60 ))
+rm -f "$PCAP"
+tcpdump -i lo -n -U -w "$PCAP" -G "$DUR" -W 1 port "$PEERPORT" >/dev/null 2>&1 &
+sleep 3
+[ -f "$PCAP" ] || { echo "INVALID: tcpdump did not start (no $PCAP)."; exit 2; }
+
+cnt() { tcpdump -r "$PCAP" 2>/dev/null | wc -l; }
+burst() { i=0; while [ $i -lt "$N" ]; do
+              "$SNMPGET" -v2c -c "$COMM" -On 127.0.0.1 "$1" >/dev/null 2>&1
+              i=$((i + 1)); done; }
+
+sleep "$IDLE";            W0=$(cnt)
+burst "$TARGET";          W1=$(cnt)
+sleep "$IDLE";            W2=$(cnt)
+burst "$POS";             W3=$(cnt)
+burst "$NEG";             W4=$(cnt)
+
+D_TARGET=$((W1 - W0))
+D_IDLE=$((W2 - W1))
+D_POS=$((W3 - W2))
+D_NEG=$((W4 - W3))
+
+echo
+echo "window                                   cumulative   delta"
+printf "idle %ss                                  %-12s -\n"      "$IDLE" "$W0"
+printf "%-4s x TARGET   %-24s %-12s %s\n" "$N" "$TARGET" "$W1" "$D_TARGET"
+printf "idle %ss                                  %-12s %s\n"     "$IDLE" "$W2" "$D_IDLE"
+printf "%-4s x POSITIVE %-24s %-12s %s\n" "$N" "$POS" "$W3" "$D_POS"
+printf "%-4s x NEGATIVE %-24s %-12s %s\n" "$N" "$NEG" "$W4" "$D_NEG"
+echo
+
+# Guard against a zero denominator without pulling in bc.
+NEGF=$D_NEG
+[ "$NEGF" -lt 1 ] && NEGF=1
+
+echo "control ratio POSITIVE/NEGATIVE = $((D_POS / NEGF))x"
+if [ $((D_POS)) -lt $((NEGF * 5)) ]; then
+    echo
+    echo "INVALID: the positive control did not exceed the negative control by 5x."
+    echo "         The harness is wrong, not the target. Check: did tcpdump run?"
+    echo "         is $PEERPORT still '$PEER's port (snmpd restarted mid-run)?"
+    echo "         is the POSITIVE OID really served by '$PEER'?"
+    exit 2
+fi
+
+echo "target ratio  TARGET/NEGATIVE   = $((D_TARGET / NEGF))x"
+if [ $((D_TARGET)) -ge $((NEGF * 5)) ]; then
+    echo "VERDICT: SERVED BY '$PEER' -- $TARGET is answered over AgentX by that subagent."
+elif [ $((D_TARGET)) -le $((NEGF * 2)) ]; then
+    echo "VERDICT: NOT SERVED BY '$PEER' -- $TARGET is answered elsewhere (in-master or another subagent)."
+else
+    echo "VERDICT: INCONCLUSIVE -- re-run with a larger N (currently $N)."
+fi
+
+echo
+echo "capture left at $PCAP (delete it when done)"

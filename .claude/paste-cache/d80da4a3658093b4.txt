@@ -1,0 +1,32 @@
+$ ps ax | grep snmpd
+1426 ttyS0    S+     0:00 grep snmpd
+$ 
+$ moxash
+Welcome to MOXA command shell
+Current time is Thursday, May 11, 2023, 05:19 PM
+moxa# con t
+moxa(config)# snmp-ser acc dis
+moxa(config)# snmp-ser acc en
+Are you sure you want to enable a non-secure interface (HTTP, Telnet, or SNMPv1/v2c)? [y/N] y
+moxa(config)# exit
+moxa# exit
+$ 
+$ 
+$ !ps
+ps ax | grep snmpd
+1562 ?        Ss     0:00 /bin/sh /etc/moxa/config-moxa-snmp/init_snmpd.sh
+1563 ?        Rl     0:01 /bin/snmpd -f -C -c /moxa/run/snmp/snmpd.conf,/etc/moxa/netsnmp/config/config_encryption.conf,/etc/moxa/netsnmp/config/dai.conf,/etc/moxa/netsnmp/config/dhcpred
+1639 ttyS0    S+     0:00 grep snmpd
+$ ps ax | grep snmpd
+1562 ?        Ss     0:00 /bin/sh /etc/moxa/config-moxa-snmp/init_snmpd.sh
+1563 ?        Sl     0:02 /bin/snmpd -f -C -c /moxa/run/snmp/snmpd.conf,/etc/moxa/netsnmp/config/config_encryption.conf,/etc/moxa/netsnmp/config/dai.conf,/etc/moxa/netsnmp/config/dhcprel
+ay.conf,/etc/moxa/netsnmp/config/dhcpsnp.conf,/etc/moxa/netsnmp/config/eip.conf,/etc/moxa/netsnmp/config/fiber_check.conf,/etc/moxa/netsnmp/config/fiber_check_event.conf,/etc/moxa/netsnm
+p/config/iec62439_2.conf,/etc/moxa/netsnmp/config/ieee8021mstp.conf,/etc/moxa/netsnmp/config/ipsg.conf,/etc/moxa/netsnmp/config/locator_command.conf,/etc/moxa/netsnmp/config/macsec.conf,
+/etc/moxa/netsnmp/config/mms_setting.conf,/etc/moxa/netsnmp/config/modbus_tcp.conf,/etc/moxa/netsnmp/config/moxa_1588.conf,/etc/moxa/netsnmp/config/moxa_c37_238.conf,/etc/moxa/netsnmp/co
+nfig/moxa_iec61850.conf,/etc/moxa/netsnmp/config/moxa_ptp.conf,/etc/moxa/netsnmp/config/multicast_routing.conf,/etc/moxa/netsnmp/config/mxMcp.conf,/etc/moxa/netsnmp/config/mxgoosecheck.c
+onf,/etc/moxa/netsnmp/config/mxlp.conf,/etc/moxa/netsnmp/config/mxmstp.conf,/etc/moxa/netsnmp/config/poe.conf,/etc/moxa/netsnmp/config/profinet.conf,/etc/moxa/netsnmp/config/ptpbase.conf
+,/etc/moxa/netsnmp/config/relay.conf,/etc/moxa/netsnmp/config/relay_command.conf,/etc/moxa/netsnmp/config/snmpd_system_information.conf,/etc/moxa/netsnmp/config/snmpd_system_utilization.
+conf,/etc/moxa/netsnmp/config/status_mxlp.conf,/etc/moxa/netsnmp/config/status_system_information.conf,/etc/moxa/netsnmp/config/time_info.conf,/etc/moxa/netsnmp/config/time_setting.conf,
+/etc/moxa/netsnmp/config/time_zone.conf,/etc/moxa/netsnmp/config/ui_service_management.conf,/etc/moxa/netsnmp/config/agentAddress.conf -p /var/run/snmpd.pid
+1660 ttyS0    S+     0:00 grep snmpd
+$ 

@@ -1,0 +1,75 @@
+# ADR-0003: iss_build==0 —— SNMP GET 前送 framework AgentX、SET 留 in-master
+
+Status: Proposed
+Date: 2026-07-23
+Context:
+  Plan D(ADR-0001/ADR-0002)把 iss_build==0 的 config MIB 從 snmpd in-master
+  遷到 app_moxa_framework AgentX subagent,GET+SET 都交給 framework,並註解
+  MOX_SNMP_INIT_ENTRY 讓 framework 獨佔 OID。過程撞到硬邊界:framework 用
+  netsnmp_register_instance(逐 OID instance),createAndGo 的多 varbind SET PDU
+  被逐欄路由,rowStatus handler 看不到同列其他欄 → 動態 append 表無法原子建列;
+  只能在 Rust 逐表「重實作」valid-toggle 語意(ADR-0001),每張表對產品行為驗證,
+  成本高且有天花板(真正動態長度的表可能複製不了)。
+  觀察:Plan C(iss_build==1)已用「in-master 保留註冊贏 wire、只把 GET 前送到
+  另一個 AgentX subagent(ISS)」的模式(mox_snmp_forward_get_to_iss),SET 留本地。
+  這模式可鏡像到 iss_build==0:GET 前送 framework(快),SET 留 in-master(rowStatus
+  原生原子),直接繞過上述邊界,不必在 Rust 重實作。
+Decision:
+  對全部 iss_build==0 群組採用:
+  1. in-master(ies-auto-mibs)保留 MOX_SNMP_INIT_ENTRY 註冊,priority 較高、
+     贏 wire:SET 走既有 readCreate_v2 + net-snmp table 多階段(原子建列不變)。
+  2. GET:在 mox_snmp_handle_entry 的 MODE_IS_GET 分支,以
+     moxaSnmpHandle_UtilMibEntryCheckFromUri(iss_build==0)為閘門,呼叫新增的
+     mox_snmp_forward_get_to_framework() 前送到 framework AgentX subagent。
+  3. mox_snmp_forward_get_to_framework 不用硬寫 probe 表(有別於 Plan C 的
+     mox_iss_get_forward_rules[]):因同顆 OID 由 in-master 與 framework 併存註冊,
+     直接在該 OID 上迭代 subtree、挑 reginfo->handler 非自身(mox_snmp_handle_entry)
+     的 framework 註冊前送。→ 按 flag 通用,不用逐群組手寫 probe。
+  4. framework AgentX subagent 註冊全部 iss_build==0 OID,但只服務 GET
+     (SET 不會落到它);註冊 priority 低於 in-master。
+  5. 刻意採 dual registration(in-master 贏 wire+SET、framework 服務被前送 GET),
+     以 priority 分序 —— 取代 ADR-0001/0002「避免 dual registration + 註解 INIT_ENTRY
+     交接擁有權」的決策。
+  本 ADR supersede ADR-0001 / ADR-0002 的擁有權與 SET 面向;保留 ADR-0002 的資料層
+  決策(lib_moxa_ies_auto_mibs = 純資料/分類,無 net-snmp),framework subagent 續重用。
+Alternatives Considered:
+  - Plan D 原案(SET 也搬 framework、Rust 重實作 rowStatus valid-toggle、註解
+    INIT_ENTRY 獨佔):撞 per-instance 無法原子建列的天花板,每表重實作+驗證成本高,
+    動態長度表可能不可行(ADR-0002 已列為殘留硬邊界)。
+  - Plan E 只套用在「刻意留 in-master」的子集、其餘走 Plan D:分工較細但兩套機制並存、
+    邊界判斷複雜;user 選擇全 iss_build==0 通用政策以求一致。
+  - GET 仍走既有 REST 慢路徑(entry_handle_generate_uri_value_file, ~600ms):
+    不符「增快速度」目標。
+  - framework 擁有 OID、SET 前送回 in-master:framework 端仍先收到逐欄路由的 SET PDU,
+    無法原子重組轉發 → 同撞 rowStatus 邊界,不可行。
+Consequences:
+  - 刻意 dual registration:in-master 與 framework 必須設不同 priority(in-master 高),
+    需驗證 net-snmp 不判 MIB_DUPLICATE_REGISTRATION 而是依 priority 併存且可迭代。
+  - framework subagent 需註冊全部 iss_build==0 OID 為 GET 服務端(記憶體/啟動成本)。
+  - rowStatus SET 留 in-master → 不需在 Rust 逐表重實作/逐表產品驗證(消掉 ADR-0001/0002
+    的持續成本與天花板)。
+  - 若 Plan D 分支已註解某些群組 INIT_ENTRY,Plan E 需還原(in-master 重新持有 SET)。
+  - 未驗證前為 Proposed:PoC(單一 rowStatus 群組如 trustAccess/mxTrap)通過 priority 併存、
+    subtree 迭代 API、wire 落點三項後,轉 Accepted 並將 ADR-0001/0002 標
+    Superseded by ADR-0003(動舊 ADR 前先與 user 確認)。
+Constraints / Assumptions:
+  - iss_build==0 = framework/config 擁有;iss_build==1 = ISS 擁有(不變,Plan C 續行)。
+  - framework subagent 用 netsnmp_register_instance(逐 OID instance)。
+  - net-snmp 允許同 OID region 多 subtree 依 priority 排序(待 PoC 核實 5.9.3 行為)。
+  - SET 正確性依賴 in-master readCreate_uri_set_tableRowStatus_v2 + 多階段 SET。
+Related Files / Modules:
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c
+    (mox_snmp_handle_entry:3179 / MODE_IS_GET:3233 / Plan C 前送:3062-3168;
+     新增 mox_snmp_forward_get_to_framework)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c:277
+    (moxaSnmpHandle_UtilMibEntryCheckFromUri = iss_build==0 閘門)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c
+    (保留/還原 iss_build==0 群組的 MOX_SNMP_INIT_ENTRY)
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c:60 (netsnmp_register_instance + priority)
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs (全 iss_build==0 GET 服務端註冊)
+  - buildroot/dl/lib_moxa_ies_auto_mibs/ (純資料/分類,ADR-0002 保留部分)
+  - 設計文件: ~/plan-e-iss0-get-forward-framework-set-in-master-design-2026-07-23.md
+Related ADRs:
+  - Supersedes(擁有權/SET 面向): ADR-0001, ADR-0002
+  - 保留: ADR-0002 的資料層決策(lib_moxa_ies_auto_mibs 純資料)
+  - Plan C 前送機制為本 ADR 的模式來源

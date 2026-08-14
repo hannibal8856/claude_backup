@@ -1,0 +1,517 @@
+# Plan E — Phase 2 Implementation Plan (mxPortdb iss1 Pilot)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Prove, with direct evidence rather than inference, that `mxPortdb` — Plan E's iss1 pilot per design doc §10.2 — is served correctly through the Phase 1 machinery (children-chain forwarding, no `agentx_owned.list`) with no SET regression and no latency regression, and produce a benchmark number for the Phase 4 go/no-go.
+
+**Architecture:** This phase changes no production code by default. `mxPortdb`'s 17 entries are already `iss_build=1` and already forward per Phase 1; ISS already implements `RegisterMXPORT()` (`mxPortwr.c:31`) with the getters in the same file. Phase 2 is a verification pass: prove column 1 truly comes from ISS (not a local synthetic column that happens to look identical), confirm all 17 values are correct, confirm SET still works, and measure latency. **If a task finds a real defect, that task gets a follow-up code-fix task inserted after it — this plan does not assume Phase 2 is code-free, only that it starts that way.**
+
+**Tech Stack:** snmpwalk/snmpget (host), `tools/walkdiff.py` (Python 3, from Phase 0/1), `dut-console` skill (Linux shell on DUT only — **not** `moxash`, see Global Constraints), bash.
+
+## Global Constraints
+
+- DUT `192.168.127.253`, community `public`. Confirm running build via `su` → `moxash` → `sh ru` header (`Firmware version:` line) before trusting any result — see `phase2-handoff-2026-08-04.md` §1 for why this matters.
+- **Do not drive `moxash` through the `dut-console` skill.** It needs a real TTY; piping into it hangs the console (recovery: expect + `\034` = Ctrl-`\`). Use `dut-console` only for Linux-shell commands (`ps`, `ss`, `snmpwalk` from the device itself, log greps).
+- **No code changes unless a task finds an actual discrepancy.** If one is found, insert a fix task immediately after the task that found it, following the same review discipline as Phase 0/1 (state assumptions, syntax-check with host gcc, hand cross-compile/build to the operator).
+- Latency must be measured from a pcap (`snmp.request_id` matching) or the device's own `util_timeDiff`, never from a client-side wall-clock loop — see `snmpwalk/RESULT-task3.txt` METHOD section for why (fork/exec + MIB parsing costs ~40ms on its own).
+- Any two-capture comparison must either (a) be same-partition before/after, or (b) carry a `running-config.txt` snapshot per side per `dut-config-affecting-snmp.md`. Comparing partition 1 vs partition 2 without both configs recorded is not acceptable evidence in this plan.
+- Comments landing in source code (if a fix task is needed) are English; this plan and its commits may be Chinese or English, matching Phase 0/1 practice.
+- Each task commits at its end. Tooling/results commit to `~/WORK/SNMP_50ms` (branch `develop`); any code fix commits to `dl/3rdparty_net_snmp` (branch `snmp-plan-E2`) with a `[Plan E Task 2-N]`-style prefix mirroring this plan's task numbers, to avoid colliding with Phase 0/1's `[Plan E Task N]` numbering.
+- Stopping ISS (`/sbin/ISS.exe`) is disruptive to the whole switching engine, not just SNMP — it is the only mechanism for VLAN, port config, etc. on this device. Task 1 Step 5 (which needs this) is marked high-risk and is conditional, not run by default.
+
+---
+
+## File Structure
+
+| File | Action | Responsibility |
+|---|---|---|
+| `~/WORK/SNMP_50ms/tools/mxportdb_provenance.sh` | Create | Automates the two non-disruptive provenance signals (process-watch, column latency compare) against a running DUT |
+| `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task1.txt` | Create | Task 1 evidence log |
+| `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task2.txt` | Create | Task 2 value-correctness diff |
+| `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task3.txt` | Create | Task 3 SET regression log |
+| `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task4.txt` | Create | Task 4 latency numbers |
+| `~/WORK/SNMP_50ms/plan-e-agentx-get-offload-design-2026-08-03.md` | Modify | §11 decision log gets D18 (Phase 2 verdict) in Task 5 |
+| `~/WORK/SNMP_50ms/.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04/progress.md` | Create | Ledger, same convention as Phase 0/1 (gitignored, disk-only) |
+
+No `dl/3rdparty_net_snmp` file is listed here because none is expected to change. If Task 1, 2 or 3 finds a real defect, the fix task that follows it will name its own files.
+
+---
+
+### Task 1: Prove `portConfigTable` / `portConfigLinkUpDelayTable` column 1 comes from ISS
+
+**Files:**
+- Create: `~/WORK/SNMP_50ms/tools/mxportdb_provenance.sh`
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task1.txt`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks (first task of this plan)
+- Produces: a PASS/FAIL verdict for the design doc's hard gate ("`portConfigTable` 的 col-1 由 ISS 提供且值正確" — the "由 ISS 提供" half; Task 2 covers "且值正確"). Later tasks assume this verdict is PASS before proceeding; if it is FAIL, stop and escalate rather than continuing to Task 2.
+
+**Why both tables:** design doc §3.3's 24-table list names both `mxPortdb/portConfigTable` and `mxPortdb/portConfigLinkUpDelayTable`. §10.2's go/no-go text mentions only `portConfigTable`; this task widens coverage to match §3.3 exactly, since `portConfigLinkUpDelayTable` has the identical risk shape (col 1 `PortConfigLinkUpDelayIndex` RONLY, col 2 `PortConfigLinkUpDelayEnable` RWRITE).
+
+**Why snmpwalk alone cannot answer this:** a locally-synthesised column 1 and an ISS-provided column 1 both return `INTEGER: 1..N` — byte-identical output. The proof has to come from *how* the value was produced, not what it says.
+
+- [ ] **Step 1: Write the provenance script (process-watch + latency-compare signals)**
+
+```bash
+cat > ~/WORK/SNMP_50ms/tools/mxportdb_provenance.sh <<'SCRIPT'
+#!/bin/bash
+# Two non-disruptive signals that a GET on mxPortdb column 1 went to ISS
+# rather than being synthesised locally:
+#
+#   (a) /usr/bin/iss_snmp_makeup_index only runs on the local synthetic-index
+#       path (ies_auto_mibs.c, IES_FLAG_SNMP_MAKEUP_INDEX_FOR_ISS branch). If
+#       column 1 is forwarded, this binary is never invoked for it.
+#   (b) forwarding costs ~3ms on the wire; the local ISS-file path this
+#       column would otherwise take costs hundreds of ms (that gap is what
+#       Plan E exists to close). Column 1 and column 2 of the same table
+#       should therefore show comparable latency if both are forwarded, and
+#       column 1 should be a clear outlier if it is not.
+#
+# usage: mxportdb_provenance.sh <host> [community]
+set -u
+HOST="${1:?usage: mxportdb_provenance.sh <host> [community]}"
+COMM="${2:-public}"
+GET=/usr/bin/snmpget
+
+# portConfigIndex (col 1, RONLY) vs portConfigDescription (col 2, RWRITE),
+# port 1: 8691.603.1.1.1.1.1.{1,2}.1
+COL1=1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1
+COL2=1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1
+
+echo "--- signal (a): watch for iss_snmp_makeup_index during a column-1 GET ---"
+echo "Run this on the DUT console (separate terminal, Linux shell) BEFORE the next step:"
+echo "  while :; do ps -eo comm | grep -q iss_snmp_makeup_index && echo CAUGHT; sleep 0.05; done"
+read -p "Press enter once the watcher above is running on the DUT... " _
+
+echo "--- signal (b): 30x GET latency, column 1 vs column 2 ---"
+for oid in "$COL1" "$COL2"; do
+    echo "  $oid"
+    for i in $(seq 1 30); do
+        s=$(date +%s%N)
+        "$GET" -v2c -c "$COMM" -r0 -t2 -On "$HOST" "$oid" >/dev/null 2>&1
+        e=$(date +%s%N)
+        awk -v n=$((e-s)) 'BEGIN{printf "%.3f\n", n/1e9}'
+    done | sort -n | awk '{v[NR]=$1} END{printf "    p50=%.3fs p100=%.3fs\n", v[int(NR*0.5)], v[NR]}'
+done
+
+echo ""
+echo "Interpretation:"
+echo "  - watcher printed CAUGHT during the column-1 loop -> column 1 is LOCAL. FAIL."
+echo "  - watcher stayed silent AND column 1's p50/p100 are in the same ballpark as"
+echo "    column 2's (both low-single-digit-ms range) -> column 1 is FORWARDED. PASS."
+echo "  - watcher silent but column 1 is an order of magnitude slower than column 2"
+echo "    -> ambiguous; run Step 5 (ISS stop) for a definitive answer."
+SCRIPT
+chmod +x ~/WORK/SNMP_50ms/tools/mxportdb_provenance.sh
+```
+
+- [ ] **Step 2: Start the process watcher on the DUT**
+
+Open a **separate** console session (not through the `dut-console` skill — this needs
+to stay running while Step 3 executes, which `dut-console` cannot do; use `minicom`
+or a second `dut-console` call is fine since this one issues a single long-running
+command):
+
+```bash
+su
+# password: moxa
+while :; do ps -eo comm | grep -q iss_snmp_makeup_index && echo CAUGHT; sleep 0.05; done
+```
+
+Leave it running.
+
+- [ ] **Step 3: Run the provenance script against `portConfigTable`**
+
+```bash
+cd ~/WORK/SNMP_50ms
+bash tools/mxportdb_provenance.sh 192.168.127.253 public | tee -a snmpwalk/RESULT-phase2-task1.txt
+```
+
+Expected: no `CAUGHT` printed on the watcher terminal during either loop; column 1
+and column 2 latency in the same range (both under ~50ms p100 given Task 3's earlier
+measurement of 0.109s p100 for a 12-OID batch — a single OID should be well under
+that).
+
+- [ ] **Step 4: Repeat for `portConfigLinkUpDelayTable`**
+
+Edit `COL1`/`COL2` in the script to
+`1.3.6.1.4.1.8691.603.1.1.1.3.1.1.1` (`PortConfigLinkUpDelayIndex`) and
+`1.3.6.1.4.1.8691.603.1.1.1.3.1.2.1` (`PortConfigLinkUpDelayEnable`), or pass them
+as extra arguments if you generalise the script. Re-run Steps 2-3 against this
+table's OIDs, append to the same `RESULT-phase2-task1.txt`.
+
+- [ ] **Step 5 (CONDITIONAL, high-risk — only if Step 3 or 4 was ambiguous): stop ISS and observe the failure signature**
+
+**Do not run this on a production or shared DUT without explicit go-ahead — it stops
+the switching engine, not just SNMP.** `ISS.exe` is started via
+`LD_PRELOAD=... /sbin/ISS.exe &` inside `app_moxa_iss_init.sh` under a
+`Type=notify, RemainAfterExit=yes` unit, so `systemctl stop` does not track its PID;
+it must be killed by name and restarted by re-running the init script.
+
+```bash
+# On the DUT (su first):
+ps -ef | grep ISS.exe                      # confirm it's running, note the PID
+pkill -f /sbin/ISS.exe
+ps -ef | grep ISS.exe                      # confirm it's gone
+```
+
+From the host:
+
+```bash
+/usr/bin/snmpwalk -v2c -c public -On -Cc 192.168.127.253 1.3.6.1.4.1.8691.603.1.1.1.1.1.1 2>&1
+```
+
+Interpretation:
+- entire column vanishes / `noSuchObject` on every row → forwarded (no subagent to answer). **PASS.**
+- individual rows time out or return `SNMP_ERR_BADVALUE`-shaped errors but the OID
+  is still enumerable → local, blocked by the file-read failing. **FAIL.**
+
+Restart ISS before doing anything else:
+
+```bash
+# On the DUT:
+systemctl restart app_moxa_iss_init
+# wait for it; confirm:
+ps -ef | grep ISS.exe
+snmpget -v2c -c public localhost 1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1     # sanity check
+```
+
+- [ ] **Step 6: Write the verdict**
+
+Append to `snmpwalk/RESULT-phase2-task1.txt`:
+
+```
+VERDICT: portConfigTable col 1        [FORWARDED / LOCAL]
+VERDICT: portConfigLinkUpDelayTable col 1  [FORWARDED / LOCAL]
+Evidence: process-watch [clean/CAUGHT], latency compare [p50/p100 pairs], ISS-stop [run/not run, result]
+```
+
+If either verdict is LOCAL, **stop this plan here** — that is the design doc's hard
+gate failing, and it means the `agentx_owned.list` removal (Task 4, Phase 1) did not
+close the synthetic-index risk the way §10.2/§3.3 predicted. Escalate to the human
+rather than proceeding to Task 2.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd ~/WORK/SNMP_50ms
+git add tools/mxportdb_provenance.sh snmpwalk/RESULT-phase2-task1.txt
+git commit -m "phase2 task1: prove mxPortdb column 1 is forwarded, not synthesised
+
+Two non-disruptive signals (iss_snmp_makeup_index process-watch during a
+column-1 GET; column-1 vs column-2 latency compare) checked for both
+portConfigTable and portConfigLinkUpDelayTable - the two mxPortdb tables
+named in design doc 3.3's 24-table synthetic-index list. snmpwalk alone
+cannot distinguish a forwarded column 1 from a locally-synthesised one;
+both return identical INTEGER output."
+```
+
+---
+
+### Task 2: Value correctness across all 17 entries
+
+**Files:**
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task2.txt`
+
+**Interfaces:**
+- Consumes: Task 1's PASS verdict (do not start this task if Task 1 failed)
+- Produces: a diff classification (identical / expected-difference / real-discrepancy) for
+  all 17 mxPortdb OIDs, consumed by Task 5's sign-off
+
+**Method:** mxPortdb reflects live port hardware state (link speed, duplex, MDI/MDIX,
+enable flags). The two firmware partitions on this DUT run against the *same physical
+ports*, so a same-boot-window walk of both partitions' `1.3.6.1.4.1.8691.603.1.1` should
+agree on every value that reflects hardware truth, and disagree only where configuration
+differs (per `dut-config-affecting-snmp.md`) or on transient counters. This reuses
+`tools/walkdiff.py` and `capture_baseline.sh` exactly as Phase 0/1 did — no new CLI
+syntax invented, no new tooling needed beyond what already exists.
+
+- [ ] **Step 1: Capture mxPortdb on the currently-running partition (Plan E)**
+
+```bash
+cd ~/WORK/SNMP_50ms
+/usr/bin/snmpwalk -v2c -c public -On -Cc 192.168.127.253 1.3.6.1.4.1.8691.603.1.1 \
+  > snmpwalk/phase2-mxportdb-planE-$(date +%Y%m%d_%H%M).txt
+```
+
+- [ ] **Step 2: Save the config snapshot for this capture**
+
+```bash
+# console: su -> moxash -> sh ru, save the output as:
+#   snmpwalk/phase2-mxportdb-planE-<same timestamp>-running-config.txt
+```
+
+- [ ] **Step 3: Reboot to the mainline partition, capture the same subtree**
+
+Coordinate with the operator — this requires a partition switch (`swupdate` /
+whichever mechanism swaps active partition on this device) and a reboot, which this
+plan does not automate. Once mainline is up:
+
+```bash
+/usr/bin/snmpwalk -v2c -c public -On -Cc 192.168.127.253 1.3.6.1.4.1.8691.603.1.1 \
+  > snmpwalk/phase2-mxportdb-mainline-$(date +%Y%m%d_%H%M).txt
+# and the matching running-config.txt, same as Step 2
+```
+
+Then switch back to the Plan E partition before continuing (Task 3 and 4 need it
+running).
+
+- [ ] **Step 4: Diff and classify**
+
+```bash
+python3 tools/walkdiff.py \
+  snmpwalk/phase2-mxportdb-mainline-*.txt \
+  snmpwalk/phase2-mxportdb-planE-*.txt \
+  | tee snmpwalk/RESULT-phase2-task2.txt
+```
+
+For every line under `DIFFERS`, check it against the two `running-config.txt`
+snapshots: if the physical port configuration differs between the two captures
+(different speed/duplex/enable setting saved), that difference is expected — note it
+as such. If the configuration is identical on both sides and the value still differs,
+that is a real discrepancy — see below.
+
+For every line under `MISSING`/`SURPLUS`, the OID exists on one side and not the
+other — since both are the same 17-entry table registered unconditionally, this
+should not happen. Any occurrence is a real discrepancy.
+
+- [ ] **Step 5 (CONDITIONAL — only if Step 4 found a real discrepancy): open a fix task**
+
+Do not attempt a fix inline here. Stop, write up the discrepancy (which OID, both
+values, both configs), and insert a new task after this one following the same
+review discipline as Phase 0/1 (root-cause first, state the fix, syntax-check,
+hand cross-compile to the operator, get it reviewed).
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd ~/WORK/SNMP_50ms
+git add snmpwalk/RESULT-phase2-task2.txt \
+        snmpwalk/phase2-mxportdb-planE-*.txt snmpwalk/phase2-mxportdb-planE-*-running-config.txt \
+        snmpwalk/phase2-mxportdb-mainline-*.txt snmpwalk/phase2-mxportdb-mainline-*-running-config.txt
+git commit -m "phase2 task2: mxPortdb value correctness, Plan E vs mainline
+
+Same-boot-window capture of 1.3.6.1.4.1.8691.603.1.1 on both partitions
+against the same physical ports. Differences cross-checked against each
+side's running-config snapshot to separate configuration drift from real
+value discrepancies, per dut-config-affecting-snmp.md."
+```
+
+---
+
+### Task 3: SET path unaffected
+
+**Files:**
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task3.txt`
+
+**Interfaces:**
+- Consumes: Task 1's PASS verdict
+- Produces: confirmation that the 8 RWRITE entries (including the 3 carrying
+  `IES_FLAG_SNMP_URI_MOD_ON_SET`) round-trip correctly, feeding Task 5's sign-off
+
+**Why this needs its own task:** GET forwarding is what Phase 1/2 changed; SET was
+never touched (`MODE_IS_SET` in `mox_snmp_handle_entry()` is untouched by every
+commit in Phase 0/1). This task exists to make that assumption explicit evidence
+rather than an assumption, on the one table where three entries carry
+`URI_MOD_ON_SET` — a flag this plan has not exercised yet.
+
+- [ ] **Step 1: Round-trip `portConfigMdiOrMdixCap` (RWRITE, no special flag) — baseline**
+
+Port 1, values `auto(1)`, `mdi(2)`, `mdix(3)` per the MIB (`mxPort.mib:184-189`):
+
+```bash
+GET=/usr/bin/snmpget; SET=/usr/bin/snmpset; HOST=192.168.127.253
+OID=1.3.6.1.4.1.8691.603.1.1.1.1.1.6.1
+
+ORIG=$($GET -v2c -c public -Ovq -t2 $HOST $OID)
+echo "original value: $ORIG"
+
+$SET -v2c -c private -t2 $HOST $OID i 2
+$GET -v2c -c public -Ovq -t2 $HOST $OID
+# expected: 2
+
+$SET -v2c -c private -t2 $HOST $OID i "$ORIG"
+$GET -v2c -c public -Ovq -t2 $HOST $OID
+# expected: back to $ORIG
+```
+
+- [ ] **Step 2: Round-trip `portConfigMode` (RWRITE + `REPLACE_TRUTH_VALUE`)**
+
+`auto(1)` / `noNegotiation(2)` per `mxPort.mib:127-131`:
+
+```bash
+OID=1.3.6.1.4.1.8691.603.1.1.1.1.1.3.1
+ORIG=$($GET -v2c -c public -Ovq -t2 $HOST $OID)
+$SET -v2c -c private -t2 $HOST $OID i 2
+$GET -v2c -c public -Ovq -t2 $HOST $OID    # expected: 2
+$SET -v2c -c private -t2 $HOST $OID i "$ORIG"
+$GET -v2c -c public -Ovq -t2 $HOST $OID    # expected: back to $ORIG
+```
+
+- [ ] **Step 3: Round-trip `portConfigSystemLinkUpDelayEnable` (scalar, RWRITE + `REPLACE_TRUTH_VALUE`, and the only scalar in this pilot)**
+
+TruthValue per `mxPort.mib:209-217`, `true(1)`/`false(2)`:
+
+```bash
+OID=1.3.6.1.4.1.8691.603.1.1.1.2.0
+ORIG=$($GET -v2c -c public -Ovq -t2 $HOST $OID)
+$SET -v2c -c private -t2 $HOST $OID i 2
+$GET -v2c -c public -Ovq -t2 $HOST $OID    # expected: 2
+$SET -v2c -c private -t2 $HOST $OID i "$ORIG"
+$GET -v2c -c public -Ovq -t2 $HOST $OID    # expected: back to $ORIG
+```
+
+- [ ] **Step 4: Record results and commit**
+
+```bash
+cd ~/WORK/SNMP_50ms
+{
+  echo "portConfigMdiOrMdixCap round trip: [PASS/FAIL], original=<value>"
+  echo "portConfigMode round trip:         [PASS/FAIL], original=<value>"
+  echo "portConfigSystemLinkUpDelayEnable round trip: [PASS/FAIL], original=<value>"
+} > snmpwalk/RESULT-phase2-task3.txt
+
+git add snmpwalk/RESULT-phase2-task3.txt
+git commit -m "phase2 task3: mxPortdb SET round trip, incl. REPLACE_TRUTH_VALUE entries
+
+Confirms the SET path (untouched by every Phase 0/1 commit) still works
+on mxPortdb specifically, covering both a plain RWRITE entry and the two
+REPLACE_TRUTH_VALUE entries this table carries."
+```
+
+---
+
+### Task 4: Latency benchmark
+
+**Files:**
+- Create: `~/WORK/SNMP_50ms/snmpwalk/RESULT-phase2-task4.txt`
+
+**Interfaces:**
+- Consumes: Task 1's PASS verdict
+- Produces: a latency number for `mxPortdb` GET, feeding the Phase 4 go/no-go
+  benchmark comparison (design doc §10.2 Phase 4)
+
+**Method:** pcap-based, per Global Constraints — not client wall clock.
+
+- [ ] **Step 1: Capture a GET loop against all 17 OIDs while tcpdumping**
+
+On the host, start a capture (adjust interface name as needed for this DUT's link):
+
+```bash
+tcpdump -i <iface> -w ~/pcap/phase2-mxportdb-$(date +%Y%m%d_%H%M).pcapng \
+  host 192.168.127.253 and udp port 161 &
+TCPDUMP_PID=$!
+```
+
+Then issue 100 rounds of GET across all 17 entries (single multi-varbind GET per
+round, matching the `test_snmp_get_loop.sh` style already in this repo):
+
+```bash
+OIDS="1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1 1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1 \
+1.3.6.1.4.1.8691.603.1.1.1.1.1.3.1 1.3.6.1.4.1.8691.603.1.1.1.1.1.4.1 \
+1.3.6.1.4.1.8691.603.1.1.1.1.1.5.1 1.3.6.1.4.1.8691.603.1.1.1.1.1.6.1 \
+1.3.6.1.4.1.8691.603.1.1.1.2.0 \
+1.3.6.1.4.1.8691.603.1.1.1.3.1.1.1 1.3.6.1.4.1.8691.603.1.1.1.3.1.2.1 1.3.6.1.4.1.8691.603.1.1.1.3.1.3.1 \
+1.3.6.1.4.1.8691.603.1.1.2.1.1.1.1 1.3.6.1.4.1.8691.603.1.1.2.1.1.2.1 1.3.6.1.4.1.8691.603.1.1.2.1.1.3.1 \
+1.3.6.1.4.1.8691.603.1.1.2.1.1.4.1 1.3.6.1.4.1.8691.603.1.1.2.1.1.5.1 \
+1.3.6.1.4.1.8691.603.1.1.2.2.1.1.1 1.3.6.1.4.1.8691.603.1.1.2.2.1.2.1"
+
+for i in $(seq 1 100); do
+  /usr/bin/snmpget -v2c -c public -r0 -t2 -On 192.168.127.253 $OIDS >/dev/null 2>&1
+done
+
+kill $TCPDUMP_PID
+```
+
+- [ ] **Step 2: Extract per-request latency from the pcap**
+
+Same technique as `snmpwalk/RESULT-task3.txt`'s METHOD section: match request/response
+by `snmp.request_id`.
+
+```bash
+cd ~/pcap
+PCAP=$(ls -t phase2-mxportdb-*.pcapng | head -1)
+tshark -r "$PCAP" -T fields -e frame.time_epoch -e snmp.data -e snmp.request_id 2>/dev/null | awk -F'\t' '
+$3!="" {
+  if ($2=="0") { t[$3]=$1 }
+  else if ($2=="2" && ($3 in t)) { printf "%.3f\n", ($1-t[$3])*1000; delete t[$3] }
+}' | sort -n | awk '{v[NR]=$1} END{printf "n=%d p50=%.1fms p95=%.1fms p100=%.1fms\n", NR, v[int(NR*0.5)], v[int(NR*0.95)], v[NR]}'
+```
+
+- [ ] **Step 3: Record and commit**
+
+```bash
+cd ~/WORK/SNMP_50ms
+echo "mxPortdb 17-OID batch GET, n=100 rounds: <paste the p50/p95/p100 line here>" \
+  > snmpwalk/RESULT-phase2-task4.txt
+git add snmpwalk/RESULT-phase2-task4.txt
+git commit -m "phase2 task4: mxPortdb latency benchmark for the Phase 4 decision point
+
+pcap-derived, per snmp.request_id matching - not client wall clock. Feeds
+design doc 10.2 Phase 4's before/after comparison."
+```
+
+---
+
+### Task 5: Verdict, decision log, and ledger close-out
+
+**Files:**
+- Modify: `~/WORK/SNMP_50ms/plan-e-agentx-get-offload-design-2026-08-03.md` (§11, add D18)
+- Create: `~/WORK/SNMP_50ms/.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04/progress.md`
+
+**Interfaces:**
+- Consumes: Task 1-4's verdicts and result files
+- Produces: the Phase 2 go/no-go verdict for Phase 3 planning to consume
+
+- [ ] **Step 1: Write D18 into the design doc's decision log**
+
+Add a row to §11 following the existing `| D<n> | ... | ... | ... |` format, stating
+the Phase 2 verdict (PASS/FAIL), which of Task 1-4 (if any) needed a follow-up fix
+task, and the final latency number from Task 4.
+
+- [ ] **Step 2: Write the ledger**
+
+```bash
+mkdir -p ~/WORK/SNMP_50ms/.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04
+cat > ~/WORK/SNMP_50ms/.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04/progress.md <<'EOF'
+# SDD ledger — plan: plan-e-phase2-PLAN-2026-08-04.md
+EOF
+```
+
+Then append Task 1-5 entries in the same style as
+`plan-e-phase0-1-PLAN-2026-08-03/progress.md`: what ran, what the verdict was, what
+was adjudicated and why, commits.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd ~/WORK/SNMP_50ms
+git add plan-e-agentx-get-offload-design-2026-08-03.md
+git commit -m "[Plan E] design: D18 - Phase 2 (mxPortdb pilot) verdict
+
+Records whether the iss1 pilot passed its hard gate (portConfigTable /
+portConfigLinkUpDelayTable column 1 forwarded and correct), SET regression
+result, and the latency number Phase 4's benchmark decision will use."
+```
+
+(The ledger file is gitignored per Phase 0/1 convention and stays disk-only.)
+
+---
+
+## Self-Review Notes
+
+- **Spec coverage:** design doc §10.2 Phase 2's stated go/no-go — "portConfigTable 的
+  col-1 由 ISS 提供且值正確" — is covered by Task 1 (provenance) + Task 2 (value
+  correctness). Task 3 (SET) and Task 4 (latency) are not literally required by
+  §10.2's one-line gate but are load-bearing for Phase 3/4 planning and for keeping
+  this pilot's evidence as complete as Phase 0/1's was.
+- **Placeholder scan:** every step has a literal command or a literal artifact to
+  produce; no "add appropriate handling"-shaped step remains. Task 2 Step 3's
+  partition-switch mechanism is deliberately left to the operator (this plan does not
+  know the device's swupdate invocation) rather than guessed at.
+- **Type/name consistency:** `RESULT-phase2-task{1,2,3,4}.txt` naming is consistent
+  across all four tasks and matches the `RESULT-task{3,4,5}.txt` convention from
+  Phase 0/1. OID literals for all 17 mxPortdb entries were read directly from
+  `net_mxPortdb.h` and cross-checked against `mxPort.mib`'s SYNTAX clauses — not
+  invented.

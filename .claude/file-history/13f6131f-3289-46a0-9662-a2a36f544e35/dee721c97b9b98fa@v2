@@ -1,0 +1,166 @@
+# Handoff —— SNMP Plan E(branch `snmp-plan-E`)2026-08-06
+
+> **新 session 閱讀順序**:TL;DR → 現況表 → ⚠️ 陷阱 → 📋 待辦。
+> memory 會自動載入 8 條紀錄。ADR 在 `~/mds4xgl3/.adr/`。
+> 上一份 handoff `~/session-framework-readpath-2026-07-28.md` 仍有效(ADR-0009 之前的脈絡)。
+
+---
+
+## TL;DR
+
+本日主軸是 **`agentx_owned.list`(Plan C mod.1)委派機制的推廣** —— 把 `iss_build==1`
+的 MIB group 從 in-master 移交給 ISS AgentX subagent。**成功搬 2 支、否決 2 支**,
+並在過程中把「該挑哪一支」的判準從靜態條件改成**先量 walk 耗時**(ADR-0013)。
+
+另有 T3(turboRing `interface` 欄,**iss0**,與委派機制無關)已寫完程式並燒進 image,
+但**未生效**,原因待查。
+
+---
+
+## 現況
+
+### 已 commit 且已燒進 DUT 的 image
+
+image `FWR_MDS-G4000-L3-4XGS_v7.0_2026_0806_1730.swu` 已在 **partition 1**,
+`agentx_owned.list` 三個前綴都在 rootfs 內(**持久,不再被重開機還原**)。
+
+| repo | commit | 內容 |
+|---|---|---|
+| `plugin_moxa_snmp` | `2ef117d` | 委派 `stdethdb/` |
+| `plugin_moxa_snmp` | `376fa49` | 委派 `mxportdb/` |
+| `lib_moxa_ies_auto_mibs` | `16a9c68` | T3:`IES_COL_TR2RING_IFACE` + `ies_max_port_num()` |
+| `lib_moxa_rust_ies_auto_mibs` | `579deef` | T3:col mirror + FFI wrapper |
+| `app_moxa_framework` | `e27e5fc` | T3:`handle_tr2_iface_get()` |
+
+### 驗收結果(在 `2026_0806_1730` 上實測)
+
+| 項目 | 預期 | 實得 | |
+|---|---|---|---|
+| `.1.3.6.1.2.1.10.7`(stdethdb) | 576 | **576** | ✅ |
+| `.1.3.6.1.4.1.8691.603.1.1`(mxportdb) | 189 | **189** | ✅ |
+| `.1.3.6.1.2.1.31` / `.2`(ifmibdb,既有) | — | 320 / 309 健康 | ✅ |
+| `.1.3.6.1.4.1.8691.603.3.4`(T3) | 27 | **25** | ❌ |
+
+### ADR
+
+| ADR | Status | 內容 |
+|---|---|---|
+| ADR-0011 | Accepted | `stdethdb/` 委派(348→576);拆表 → 第 1 欄從連續 walk 消失的缺陷 |
+| ADR-0012 | Accepted | `mxportdb/` 委派(163→189,mainline 151) |
+| ADR-0013 | Accepted | 否決 `stdrmodb/` 與 `stdladb/`;**候選篩選改以 walk 耗時為首要條件** |
+
+---
+
+## ⚠️ 今天學到的陷阱(務必先讀)
+
+1. **DUT 上手改 `/etc/moxa/netsnmp/agentx_owned.list` 撐不過重開機**(`/etc` 疑為
+   tmpfs overlay)。今天兩次獨立實證。跨重開機的量測前務必先 `cat` 確認。
+   持久化只能靠 repo 改動 + 重燒 image。
+
+2. **`~/SNMP_PLAN_E` 已改名為 `~/SNMP_PLAN_E2`**(對應其 branch `snmp-plan-E2`)。
+   那條線用 namelen 做 AgentX dispatching、已依「D1」刪掉 `agentx_owned.list`,
+   使用者判定 latency 不佳、暫時擱置。**建置容器要用 `mx_mds4xgl3`**
+   (掛 `~/mds4xgl3`),不是 `mx_SNMP_PLAN_E`(已停止,掛載來源已不存在)。
+
+3. **`/usr/bin/snmpwalk` 要打全路徑** —— `~/.local/bin/snmpwalk` 是 pysnmp 版會卡住。
+
+4. **ISS 的註冊與 `agentx_owned.list` 無關、本來就存在**。list 只控制
+   「in-master 要不要**也**註冊」。若 ISS 本就贏 wire,委派毫無收益(ADR-0013)。
+
+5. **查 ISS 涵蓋哪些 OID 要看 `app_moxa_iss_10_1_0/code/future/<mod>/inc/<mod>db.h`
+   的分支,不是 `tSNMP_OID_TYPE` root 長度** —— 我在這裡推論錯過一次(ADR-0011)。
+
+6. **重啟 snmpd 的方法**:ssh → `su` → `moxash` → `configure terminal` →
+   `snmp-server access disable` → `snmp-server access enable`(會問 y/N)→ `end`。
+   `init_snmpd.sh` 是一次性腳本,直接 kill snmpd **不會**被拉起。
+
+---
+
+## 📋 待辦
+
+### T1 —— T3 未生效,原因待查(iss0,優先)
+
+`.603.3.4.1.2.1.4.{1,2}` 回 `noSuchInstance`。**已排除**:
+- 建置沒帶進去 → 排除(DUT 上 `libmoxaiesautomibs.so` 有 `ies_max_port_num` 符號、
+  `app_moxa_framework` 有 `firstPort`×3 / `secondPort`×2 字串)
+- config 鍵名猜錯 → 排除(`plugin_moxa_turboringv2/framework/src/config.rs:42` 的 schema
+  就是 `firstPort: {iftype,index}`,預設 ring1=(0,1)/ring2=(2,3),換算正好 `01 02`/`03 04`,
+  **與 mainline 相符,證明編碼邏輯對**)
+- `get_config_from_path` 不能回傳物件 → 排除(`read_config_value()`
+  `snmp_subagent.rs:468` 是相同呼叫,`l3vlanif_rows()` 用它讀陣列可行)
+
+**剩下兩個可能**:C 側 map 沒產生那兩筆 / Rust handler 讀 config 失敗。
+兩者 wire 症狀相同(`noSuchInstance`),DUT 無相關 log。
+**下一步**:讓失敗路徑可辨識(讀不到時回特徵值或 `genErr`,而非一律 `noSuchInstance`),
+重 build 一次即可分辨。
+
+### T2 —— 用 ADR-0013 的新條件重篩剩下 35 支
+
+先跑一輪純唯讀的 walk 耗時掃描(不改任何設定、不需重啟),再挑。
+
+**已量過的**:
+
+| 群組 | 耗時 | 筆數 | 判定 |
+|---|---|---|---|
+| `stdladb/` | 1.05 s / 385 | — | 已否決(委派後 -12、零加速) |
+| `mxladb/` → 實際前綴 `fsladb/` | **0.45 s / 50** | 5 RO | **快 → 委派無益**,建議否決 |
+| `stdrmodb/` | — / **0** | — | 已否決(RMON 產品層級未提供) |
+
+`mxladb/` 另有一個發現:它的兩個前綴中 **`fscfadb/` 底下 2 筆全是 RW**,加進 list
+完全沒作用;真正有 RO 的是 `fsladb/`(5 筆,全在 `fsLaPortChannelTable`)。
+
+**尚未量耗時的候選**(依 RO 數排序):`stdospdb/`(68)、`stdpnodb/`(68)、
+`stdipdb/`(64)、`stdpnadb/`(59)、`stdllddb/`(39)、`stdbridb/`(38)、
+`stdsnmdb/`(36)、`mxtcstdb/`(35)、`stdvladb/`(30)、`stdot3db/`(26)、
+`stdcipdb/`(23)、`mxrstpdb/`(18)、`std1w1db/`(17,**1179 筆資料**)…
+
+**注意**:`vrrpdb/`、`vrrp3db/` DUT 上 0 筆(VRRP 未設定);
+`stdcipdb/` 0 筆(EtherNet/IP 未啟用)。有 CLI 手冊可先開功能把表填出來
+(`~/WORK/SNMP_50ms/`,見 memory `reference-moxa-cli-manuals`)。
+
+### T3 —— iss1 整體進度
+
+45 支 iss1 header:已搬 3(`ifmibdb/`、`stdethdb/`、`mxportdb/`)、
+可搬 36(852 筆 RO)、不可搬 6(RO=0,加了等於沒加:`mxqosdb/`、`mxradiusdb/`、
+`mxrlpsdb/`、`mxstcldb/`、`mxlldp/`、`fscfadb/`+`fsvlandb/`+`mxvlan/`)。
+以 RO entry 計進度約 9%。
+
+**`mxdot1xdb/` 是唯一 iss0/iss1 混合的**(3 iss0 + 16 iss1),也是 framework 遷移
+roadmap 的最後一站,會第一次踩到「同一子樹兩個 owner」,不宜排前面。
+
+---
+
+## DUT 現況
+
+- partition 1 = Plan E **`2026_0806_1730`**(目前開機於此),
+  `agentx_owned.list` = `ifmibdb/` `stdethdb/` `mxportdb/`
+- partition 2 = NOS 7 mainline **`2026_0805_2335`**(對照組,完好)
+- `rmonConfigEnableStatus` 被我設成 1(true) —— 無副作用,兩個 image 都不因此提供 RMON
+- **舊的 `FWR_..._2026_0730_1302.swu` 已不在 `output/images/`**(建置時被清掉,無備份)
+
+## 建置與燒錄
+
+```bash
+docker start mx_mds4xgl3            # 掛 ~/mds4xgl3,workdir 即 repo 根
+# 容器內(或用 run_in_docker.sh "make"):
+cd /home/moxa/mds4xgl3/buildroot
+make lib_moxa_ies_auto_mibs-rebuild     # 注意:target 不帶 -custom
+make lib_moxa_rust_ies_auto_mibs-rebuild
+make plugin_moxa_snmp-rebuild
+make rust_moxa_build-rebuild
+make app_moxa_framework-rebuild
+make                                     # 會停在 HSM 簽章
+```
+
+**HSM 簽章由使用者執行**(GitLab CI pipeline,官方金鑰 `SWITCH_Official_General`)。
+簽完 `make` 會續跑並產出 `.swu`。
+
+燒錄用 `examinate-plan-e-swu` skill,兩道 gate 都要維持開啟:
+`--protect 2`(不覆蓋對照組)+ `--control-build 2026_0805_2335`(確認確實開在對照組上)。
+**流程**:先 `fwr_change.sh` 切到 0805 → `--flash` → 寫入 partition 1 → 自動翻回。
+
+## 授權
+
+使用者已授權 A(唯讀)/ B(改 DUT 狀態)/ C(切 partition + swupdate)三級,
+**執行前要講明是哪一級**。護欄不因 C 級而放寬。細節見 memory
+`feedback-dut-operation-authorization`。

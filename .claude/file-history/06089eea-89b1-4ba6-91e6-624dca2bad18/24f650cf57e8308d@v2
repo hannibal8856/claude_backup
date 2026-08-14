@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Transform a LIBRARY moxa package .mk for by-application clippy scan:
+  1. Remove 'RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)':
+       - own-line  -> delete the physical line; if it was the last arg
+                      (no trailing backslash), de-continue the previous line.
+       - inline    -> delete just the literal token (leaves v6's double space).
+  2. Remove the '@if [ "${RUST_CLIPPY_SCAN_CONFIG}" = "true" ]; ... fi'
+     scan-result copy block (only that block; keep other install commands).
+Line endings preserved.
+"""
+import sys, re
+
+TOKEN = 'RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR)'
+
+def strip_eol(s): return s.rstrip('\r\n')
+
+def remove_target_dir(lines, eol):
+    out = []
+    for ln in lines:
+        core = strip_eol(ln)
+        if TOKEN not in core:
+            out.append(ln); continue
+        cont = core.endswith('\\')
+        body = core[:-1] if cont else core
+        if body.strip() == TOKEN:
+            # own-line: drop it; if last arg, de-continue previous emitted line
+            if not cont:
+                for k in range(len(out) - 1, -1, -1):
+                    pc = strip_eol(out[k])
+                    if pc.rstrip().endswith('\\'):
+                        out[k] = re.sub(r'\s*\\\s*$', '', pc) + eol
+                        break
+                    if pc.strip() != '':
+                        break
+            # skip line
+        else:
+            # inline: delete literal token, keep surrounding spaces (v6 double-space)
+            out.append(core.replace(TOKEN, '') + eol)
+    return out
+
+def remove_scan_block(lines):
+    out = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if 'RUST_CLIPPY_SCAN_CONFIG' in ln and '@if' in ln:
+            j = i
+            while j < len(lines) and not re.match(r'^\s*fi\b', strip_eol(lines[j])):
+                j += 1
+            i = j + 1
+            continue
+        out.append(ln); i += 1
+    return out
+
+def main():
+    path = sys.argv[1]
+    with open(path, newline='') as f:
+        lines = f.readlines()
+    eol = '\r\n' if any(l.endswith('\r\n') for l in lines) else '\n'
+    lines = remove_target_dir(lines, eol)
+    lines = remove_scan_block(lines)
+    with open(path, 'w', newline='') as f:
+        f.writelines(lines)
+
+if __name__ == '__main__':
+    main()

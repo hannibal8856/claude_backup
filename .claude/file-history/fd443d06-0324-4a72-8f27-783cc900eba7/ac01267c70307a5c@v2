@@ -1,0 +1,772 @@
+<title>Plan E Phase 2 — mxPortdb Pilot</title>
+
+<style>
+  :root {
+    --bg:        #f4f6f7;
+    --surface:   #ffffff;
+    --surface-2: #eef1f3;
+    --ink:       #12181d;
+    --ink-2:     #4a555f;
+    --ink-3:     #7c8891;
+    --rule:      #dde2e5;
+    --rule-2:    #c9d1d6;
+    --signal:    #0d6d78;
+    --signal-bg: #e2f0f1;
+    --caution:   #8d5a00;
+    --caution-bg:#f8eeda;
+    --halt:      #93302f;
+    --halt-bg:   #f8e8e6;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0d1216;
+      --surface:   #141a20;
+      --surface-2: #1b232a;
+      --ink:       #e7ecef;
+      --ink-2:     #a4b1bb;
+      --ink-3:     #74838e;
+      --rule:      #232e36;
+      --rule-2:    #33414b;
+      --signal:    #4fb6c0;
+      --signal-bg: #0f2b2e;
+      --caution:   #d99b3d;
+      --caution-bg:#2a2114;
+      --halt:      #d9807a;
+      --halt-bg:   #2c1a18;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:        #0d1216;
+    --surface:   #141a20;
+    --surface-2: #1b232a;
+    --ink:       #e7ecef;
+    --ink-2:     #a4b1bb;
+    --ink-3:     #74838e;
+    --rule:      #232e36;
+    --rule-2:    #33414b;
+    --signal:    #4fb6c0;
+    --signal-bg: #0f2b2e;
+    --caution:   #d99b3d;
+    --caution-bg:#2a2114;
+    --halt:      #d9807a;
+    --halt-bg:   #2c1a18;
+  }
+
+  :root[data-theme="light"] {
+    --bg:        #f4f6f7;
+    --surface:   #ffffff;
+    --surface-2: #eef1f3;
+    --ink:       #12181d;
+    --ink-2:     #4a555f;
+    --ink-3:     #7c8891;
+    --rule:      #dde2e5;
+    --rule-2:    #c9d1d6;
+    --signal:    #0d6d78;
+    --signal-bg: #e2f0f1;
+    --caution:   #8d5a00;
+    --caution-bg:#f8eeda;
+    --halt:      #93302f;
+    --halt-bg:   #f8e8e6;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+  }
+
+  /* ---------- masthead ---------- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--signal);
+    margin-bottom: .9rem;
+  }
+
+  h1 {
+    font-size: clamp(1.9rem, 4.2vw, 2.7rem);
+    line-height: 1.12;
+    letter-spacing: -.021em;
+    font-weight: 660;
+    text-wrap: balance;
+    margin-bottom: .8rem;
+  }
+
+  .standfirst {
+    font-size: 1.08rem;
+    color: var(--ink-2);
+    max-width: 46rem;
+  }
+
+  .facts {
+    margin-top: 1.9rem;
+    border-top: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
+  .fact {
+    border-bottom: 1px solid var(--rule);
+    border-right: 1px solid var(--rule);
+    padding: .8rem 1rem .85rem 0;
+  }
+  .fact:last-child { border-right: none; }
+  .fact dt {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-bottom: .3rem;
+  }
+  .fact dd {
+    font-family: var(--mono);
+    font-size: .86rem;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- generic section ---------- */
+  section > h2 {
+    font-size: 1.28rem;
+    letter-spacing: -.012em;
+    font-weight: 640;
+    margin-bottom: .35rem;
+  }
+  .section-note {
+    color: var(--ink-2);
+    max-width: 46rem;
+    margin-bottom: 1.5rem;
+  }
+
+  p { max-width: 46rem; }
+  p + p { margin-top: .85rem; }
+
+  strong { font-weight: 640; }
+  em { font-style: normal; color: var(--signal); font-weight: 560; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .855em;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: .08em .34em;
+    word-break: break-word;
+  }
+
+  /* ---------- gate chain ---------- */
+  .chain {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1.5rem 1.4rem 1.3rem;
+    overflow-x: auto;
+  }
+  .chain svg { display: block; min-width: 40rem; width: 100%; height: auto; }
+  .chain-key {
+    margin-top: 1.1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rule);
+    color: var(--ink-2);
+    font-size: .93rem;
+    max-width: 46rem;
+  }
+
+  /* ---------- constraint list ---------- */
+  .rules { display: flex; flex-direction: column; gap: 0; }
+  .rule-row {
+    display: grid;
+    grid-template-columns: 8.5rem 1fr;
+    gap: 1.1rem;
+    padding: .85rem 0;
+    border-bottom: 1px solid var(--rule);
+    align-items: baseline;
+  }
+  .rule-row:first-child { border-top: 1px solid var(--rule); }
+  .rule-key {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .rule-val { color: var(--ink-2); }
+  .rule-val strong { color: var(--ink); }
+
+  /* ---------- task cards ---------- */
+  .tasks { display: flex; flex-direction: column; gap: 1.5rem; }
+
+  .task {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .task-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .5rem .85rem;
+    padding: 1.15rem 1.3rem;
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface-2);
+  }
+  .task-num {
+    font-family: var(--mono);
+    font-size: .74rem;
+    letter-spacing: .1em;
+    color: var(--signal);
+    text-transform: uppercase;
+  }
+  .task-title {
+    font-size: 1.06rem;
+    font-weight: 630;
+    letter-spacing: -.008em;
+    flex: 1 1 20rem;
+  }
+  .task-body { padding: 1.25rem 1.3rem 1.35rem; display: flex; flex-direction: column; gap: 1.05rem; }
+  .task-why { color: var(--ink-2); max-width: 46rem; }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: .66rem;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    padding: .18em .5em .22em;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .chip-gate    { color: var(--halt);    background: var(--halt-bg); }
+  .chip-cond    { color: var(--caution); background: var(--caution-bg); }
+  .chip-op      { color: var(--ink-3);   background: transparent; }
+  .chip-out     { color: var(--signal);  background: var(--signal-bg); }
+
+  .steps { display: flex; flex-direction: column; }
+  .step {
+    display: grid;
+    grid-template-columns: 2.1rem 1fr;
+    gap: .1rem 0;
+    padding: .6rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .step-n {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+    padding-top: .12rem;
+  }
+  .step-main { display: flex; flex-direction: column; gap: .45rem; min-width: 0; }
+  .step-title { display: flex; flex-wrap: wrap; gap: .45rem; align-items: baseline; }
+  .step-title span.t { font-weight: 560; }
+  .step-detail { color: var(--ink-2); font-size: .95rem; }
+
+  pre {
+    font-family: var(--mono);
+    font-size: .8rem;
+    line-height: 1.5;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--rule-2);
+    border-radius: 3px;
+    padding: .7rem .85rem;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+  pre .c { color: var(--ink-3); }
+
+  .verdict {
+    border-left: 2px solid var(--signal);
+    background: var(--signal-bg);
+    padding: .7rem .95rem;
+    font-size: .95rem;
+    color: var(--ink);
+    border-radius: 0 3px 3px 0;
+  }
+  .verdict.halt { border-left-color: var(--halt); background: var(--halt-bg); }
+  .verdict.caution { border-left-color: var(--caution); background: var(--caution-bg); }
+  .verdict strong { font-weight: 640; }
+
+  /* ---------- inventory table ---------- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 34rem; }
+  th, td {
+    text-align: left;
+    padding: .55rem .85rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: .87rem;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  td.oid { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink-2); }
+  td.mode { font-family: var(--mono); font-size: .78rem; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .foot {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    color: var(--ink-3);
+    font-size: .88rem;
+    max-width: 46rem;
+  }
+  .foot code { background: transparent; border: none; padding: 0; color: var(--ink-2); }
+
+  a { color: var(--signal); text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  @media (max-width: 34rem) {
+    .rule-row { grid-template-columns: 1fr; gap: .25rem; }
+    .step { grid-template-columns: 1.6rem 1fr; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Plan E · Phase 2 · SDD Plan</div>
+    <h1>mxPortdb — the iss1 private-MIB pilot</h1>
+    <p class="standfirst">
+      Phase 1 already made every entry register locally and every GET forward through the
+      children chain. mxPortdb is therefore <em>already running this path</em>. Phase 2 does not
+      wire anything up — it proves the path is correct on one representative MIB, and produces
+      the number Phase 4's go/no-go will be argued from.
+    </p>
+
+    <dl class="facts">
+      <div class="fact"><dt>Entries</dt><dd>17 · RO 9 / RW 8</dd></div>
+      <div class="fact"><dt>OID root</dt><dd>…8691.603.1.1</dd></div>
+      <div class="fact"><dt>URIs</dt><dd>1 scalar + 4 tables</dd></div>
+      <div class="fact"><dt>Expected code change</dt><dd>none</dd></div>
+      <div class="fact"><dt>DUT</dt><dd>192.168.127.253</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <h2>Why this can start code-free</h2>
+    <p class="section-note">
+      Three facts, each read from source rather than assumed.
+    </p>
+    <div class="rules">
+      <div class="rule-row">
+        <div class="rule-key">ISS side</div>
+        <div class="rule-val">
+          <strong><code>RegisterMXPORT()</code> already exists</strong> —
+          <code>mxPortwr.c:31</code>, called unconditionally from <code>isssys.c:2744</code>,
+          with <code>PortConfigIndexGet()</code> in the same file. Nothing to add.
+          Later phases <em>do</em> need ISS work: §9.1's mxLa / mxVlan / mxLldp have no wrapper.
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-key">master side</div>
+        <div class="rule-val">
+          All 17 entries are <code>iss_build = 1</code>, so they take the ISS generator and
+          forward at the local/remote boundary introduced in <code>aa598f7</code>.
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-key">no synthesis</div>
+        <div class="rule-val">
+          Each of the four tables declares its own column 1, so
+          <code>GenerateTableIndexEntry()</code> takes the <code>tableURI</code> branch and never
+          reaches <code>CreateIndexEntry()</code>. That is the claim Task 1 must actually prove.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The gate chain</h2>
+    <p class="section-note">
+      Task 1 is the design doc's hard gate. Nothing downstream is meaningful if it fails, so it
+      is not just first — it is blocking.
+    </p>
+
+    <div class="chain">
+      <svg viewBox="0 0 720 176" role="img" aria-label="Task 1 is a blocking gate; tasks 2, 3 and 4 run after it and all feed task 5.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g style="color: var(--rule-2)" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M 168 88 L 236 88" marker-end="url(#ar)"/>
+          <path d="M 168 88 C 200 88 200 34 236 34" marker-end="url(#ar)"/>
+          <path d="M 168 88 C 200 88 200 142 236 142" marker-end="url(#ar)"/>
+          <path d="M 432 34 C 470 34 470 88 504 88" marker-end="url(#ar)"/>
+          <path d="M 432 88 L 504 88" marker-end="url(#ar)"/>
+          <path d="M 432 142 C 470 142 470 88 504 88" marker-end="url(#ar)"/>
+        </g>
+
+        <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">
+          <rect x="8" y="58" width="160" height="60" rx="3"
+                fill="var(--halt-bg)" stroke="var(--halt)" stroke-width="1.5"/>
+          <text x="22" y="80" fill="var(--halt)" letter-spacing="1">TASK 1 · GATE</text>
+          <text x="22" y="98" fill="var(--ink)" font-size="12">col-1 provenance</text>
+          <text x="22" y="112" fill="var(--ink-3)" font-size="10">FAIL → stop the plan</text>
+
+          <rect x="236" y="12" width="196" height="44" rx="3" fill="var(--surface-2)" stroke="var(--rule-2)"/>
+          <text x="250" y="31" fill="var(--ink-3)" letter-spacing="1">TASK 2</text>
+          <text x="250" y="46" fill="var(--ink)" font-size="12">value correctness · 17</text>
+
+          <rect x="236" y="66" width="196" height="44" rx="3" fill="var(--surface-2)" stroke="var(--rule-2)"/>
+          <text x="250" y="85" fill="var(--ink-3)" letter-spacing="1">TASK 3</text>
+          <text x="250" y="100" fill="var(--ink)" font-size="12">SET round trip · 8 RW</text>
+
+          <rect x="236" y="120" width="196" height="44" rx="3" fill="var(--surface-2)" stroke="var(--rule-2)"/>
+          <text x="250" y="139" fill="var(--ink-3)" letter-spacing="1">TASK 4</text>
+          <text x="250" y="154" fill="var(--ink)" font-size="12">latency · pcap</text>
+
+          <rect x="504" y="58" width="208" height="60" rx="3"
+                fill="var(--signal-bg)" stroke="var(--signal)" stroke-width="1.5"/>
+          <text x="518" y="80" fill="var(--signal)" letter-spacing="1">TASK 5</text>
+          <text x="518" y="98" fill="var(--ink)" font-size="12">D18 + ledger</text>
+          <text x="518" y="112" fill="var(--ink-3)" font-size="10">feeds Phase 3 planning</text>
+        </g>
+      </svg>
+
+      <p class="chain-key">
+        Task 4's number is the one Phase 4 compares against — it is an output of this phase,
+        not a pass/fail of it.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Constraints carried in from Phase 0/1</h2>
+    <p class="section-note">Each of these cost time this week. They are constraints, not advice.</p>
+    <div class="rules">
+      <div class="rule-row">
+        <div class="rule-key">Latency</div>
+        <div class="rule-val">
+          pcap or the device's own <code>util_timeDiff</code> — <strong>never a client wall-clock
+          loop</strong>. <code>fork</code>/<code>exec</code> plus MIB parsing costs ~40&nbsp;ms
+          against a device that answers in 2.9&nbsp;ms.
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-key">Comparisons</div>
+        <div class="rule-val">
+          Same-partition before/after, <strong>or</strong> a <code>running-config.txt</code>
+          snapshot per side. The two partitions do not share configuration — one has 2 IP
+          interfaces and 2 VLANs where the other has none.
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-key">Console</div>
+        <div class="rule-val">
+          <code>dut-console</code> drives the <strong>Linux shell only</strong>. Feeding
+          <code>moxash</code> to it hangs the console — it needs a real TTY. Recovery is
+          <code>Ctrl-\</code> (SIGQUIT) via expect.
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="rule-key">Code</div>
+        <div class="rule-val">
+          None expected. If a task finds a real discrepancy, a fix task is
+          <strong>inserted after it</strong> — root cause first, host-gcc syntax check, build
+          handed to the operator, then reviewed. Phase 0/1 found two real defects this way.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tasks</h2>
+
+    <div class="tasks">
+
+      <!-- ============ TASK 1 ============ -->
+      <article class="task">
+        <div class="task-head">
+          <span class="task-num">Task 1</span>
+          <span class="task-title">Prove column 1 comes from ISS</span>
+          <span class="chip chip-gate">hard gate</span>
+        </div>
+        <div class="task-body">
+          <p class="task-why">
+            <strong>snmpwalk cannot answer this.</strong> A locally-synthesised column 1 and an
+            ISS-provided one both return <code>INTEGER: 1..N</code> — byte-identical. The proof has
+            to come from <em>how the value was produced</em>, not what it says.
+          </p>
+          <p class="task-why">
+            Covers <strong>both</strong> <code>portConfigTable</code> and
+            <code>portConfigLinkUpDelayTable</code>. §10.2's one-line gate names only the first;
+            §3.3's 24-table list names both, and both have the identical col1-RO / col2-RW shape
+            that created the risk.
+          </p>
+
+          <div class="steps">
+            <div class="step">
+              <div class="step-n">1</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Write the provenance script</span></div>
+                <div class="step-detail">
+                  <code>tools/mxportdb_provenance.sh</code> — carries both non-disruptive signals.
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-n">2</div>
+              <div class="step-main">
+                <div class="step-title">
+                  <span class="t">Signal A — watch for the synthesis binary</span>
+                  <span class="chip chip-op">operator</span>
+                </div>
+                <div class="step-detail">
+                  <code>/usr/bin/iss_snmp_makeup_index</code> runs <strong>only</strong> on the
+                  local synthetic path. If column 1 is forwarded it is never invoked.
+                </div>
+<pre><span class="c"># on the DUT, left running while step 3 executes</span>
+while :; do ps -eo comm | grep -q iss_snmp_makeup_index \
+  &amp;&amp; echo CAUGHT; sleep 0.05; done</pre>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-n">3</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Signal B — column 1 vs column 2 latency</span></div>
+                <div class="step-detail">
+                  Forwarding costs ~3&nbsp;ms; the local ISS-file path costs hundreds. If both
+                  columns of the same table are in the same range, both are forwarded.
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-n">4</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Repeat for portConfigLinkUpDelayTable</span></div>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-n">5</div>
+              <div class="step-main">
+                <div class="step-title">
+                  <span class="t">Signal C — stop ISS, read the failure signature</span>
+                  <span class="chip chip-cond">conditional</span>
+                  <span class="chip chip-gate">high risk</span>
+                </div>
+                <div class="step-detail">
+                  Only if A and B were ambiguous. <strong>Both</strong> candidate paths depend on
+                  ISS, so "can I still read it" proves nothing — the discriminator is
+                  <em>how it fails</em>: the whole column vanishing means forwarded; per-row errors
+                  with the OID still enumerable means local.
+                </div>
+                <div class="verdict caution">
+                  <strong>Not run by default.</strong> <code>ISS.exe</code> is the entire switching
+                  engine, not just SNMP. It is started with <code>&amp;</code> under a
+                  <code>RemainAfterExit</code> unit, so <code>systemctl stop</code> will not track
+                  it — kill by name, restart via <code>systemctl restart app_moxa_iss_init</code>.
+                </div>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-n">6</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Write the verdict</span></div>
+                <div class="verdict halt">
+                  If either table reads <strong>LOCAL</strong>, <strong>stop the plan</strong> and
+                  escalate. That is the hard gate failing, and it would mean removing
+                  <code>agentx_owned.list</code> did not close the synthetic-index risk the way
+                  §3.3 and §10.2 predict.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ============ TASK 2 ============ -->
+      <article class="task">
+        <div class="task-head">
+          <span class="task-num">Task 2</span>
+          <span class="task-title">Value correctness across all 17 entries</span>
+          <span class="chip chip-op">needs partition switch</span>
+        </div>
+        <div class="task-body">
+          <p class="task-why">
+            Both partitions drive the <em>same physical ports</em>, so a same-window walk of
+            <code>…603.1.1</code> on each should agree everywhere the value reflects hardware
+            truth, and differ only where configuration differs. Reuses
+            <code>walkdiff.py</code> unchanged.
+          </p>
+          <div class="steps">
+            <div class="step">
+              <div class="step-n">1–2</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Capture on Plan E + save its running-config</span></div>
+              </div>
+            </div>
+            <div class="step">
+              <div class="step-n">3</div>
+              <div class="step-main">
+                <div class="step-title">
+                  <span class="t">Switch partition, capture mainline, switch back</span>
+                  <span class="chip chip-op">operator</span>
+                </div>
+                <div class="step-detail">
+                  The plan deliberately does not guess this device's swupdate invocation.
+                </div>
+              </div>
+            </div>
+            <div class="step">
+              <div class="step-n">4</div>
+              <div class="step-main">
+                <div class="step-title"><span class="t">Diff and classify every difference</span></div>
+                <div class="step-detail">
+                  Each <code>DIFFERS</code> line is checked against both config snapshots.
+                  Config differs → expected. Config identical but value differs → real discrepancy.
+                  Any <code>MISSING</code>/<code>SURPLUS</code> at all is a real discrepancy — the
+                  same 17 entries register unconditionally on both sides.
+                </div>
+              </div>
+            </div>
+            <div class="step">
+              <div class="step-n">5</div>
+              <div class="step-main">
+                <div class="step-title">
+                  <span class="t">If a real discrepancy exists, open a fix task</span>
+                  <span class="chip chip-cond">conditional</span>
+                </div>
+                <div class="step-detail">No inline fixes. Root cause first, then a task of its own.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ============ TASK 3 ============ -->
+      <article class="task">
+        <div class="task-head">
+          <span class="task-num">Task 3</span>
+          <span class="task-title">SET path unaffected</span>
+        </div>
+        <div class="task-body">
+          <p class="task-why">
+            SET was never touched by any Phase 0/1 commit. This task turns that assumption into
+            evidence, on the one table carrying three <code>URI_MOD_ON_SET</code> entries — a flag
+            nothing has exercised yet. Every value below was read from
+            <code>mxPort.mib</code>'s SYNTAX clauses, not guessed.
+          </p>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr><th>Object</th><th>OID</th><th>Values</th><th>Flag</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>portConfigMdiOrMdixCap</td>
+                  <td class="oid">…1.1.1.1.1.6.1</td>
+                  <td class="mode">auto(1) mdi(2) mdix(3)</td>
+                  <td class="mode">—</td>
+                </tr>
+                <tr>
+                  <td>portConfigMode</td>
+                  <td class="oid">…1.1.1.1.1.3.1</td>
+                  <td class="mode">auto(1) noNegotiation(2)</td>
+                  <td class="mode">TRUTH_VALUE</td>
+                </tr>
+                <tr>
+                  <td>portConfigSystemLinkUpDelayEnable</td>
+                  <td class="oid">…1.1.1.2.0</td>
+                  <td class="mode">true(1) false(2)</td>
+                  <td class="mode">TRUTH_VALUE</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="verdict">
+            Each is driven away from its original value and back again, reading it back both times.
+            The original is captured first and restored — the DUT is left as found.
+          </div>
+        </div>
+      </article>
+
+      <!-- ============ TASK 4 ============ -->
+      <article class="task">
+        <div class="task-head">
+          <span class="task-num">Task 4</span>
+          <span class="task-title">Latency benchmark</span>
+          <span class="chip chip-out">output, not a gate</span>
+        </div>
+        <div class="task-body">
+          <p class="task-why">
+            100 rounds of a single 17-varbind GET, captured with tcpdump, then request/response
+            paired by <code>snmp.request_id</code> — the same technique that produced
+            <code>RESULT-task3.txt</code>'s numbers.
+          </p>
+          <div class="verdict">
+            This number is what design doc §10.2 <strong>Phase 4</strong> compares before and after.
+            Phase 2 does not judge it — it records it.
+          </div>
+        </div>
+      </article>
+
+      <!-- ============ TASK 5 ============ -->
+      <article class="task">
+        <div class="task-head">
+          <span class="task-num">Task 5</span>
+          <span class="task-title">Verdict, decision log, ledger</span>
+        </div>
+        <div class="task-body">
+          <p class="task-why">
+            Writes <strong>D18</strong> into the design doc's §11 decision log — the Phase 2 verdict,
+            any fix tasks that were needed, and Task 4's number. Creates the ledger under
+            <code>.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04/</code>, same convention as
+            Phase 0/1 (gitignored, disk-only).
+          </p>
+          <p class="task-why">
+            Phase 0/1 nearly lost <strong>D17</strong> because its recording step sat inside a task
+            whose condition never fired. This one is unconditional and stands alone.
+          </p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>
+      Plan committed as <code>d911a51</code> —
+      <code>~/WORK/SNMP_50ms/plan-e-phase2-PLAN-2026-08-04.md</code>.
+      Every OID was read from <code>net_mxPortdb.h</code> and cross-checked against
+      <code>mxPort.mib</code>; all 22 bash blocks pass <code>bash -n</code>.
+      Execution mode: subagent-driven, one fresh agent per task with review between.
+    </p>
+  </footer>
+
+</div>

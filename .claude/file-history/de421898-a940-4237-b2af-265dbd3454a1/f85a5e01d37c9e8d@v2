@@ -1,0 +1,78 @@
+/*
+ * lib_moxa_ies_auto_mibs - OID -> URI lookup for app_moxa_framework and any
+ * other daemon that needs one.
+ *
+ * The table is not written here. It is compiled from
+ * 3rdparty_net_snmp/ies-auto-mibs, the same source snmpd builds its own entry
+ * set from: the same net_*.h array definitions, the same MOX_SNMP_INIT_ENTRY
+ * sequence with the same #if guards, and the same flag setup. There is exactly
+ * one source of truth (design doc section 5.1); a copy would drift, and a
+ * wrong flag produces a plausible-looking wrong value rather than an error.
+ *
+ * What this library deliberately does NOT bring along is the in-master
+ * machinery that serves values - see IES_AUTO_MIBS_TABLE_ONLY in
+ * snmp_tools/inc/ies_auto_mibs_handle.h.
+ */
+
+#ifndef LIB_MOXA_IES_AUTO_MIBS_IESMAP_H
+#define LIB_MOXA_IES_AUTO_MIBS_IESMAP_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Size of the flag bit array. Asserted against the upstream IES_SNMP_FLAG_NUM
+ * at compile time. */
+#define IESMAP_FLAG_BYTES 5
+
+/*
+ * The flag numbers this library promises to expose. They are asserted against
+ * the upstream IES_FLAG_SNMP_* enum at compile time, so a renumbering upstream
+ * breaks the build instead of silently changing which flag is read.
+ *
+ * Only the ones Phase 3 needs are listed. Add more the same way - with an
+ * assertion - rather than passing raw numbers through.
+ */
+#define IESMAP_FLAG_URI_STATUS           3
+#define IESMAP_FLAG_URI_CONFIG_CHAIN    10
+#define IESMAP_FLAG_REPLACE_TRUTH_VALUE 16
+
+struct iesmap_result {
+    const char *uri;          /* e.g. "io/di/"                          */
+    const char *mod_uri;      /* MIB-name -> config-key bridge, or NULL */
+    const char *uri_index;
+    int         iss_build;    /* 1 = ISS side, 0 = framework side       */
+    int         val_type;     /* SNMP_DATA_TYPE_*                       */
+    int         oid_index;
+    int         mode;         /* HANDLER_CAN_RONLY / _RWRITE            */
+
+    /* IES_FLAG_SNMP_* bit array, IESMAP_FLAG_BYTES long. Read it with
+     * iesmap_flag_is_set() rather than indexing: the element type is
+     * unsigned char, and getting that wrong reads the wrong bits without
+     * failing. */
+    const unsigned char *flags;
+};
+
+/*
+ * Longest-prefix match. A GET arrives carrying a full instance OID (column
+ * plus index), while an entry names only its column, so an entry matches when
+ * its OID is a prefix of the one asked about and the longest such entry wins.
+ *
+ * 0 = found, -1 = no entry covers this OID.
+ */
+int iesmap_lookup(const unsigned long *oid, size_t oid_len,
+                  struct iesmap_result *out);
+
+/* Non-zero if the flag is set. flag is one of IESMAP_FLAG_*. */
+int iesmap_flag_is_set(const struct iesmap_result *result, int flag);
+
+/* Entry count, for the consistency check against what snmpd registers. */
+size_t iesmap_entry_count(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIB_MOXA_IES_AUTO_MIBS_IESMAP_H */

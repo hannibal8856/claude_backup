@@ -1,0 +1,37 @@
+/*
+ * Host-runnable sanity test for ies_map_lookup_by_oid().
+ * Build (native host gcc, no cross-compile needed — pure logic):
+ *   gcc -Iinclude test/lookup_test.c src/lookup.c src/mapping_data.c -o /tmp/lt && /tmp/lt
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void)
+{
+    /* hit: sysName .1.3.6.1.2.1.1.5.0 -> systemInformation/systemName */
+    const moxa_oid sys_name[] = { 1, 3, 6, 1, 2, 1, 1, 5, 0 };
+    const struct ies_map_entry *e =
+        ies_map_lookup_by_oid(sys_name, sizeof(sys_name) / sizeof(sys_name[0]));
+    assert(e != NULL);
+    assert(strcmp(e->uri, "systemInformation/systemName") == 0);
+    assert(e->val_type == 4 /* ASN_OCTET_STR */);
+
+    /* hit: sysMoxaDeviceName (enterprise) */
+    const moxa_oid moxa_name[] = { 1, 3, 6, 1, 4, 1, 8691, 602, 1, 1, 1, 6, 0 };
+    e = ies_map_lookup_by_oid(moxa_name, sizeof(moxa_name) / sizeof(moxa_name[0]));
+    assert(e != NULL);
+    assert(strcmp(e->uri, "systemInformation/deviceName") == 0);
+
+    /* miss: unregistered OID -> NULL */
+    const moxa_oid nope[] = { 1, 3, 6, 1, 2, 1, 1, 99, 0 };
+    assert(ies_map_lookup_by_oid(nope, sizeof(nope) / sizeof(nope[0])) == NULL);
+
+    /* miss: prefix of a real OID but wrong length -> NULL (exact match only) */
+    const moxa_oid short_oid[] = { 1, 3, 6, 1, 2, 1, 1, 5 };
+    assert(ies_map_lookup_by_oid(short_oid, sizeof(short_oid) / sizeof(short_oid[0])) == NULL);
+
+    printf("lookup_test: OK\n");
+    return 0;
+}

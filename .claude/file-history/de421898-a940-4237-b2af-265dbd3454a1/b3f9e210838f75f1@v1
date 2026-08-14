@@ -1,0 +1,310 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_FLAGS_net_mxQosdb_c
+#define _IES_AUTO_MIBS_FLAGS_net_mxQosdb_c
+
+#include "net_mxQosdb_const.h"
+/**
+ * @brief dependency-check-function for mxqosdb qosConfigMeterType
+
+ * @param[in]    entry           moxa snmp entry
+ * @param[in]    checkFunc       entry-dependency-check-function
+
+ * @returns      0 means success, others fail.
+ */
+int32_t CheckEntryDependency_mxqosdb_qosConfigMeterType( netsnmp_agent_request_info    *reqinfo,
+                                                         netsnmp_request_info          *request,
+                                                         struct ies_auto_mibs_entry    *entry   )
+{
+    int                             oidIndex = 0;
+    int                             uriIndex = 0;
+    int32_t                         ret      = (-1);
+    char                            uriPath[IES_MAX_URI] = {0x0};
+    struct LibFrameworkUri_Handle  *uriHandle            = NULL;
+    JSON_Value                     *jsonVal              = NULL;
+    JSON_Object                    *jsonObj              = NULL;
+    int                             qosConfigMeterType   = 0;
+
+    if ( moxaSnmpHandle_UtilSnmpGetOIDIndex(request, entry, &oidIndex ) != 0 )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+        return (-1);
+    }
+
+    uriIndex = oidIndex - 1;
+
+    snprintf(uriPath, sizeof(uriPath), 
+        MOXA_SNMP_URI_CONFIG_PATH("/%s/%d/"), 
+        MXCFG_GRP_mxqos_meterTable, uriIndex);
+
+    if ( moxaSnmpHandle_UtilCfgGetURIConfig(uriPath, &jsonVal) != 0 )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+        goto config_end;
+    }
+
+    jsonObj = json_value_get_object(jsonVal);
+
+    if ( jsonObj == NULL )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+        goto config_end;
+    }
+
+    qosConfigMeterType = json_object_dotget_number(jsonObj, MXCFG_KEY_meterType);
+
+    if ( qosConfigMeterType != QOS_CLI_METER_SRTCM )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d\n", __func__, __LINE__);
+        goto config_end;
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d ret = %d\n", __func__, __LINE__, ret);
+    ret = 0;
+
+config_end:
+
+    if ( jsonVal != NULL )
+    {
+        json_value_free(jsonVal);
+        jsonVal = NULL;
+    }
+    LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "%s line %d ret = %d\n", __func__, __LINE__, ret);
+    return ret;
+}
+
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags_net_mxQosdb
+(
+    struct ies_auto_mibs_entry *entry
+)
+{
+
+
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigDscpMappingTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/dscpMappingTable/");
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY_ARRAY, entry->flags);
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_INDEX_NOT_START_FROM_1,     entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigCoSMappingTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/cosMappingTable/");
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_REPLACE_TABLE_2ENTRY_ARRAY, entry->flags);
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_INDEX_NOT_START_FROM_1,     entry->flags);
+
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigDefaultPriorityTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/defaultPriorityTable/");
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigDefaultPriorityValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "defaultPriorityValue");
+        }
+    }
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigPbitPreferenceTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/portPreferenceTable/");
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigPbitPreferenceType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "portPreferenceType");
+        }
+    }
+#if !defined(BCM_ROBO2_XSDK) // QoS rate limit is not support in EDS
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigMeterTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/meterTable/");
+
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterColorModeType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterColorModeType");
+            entry->mode = HANDLER_CAN_RONLY;
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterType");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterCIRValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterCirValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterCBSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterCbsValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterEIRValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterEirValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterEBSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterEbsValue");
+            if ( moxaSnmpHandle_RegEntryDep(
+                    entry, CheckEntryDependency_mxqosdb_qosConfigMeterType) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterConActType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterConActType");
+            IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_CONFIG_CHAIN, entry->flags);
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterConReMarkCoSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterConReMarkCosValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterConReMarkDSCPValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterConReMarkDscpValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterExcActType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterExcActType");
+            if ( moxaSnmpHandle_RegEntryDep(
+                    entry, CheckEntryDependency_mxqosdb_qosConfigMeterType) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterExcReMarkCoSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterExcReMarkCosValue");
+            if ( moxaSnmpHandle_RegEntryDep(
+                    entry, CheckEntryDependency_mxqosdb_qosConfigMeterType) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterExcReMarkDSCPValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterExcReMarkDscpValue");
+            if ( moxaSnmpHandle_RegEntryDep(
+                    entry, CheckEntryDependency_mxqosdb_qosConfigMeterType) != 0 )
+            {
+                return IES_ERR;
+            }
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterVioActType") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterVioActType");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterVioReMarkCoSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterVioReMarkCosValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigMeterVioReMarkDSCPValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "meterVioReMarkDscpValue");
+        }
+    }
+#endif
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigSchedulerTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigSchedulerType") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/schedulerTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "schedulerType");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight1") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight1");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight2") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight2");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight3") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight3");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight4") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight4");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight5") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight5");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight6") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight6");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight7") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight7");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigQueueWeight8") ) 
+        {
+            snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/queueWeightTable/");
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "queueWeight8");
+        }
+    }
+#if !defined(BCM_ROBO2_XSDK) // Egress shaper is not support in EDS
+    else
+    if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri, "mxqosdb/qosConfigShaperTable/") ) 
+    {
+        IES_FLAG_BITS_SET(IES_FLAG_SNMP_URI_MOD_ON_SET, entry->flags);
+        snprintf(entry->mod_uri, IES_MAX_URI,"mxqos/shaperTable/");
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigShaperCIRValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "shaperCirValue");
+        }
+        else
+        if ( IES_NOERR == IES_SNMP_COMPARE_URI(entry->uri_index, "qosConfigShaperCBSValue") ) 
+        {
+            snprintf(entry->mod_uri_index, IES_MAX_URI_INDEX, "shaperCbsValue");
+        }
+    }
+#endif
+    
+    return IES_NOERR;
+}
+
+
+
+#endif //_IES_AUTO_MIBS_FLAGS_net_mxQosdb_c

@@ -1,0 +1,84 @@
+#!/usr/bin/expect -f
+# Fence-only DUT console driver. Never matches shell prompts (they are
+# ANSI-styled on this device, which breaks prompt regexes).
+#   usage: dut.exp <cmd> [<cmd> ...]
+
+set default_timeout [expr {[info exists env(DUT_CONSOLE_TIMEOUT)] ? $env(DUT_CONSOLE_TIMEOUT) : 90}]
+set log_path [exec sh -c {echo $HOME/console_$(date +%Y%m%d_%H%M%S).log}]
+log_file -a $log_path
+log_user 1
+send_user "=== log $log_path ===\n"
+
+spawn picocom -b 115200 --noinit --noreset --quiet /dev/ttyS0
+set timeout 5
+
+# clear any partial line / pager
+send "\x03"
+sleep 1
+send "\r"
+sleep 1
+
+# Are we at a login prompt?
+send "\r"
+set at_login 0
+expect {
+    -re "(L|l)ogin: " { set at_login 1 }
+    timeout {}
+}
+if {$at_login} {
+    send "admin\r"
+    expect { -re "(P|p)assword: " {} timeout {} }
+    send "moxa\r"
+    sleep 3
+}
+
+proc runfence {cmd fence tmo} {
+    global spawn_id
+    set timeout $tmo
+    send -- "$cmd ; echo $fence\r"
+    expect {
+        -re "$fence\[\r\n\]" { return 1 }
+        timeout { send_user "\n*** TIMEOUT: $cmd ***\n"; return 0 }
+    }
+}
+
+# who am I?
+set timeout 15
+send "id -u ; echo __UID_FENCE__\r"
+set is_root 0
+expect {
+    -re "0\[\r\n\]+__UID_FENCE__" { set is_root 1 }
+    -re "__UID_FENCE__"           { set is_root 0 }
+    timeout { send_user "\n*** no shell response ***\n"; exit 3 }
+}
+
+if {!$is_root} {
+    send "su\r"
+    expect { -re "(P|p)assword: " {} timeout {} }
+    send "moxa\r"
+    sleep 3
+    send "id -u ; echo __UID2_FENCE__\r"
+    expect {
+        -re "0\[\r\n\]+__UID2_FENCE__" { }
+        -re "__UID2_FENCE__" { send_user "\n*** su did not give root ***\n"; catch {send "\x01\x18"}; exit 4 }
+        timeout { send_user "\n*** su timeout ***\n"; catch {send "\x01\x18"}; exit 5 }
+    }
+}
+send_user "\n=== root shell ready ===\n"
+
+set i 0
+foreach cmd $argv {
+    incr i
+    send_user "\n--- CMD\[$i\]: $cmd ---\n"
+    if {![runfence $cmd "__F${i}_DONE__" $default_timeout]} {
+        catch {send "\x01\x18"}
+        exit 5
+    }
+}
+
+send "\x01\x18"
+expect eof
+catch {wait}
+send_user "\n=== saved: $log_path ===\n"
+puts $log_path
+exit 0

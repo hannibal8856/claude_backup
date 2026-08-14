@@ -1,0 +1,199 @@
+#!/bin/bash
+set -euo pipefail
+
+# Supported DUT models
+SUPPORTED_MODELS=("rks-g4000-l3" "mds-g4000-l3" "tsn" "mds-g4000" "mds-g4000-l3-4xgs" "rks-g4000" "mds-g4000-4xgs" "tn-4500b" "eds-g4000" "65m-5011m" "mrx-q4000-l3" "rks-g4000-pl" "rks-g4000-pl-l3")
+
+usage() {
+    echo "Usage: $0 <DUT_MODEL> <DUT_FWR_URL>"
+    echo "Options:"
+    echo "  -h, --help           Show this help and exit"
+    echo "  --list-models        Print supported DUT models and exit"
+}
+
+list_models() {
+    for m in "${SUPPORTED_MODELS[@]}"; do
+        echo "$m"
+    done
+}
+
+# Handle flags before positional args (safe with set -u)
+case "${1-}" in
+  --list-models)
+    list_models
+    exit 0
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ -z "${1-}" ] || [ -z "${2-}" ]; then
+    usage
+    exit 1
+fi
+
+DUT_MODEL=$1
+DUT_FWR_URL=$2
+
+PWD=$(pwd)
+DUT_MODEL_LOWER=$(echo "${DUT_MODEL}" | tr '[:upper:]' '[:lower:]')
+# Whitelist DUT models using array
+is_supported=false
+for m in "${SUPPORTED_MODELS[@]}"; do
+        if [ "$m" = "${DUT_MODEL_LOWER}" ]; then
+                is_supported=true
+                break
+        fi
+done
+if [ "$is_supported" != true ]; then
+        echo "[TESTBED] unsupported DUT model: ${DUT_MODEL}"
+        echo "[TESTBED] supported models: ${SUPPORTED_MODELS[*]}"
+        exit 1
+fi
+DOCKER_CONTAINER_NAME="synergy_switch_${DUT_MODEL_LOWER}_bvt"
+TESTBED_DOWNLOAD_DIR="${PWD}/download/${DOCKER_CONTAINER_NAME}"
+TESTBED_MATERIAL_DIR="${PWD}/material/${DOCKER_CONTAINER_NAME}"
+FWR_ARTIFACT_NAME=$(basename "${DUT_FWR_URL}" | sed 's/\.[^.]*$//')
+
+### BVT Preparation ###
+# Download the firmware artifact from the provided URL
+if [ ! -d "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}_extracted" ]; then
+    echo "[TESTBED] downloading firmware from ${DUT_FWR_URL}"
+    mkdir -p "${TESTBED_DOWNLOAD_DIR}"
+    wget -P "${TESTBED_DOWNLOAD_DIR}" "${DUT_FWR_URL}"
+
+    # Extract the .tar file
+    echo "[TESTBED] extracting ${FWR_ARTIFACT_NAME}"
+    mkdir -p "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}_extracted"
+    tar -xf "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}.tar" -C "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}_extracted"
+    rm -f "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}.tar"
+else
+    echo "[TESTBED] firmware already downloaded: ${FWR_ARTIFACT_NAME}.tar"
+fi
+
+# Copy downloaded files to the material directory.
+# Prefer FWR*.rom (device firmware). Some packages (e.g. MRX) also ship BOOT_*.rom
+# (bootloader); a plain *.rom find can pick BOOT first and fail device-firmware upgrade.
+echo "[TESTBED] Copy rom file to material directory"
+ROM_FILE_DIR=$(find "${TESTBED_DOWNLOAD_DIR}/${FWR_ARTIFACT_NAME}_extracted" -type f -name 'FWR*.rom' -print -quit)
+if [ -z "${ROM_FILE_DIR}" ]; then
+    echo "[TESTBED] no FWR*.rom found in the extracted contents"
+    exit 1
+fi
+mkdir -p "${TESTBED_MATERIAL_DIR}"
+cp -f -- "${ROM_FILE_DIR}" "${TESTBED_MATERIAL_DIR}"
+ROM_FILENAME=$(basename "${ROM_FILE_DIR}")
+echo "[TESTBED] copied rom file: ${ROM_FILENAME}"
+
+### Start BVT Test ###
+echo "[TESTBED] starting container ${DOCKER_CONTAINER_NAME}"
+docker start "${DOCKER_CONTAINER_NAME}" 2>&1 >/dev/null
+
+# Wait for bvt-container-network watcher to attach veth pairs (eth120/eth127).
+# `docker start` returns before the watcher's async setup completes, so poll.
+echo "[TESTBED] waiting for eth120/eth127 attach"
+ATTACH_TIMEOUT=30
+for i in $(seq 1 ${ATTACH_TIMEOUT}); do
+    if docker exec "${DOCKER_CONTAINER_NAME}" ip link show eth127 >/dev/null 2>&1 \
+       && docker exec "${DOCKER_CONTAINER_NAME}" ip link show eth120 >/dev/null 2>&1; then
+        echo "[TESTBED] interfaces ready after ${i}s"
+        break
+    fi
+    if [ "$i" -eq "${ATTACH_TIMEOUT}" ]; then
+        echo "[TESTBED] ERROR: eth120/eth127 not attached within ${ATTACH_TIMEOUT}s"
+        echo "[TESTBED] check 'sudo systemctl status bvt-container-network.service'"
+        exit 1
+    fi
+    sleep 1
+done
+
+# Ensure DUT route exists (safety net for veth-based network setup)
+echo "[TESTBED] verifying container network routes"
+docker exec "${DOCKER_CONTAINER_NAME}" bash -c \
+    "ip route show 192.168.127.0/24 | grep -q eth127 || ip route add 192.168.127.0/24 dev eth127 2>/dev/null || true"
+docker exec "${DOCKER_CONTAINER_NAME}" bash -c "ip addr"
+docker exec "${DOCKER_CONTAINER_NAME}" bash -c "ip route"
+
+# Verify DUT reachability.
+# Retry to tolerate transient packet loss (e.g. LAN switch saturated while
+# other testbeds upgrade concurrently): probe every 5s, give up after 3 min.
+echo "[TESTBED] verifying network connectivity to DUT"
+PING_RETRY_INTERVAL=5
+PING_RETRY_TIMEOUT=180
+ping_deadline=$((SECONDS + PING_RETRY_TIMEOUT))
+dut_reachable=false
+while :; do
+    if docker exec "${DOCKER_CONTAINER_NAME}" bash -c \
+        "ping -c 2 -W 3 -I eth127 192.168.127.253" >/dev/null 2>&1; then
+        dut_reachable=true
+        break
+    fi
+    if [ "${SECONDS}" -ge "${ping_deadline}" ]; then
+        break
+    fi
+    echo "[TESTBED] DUT not reachable yet, retrying in ${PING_RETRY_INTERVAL}s"
+    sleep "${PING_RETRY_INTERVAL}"
+done
+if [ "${dut_reachable}" != true ]; then
+    echo "[TESTBED] ERROR: cannot reach DUT at 192.168.127.253 within ${PING_RETRY_TIMEOUT}s"
+    exit 1
+fi
+echo "[TESTBED] DUT reachable"
+
+# Verify NPort connectivity with the same retry policy (every 5s, up to 3 min).
+# NPort failure is non-fatal, so on timeout we only warn instead of exiting.
+echo "[TESTBED] verifying NPort connectivity"
+nport_deadline=$((SECONDS + PING_RETRY_TIMEOUT))
+nport_reachable=false
+while :; do
+    if docker exec "${DOCKER_CONTAINER_NAME}" bash -c \
+        "ping -c 2 -W 3 -I eth120 192.168.120.254" >/dev/null 2>&1; then
+        nport_reachable=true
+        break
+    fi
+    if [ "${SECONDS}" -ge "${nport_deadline}" ]; then
+        break
+    fi
+    echo "[TESTBED] NPort not reachable yet, retrying in ${PING_RETRY_INTERVAL}s"
+    sleep "${PING_RETRY_INTERVAL}"
+done
+if [ "${nport_reachable}" != true ]; then
+    echo "[TESTBED] WARNING: cannot reach NPort at 192.168.120.254 within ${PING_RETRY_TIMEOUT}s"
+else
+    echo "[TESTBED] NPort reachable"
+fi
+
+# Execute the pytest command inside the Docker container
+echo "[TESTBED] BVT preparation, upgrade DUT to ${ROM_FILENAME}"
+SYNERGY_TOPOLOGY_FILE="topology/topology_switch_rd_bvt_${DUT_MODEL_LOWER}.yaml"
+SYNERGY_RD_BVT_FWR_UPGRADE="testcase/test_firmware_upgrade.py::TestFirmwareUpgrade::test_firmware_upgrade_rd_bvt_single_dut"
+SYNERGY_RD_BVT_TEST_SUITE="rd_bvt"
+
+PREP_CMD="cd switch_synergyautomation"
+PREP_CMD="$PREP_CMD && sed -i \"s/firmware_version:.*/firmware_version: ${ROM_FILENAME}/\" ${SYNERGY_TOPOLOGY_FILE}"
+PREP_CMD="$PREP_CMD && python -m pytest ${SYNERGY_RD_BVT_FWR_UPGRADE} --allure-no-capture --topology_config_path=${SYNERGY_TOPOLOGY_FILE}"
+
+docker exec "${DOCKER_CONTAINER_NAME}" bash -c "$PREP_CMD"
+BVT_PREP_RESULT=$?
+if [ ${BVT_PREP_RESULT} -ne 0 ]; then
+    echo "[TESTBED] BVT preparation failed (ret=${BVT_PREP_RESULT})"
+    docker stop "${DOCKER_CONTAINER_NAME}" 2>&1 >/dev/null
+    exit ${BVT_PREP_RESULT}
+fi
+echo "[TESTBED] BVT preparation completed (ret=${BVT_PREP_RESULT})"
+
+echo "[TESTBED] executing BVT tests in container ${DOCKER_CONTAINER_NAME}"
+TEST_CMD="cd switch_synergyautomation"
+TEST_CMD="$TEST_CMD && python -m pytest -m ${SYNERGY_RD_BVT_TEST_SUITE} --allure-no-capture --topology_config_path=${SYNERGY_TOPOLOGY_FILE}"
+
+
+docker exec "${DOCKER_CONTAINER_NAME}" bash -c "$TEST_CMD"
+BVT_RESULT=$?
+echo "[TESTBED] BVT execution completed (ret=${BVT_RESULT})"
+
+echo "[TESTBED] stopped container ${DOCKER_CONTAINER_NAME}"
+docker stop "${DOCKER_CONTAINER_NAME}" 2>&1 >/dev/null
+
+exit ${BVT_RESULT}

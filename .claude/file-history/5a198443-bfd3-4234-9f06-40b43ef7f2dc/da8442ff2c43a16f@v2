@@ -1,0 +1,136 @@
+# in-master GETNEXT 跨 value file 時跳掉整個 index 欄（2026-08-05）
+
+Task 6 Step 1 抓對照組時發現的。**不是 Plan E 造成的**，是 in-master (ISS) 既有行為，
+在 framework 註冊零個 OID 的 Build `2026_0805_1738` 上量到。
+
+## 現象
+
+`mx_device_io` arc `1.3.6.1.4.1.8691.602.8.6.2` 底下 4 張表，每張表 2 欄
+（`index`、`status`）。從 arc root 走 walk 只拿到 7 筆，全是 status 欄：
+
+```
+snmpwalk .1.3.6.1.4.1.8691.602.8.6.2
+  .2.1.1.2.1=1  .2.1.1.2.2=2      io/power/system/status
+  .2.2.1.2.1=0  .2.2.1.2.2=2      io/power/poe/status
+  .2.3.1.2.1=0                    io/di/status
+  .2.4.1.2.1=0  .2.4.1.2.2=0      io/relay/status
+```
+
+但**往下一層起走就完整**：
+
+```
+snmpwalk .1.3.6.1.4.1.8691.602.8.6.2.1
+  .2.1.1.1.1=1  .2.1.1.1.2=2      index 欄，walk 得到
+  .2.1.1.2.1=1  .2.1.1.2.2=2      status 欄
+
+snmpwalk .1.3.6.1.4.1.8691.602.8.6.2.4
+  .2.4.1.1.1=1  .2.4.1.1.2=2  .2.4.1.1.3=3
+  .2.4.1.2.1=0  .2.4.1.2.2=0
+```
+
+逐步 getnext 顯示斷點只在「踏進一個新的 value file」那一步：
+
+| getnext 起點 | 回傳 | |
+|---|---|---|
+| `.2`（arc root） | `.2.1.1.2.1` | 跳過 system index 整欄 |
+| `.2.1` | `.2.1.1.1.1` | 正確 |
+| `.2.1.1.1.1` | `.2.1.1.1.2` | 同欄內正確 |
+| `.2.1.1.1.2` | `.2.1.1.2.1` | 同一 URI 內跨欄正確 |
+| `.2.1.1.2.2` | `.2.2.1.2.1` | 跨到 poe，又跳過 poe index 整欄 |
+| `.2.4.1.1.1` | `.2.4.1.1.2` | 正確 |
+| `.2.4.1.1.3` | `.2.4.1.2.1` | 正確 |
+
+所以 arc root walk 應該有 14 筆（4 表 × 2 欄，relay status 只有 2 列），實際 7 筆。
+被吞掉的 7 筆 index OID 用 `snmpget` 全都拿得到值。
+
+## 成因
+
+**觸發點：`ies_auto_mibs_handle_file_buffer.c:224-227`**
+
+```c
+if ( req_oid_len <= fileBuf_ctrl->table_oid_len )
+{
+    if ( memcmp(req_oid_list, fileBuf_ctrl->table_oid_list,
+            sizeof(oid) * ( fileBuf_ctrl->table_oid_len - 1) ) == 0 )
+    {   // 回傳 entry_pool[first_entry_index].file_oid_pool[0]
+```
+
+這條分支的註解寫明是為 `reqOID(tableOID + '0', mxView) with getNext` 準備的，要回傳
+第一欄第一列。`table_oid_len` 由 `util_table_snapshot_setup()` 傳
+`entry->oid_len - 1` = **13**，所以 memcmp 比 **12** 個 subid；而 arc root 的 request
+只有 **11** 個 subid。比對長度超過 request 本身，永遠不相等 → 這條路徑對 arc root
+形同不存在 → 落到 `entry_handle_exception()`。
+
+`first_entry_index` 的設定（同檔 `:97-101`）是 value file 裡**第一行的欄號**；
+generator 先寫 index 欄再寫 status 欄，所以它會是 1。意圖很清楚是要回 index 欄。
+
+**放大成「跳過整欄」：`ies_auto_mibs.c:1861-1869`**
+
+```c
+next_subtree = netsnmp_subtree_find_prev( req_oid, req_oid_len, NULL, NULL );
+while( next_subtree &&
+       snmp_oid_compare(next_subtree->name_a, next_subtree->namelen,
+                        reginfo->rootoid, reginfo->rootoid_len) <= 0 )
+{
+    next_subtree = next_subtree->next;
+}
+```
+
+`<= 0` 會把**目前這棵 subtree 自己也跳過**。註冊是 per-column 的
+（`moxa_snmp_handle_util.c:206-210`，用 `entry->oid_list` + `entry->oid_len` = 14
+subid = table arc + 欄號），所以 `.2.1.1.1`、`.2.1.1.2`、… 共 8 棵 subtree。
+
+`getnext .2` 被 net-snmp 派給 `.2.1.1.1`（system index 欄）→ 檔案查找失敗 →
+exception → 跳過所有 `<= .2.1.1.1` 者、含自己 → 落在 `.2.1.1.2`（status 欄）→
+用 `MIB_HANDLER_AUTO_NEXT_OVERRIDE_ONCE` 轉呼叫，回 `.2.1.1.2.1`。與觀察吻合。
+
+**沒追完的部分**：跨表那一跳（`.2.1.1.2.2` → 實際 `.2.2.1.2.1`）照上述機制推應該落在
+`.2.2.1.1.1`（poe index），實際又多跳一欄。嫌疑是 `gfileBufCtrlBlock` 是**單一全域**、
+一次只裝一張表的 file buffer，但未經驗證。這一點不影響「這是缺陷不是設計」的結論。
+
+## 判定（2026-08-05 更正）
+
+**先前判定「缺陷、不是刻意」是錯的。walk 的行為符合 MIB。**
+
+查 `snmp_moxa_mib/private/mxDeviceIo.mib`：
+
+| object | MAX-ACCESS | 行 |
+|---|---|---|
+| `deviceioStatSystemPowerIndex` | `accessible-for-notify` | 125 |
+| `deviceioStatPoePowerIndex` | `not-accessible` | 168 |
+| `deviceioStatDiIndex` | `accessible-for-notify` | 211 |
+| `deviceioStatRelayIndex` | `not-accessible` | 258 |
+| `deviceioStatSystemPowerStatus` | `read-only` | 137 |
+| `deviceioStatPoePowerStatus` | `read-only` | 180 |
+| `deviceioStatDiStatus` | `read-only` | 222 |
+| `deviceioStatRelayStatus` | `read-only` | 265 |
+
+`not-accessible` 與 `accessible-for-notify` 依 SMI 都不得由 GET / GETNEXT 回傳。
+所以照 MIB，這個 arc 只有 4 個 status 欄可取 —— 正是實際 walk 到的那 7 筆。
+
+上面描述的 `<= 0` 機制仍然是實際發生的事，但它產生的結果剛好與 MIB 一致。
+
+**真正與 MIB 牴觸的是反方向**：`snmpget` 對 index 欄回得出值，照 MIB 應該是
+noSuchObject。源頭在 `net_mx_device_io.h` —— 8 個 entry 全宣告成 `HANDLER_CAN_RONLY`，
+包含 4 個 index 欄。ies-auto-mibs 的 entry 表在這裡比 MIB 寬鬆。
+
+enum 則對得上：MIB 的 `off(0) on(1) notApplicable(2)` 與 `open(0) short(1)`，
+與 `gen_value_io_*_status()` 的映射完全一致。
+
+## 對 Plan E Task 6 的影響
+
+framework 只要服務 4 個 status 欄，不要註冊/服務 index 欄。arc root walk 維持 7 筆，
+計畫 Step 4 的 `missing=0 / surplus=0` 照原樣成立，不需要改寫。
+
+in-master 對 index 欄回應 GET 這件事**不複製** —— 那才是與 MIB 不符的那一邊。
+代價是 `snmpget .2.1.1.1.1` 會從「回 1」變成「noSuchObject」，walkdiff 看不到，
+需要在 RESULT-phase3-task6.txt 裡明列。
+
+## 另一件不相干但同時發現的事
+
+`io/relay/` 的 index 欄有 3 列（`.2.4.1.1.{1,2,3}`），status 欄只有 2 列。
+status layer 回的是 `[{"status":"open"},{"status":"open"},null]`，而
+`generate_uri_snmp_table` 的 `gen_value_io_relay_status()`
+（`snmp_script_rust/generate_uri_snmp_table/src/main.rs:2483`）對第三個元素做
+`value_entry.as_str().unwrap()`，在 `null` 上會 panic —— index 迴圈已經把 3 列寫完，
+status 迴圈寫到第 3 列才爆。這是推論，未實際驗證 panic 是否真的發生。

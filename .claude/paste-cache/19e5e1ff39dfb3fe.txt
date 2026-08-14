@@ -1,0 +1,14 @@
+$ journalctl -b 0 | grep -iE "duplicat|overlap|registration|subtree" | tail -20
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/dbus.conf:5: Duplicate line for path "/var/lib/dbus", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/systemd.conf:28: Duplicate line for path "/var/lib/systemd", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/systemd.conf:31: Duplicate line for path "/var/lib/private", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/tmp.conf:11: Duplicate line for path "/tmp", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/tmp.conf:12: Duplicate line for path "/var/tmp", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/var.conf:14: Duplicate line for path "/var/log", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/var.conf:16: Duplicate line for path "/var/cache", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/var.conf:18: Duplicate line for path "/var/lib", ignoring.
+Apr 21 13:52:21 moxa systemd-tmpfiles[132]: /usr/lib/tmpfiles.d/var.conf:20: Duplicate line for path "/var/spool", ignoring.
+Apr 21 14:07:26 moxa systemd-tmpfiles[1202]: /usr/lib/tmpfiles.d/tmp.conf:11: Duplicate line for path "/tmp", ignoring.
+Apr 21 14:07:26 moxa systemd-tmpfiles[1202]: /usr/lib/tmpfiles.d/tmp.conf:12: Duplicate line for path "/var/tmp", ignoring.
+$ snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2.1.1.1
+.1.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = No Such Instance currently exists at this OID

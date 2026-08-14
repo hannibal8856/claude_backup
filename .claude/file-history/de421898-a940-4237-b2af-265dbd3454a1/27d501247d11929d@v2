@@ -1,0 +1,64 @@
+SILENCE?=@
+PROJECT_NAME            =   lib_moxa_ies_auto_mibs
+LIB_NAME                =   libmoxa_ies_auto_mibs
+VERSION                 =   $(shell dpkg-parsechangelog --show-field Version)
+
+# Params define
+PWD                     =   $(shell pwd)
+BUILD_PATH              =   $(PWD)/build
+INCLUDE_DIR             =   $(PWD)/include
+SRC_DIR                 :=  $(PWD)/src
+SOURCES                 :=  $(wildcard $(SRC_DIR)/*.c)
+OBJECTS                 :=  $(SOURCES:$(SRC_DIR)/%.c=$(BUILD_PATH)/%.o)
+
+# The table is compiled from snmpd's own source, so those two directories are
+# on the include path rather than copied here (design doc section 5.1).
+IES_SRC_DIR             ?=  $(PWD)/../3rdparty_net_snmp
+
+# MOXA_DEFS must be the SAME -D set snmpd is built with, or the two entry sets
+# differ silently. It is passed in by lib_moxa_ies_auto_mibs.mk, which takes it
+# straight out of 3RDPARTY_NET_SNMP_CFLAGS - do not add -D flags here, and do
+# not copy that .mk's ifeq conditions into this file. If you are building this
+# library by hand outside Buildroot, get the value from
+# `make printvars VARS=3RDPARTY_NET_SNMP_CFLAGS`.
+MOXA_DEFS               ?=
+
+CFLAGS                  +=  -std=c99                                    \
+                            -I$(INCLUDE_DIR)                            \
+                            -I$(IES_SRC_DIR)/snmp_tools/inc             \
+                            -I$(IES_SRC_DIR)/ies-auto-mibs              \
+                            -fpic                                       \
+                            -D_GNU_SOURCE                               \
+                            $(MOXA_DEFS)
+
+# Back trace parameter define
+BT_FLAGS                = -funwind-tables
+
+# net-snmp is needed for headers only (the oid typedef, HANDLER_CAN_*,
+# SNMP_DATA_TYPE_*); libmoxa_util is needed for LibUtil_DbgTrace, which the
+# shared flag setup calls on its error paths. libnetsnmpmibs must not appear -
+# see the readelf check in the plan's Task 2 Step 5, which applies here too.
+COMMON_LIBS             = -lnetsnmp -lmoxa_util
+
+.PHONY: all
+all: $(BUILD_PATH) $(LIB_NAME).so
+
+$(BUILD_PATH):
+	$(SILENCE)mkdir -p $(BUILD_PATH)
+
+$(OBJECTS): $(BUILD_PATH)/%.o:$(SRC_DIR)/%.c
+	$(SILENCE)$(CC) -c $(CFLAGS) $(BT_FLAGS) -o $@ $<
+
+$(LIB_NAME).so: $(OBJECTS)
+	$(SILENCE)$(CC) -shared $(CFLAGS) $(BT_FLAGS) -o $(BUILD_PATH)/$@ $^ $(COMMON_LIBS)
+
+.PHONY: install
+install: $(LIB_NAME).so
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/lib/
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/include/lib_moxa_ies_auto_mibs
+	$(SILENCE)install $(BUILD_PATH)/$(LIB_NAME).so $(DESTDIR)/usr/lib/
+	$(SILENCE)cp $(INCLUDE_DIR)/lib_moxa_ies_auto_mibs/*.h $(DESTDIR)/usr/include/lib_moxa_ies_auto_mibs
+
+.PHONY: clean
+clean:
+	$(SILENCE)rm -rf $(BUILD_PATH)

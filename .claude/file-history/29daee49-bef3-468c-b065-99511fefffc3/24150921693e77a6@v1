@@ -1,0 +1,1 @@
+dlmod mms_setting /etc/moxa/netsnmp/plugin/plugin_snmp_mms_setting.so

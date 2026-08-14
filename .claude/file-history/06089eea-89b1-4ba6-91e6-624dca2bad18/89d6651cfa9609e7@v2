@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Transform a buildroot Rust package Makefile for by-application clippy scan.
+modes:
+  lib  -> remove rust_clippy_scan recipe block + unhook from all:
+  app  -> convert cargo clippy -> RUSTC_WRAPPER=clippy-driver cargo check inside
+          rust_clippy_scan recipe, drop '# framework' / 'cd framework &&' lines.
+          (--drop-profiling also removes ' --features ${CARGO_FEATURES_PROFILING}')
+  aide -> the recipe body is replaced by the add-app template.
+Line endings (LF/CRLF) are preserved.
+"""
+import sys, re
+
+EOL = '\n'  # set per file in main()
+
+def aide_body():
+    raw = [
+        'ifeq ("${RUST_CLIPPY_SCAN_CONFIG}", "true")',
+        '\t${SILENCE}rm -rf rust_clippy_scan_result',
+        '\t${SILENCE}mkdir -p rust_clippy_scan_result',
+        '\t# app',
+        '\t${SILENCE}cd ${APP_PATH} && RUSTC_WRAPPER=clippy-driver cargo check --release --target=${TARGET}',
+        '\t${SILENCE}cd ${APP_PATH} && RUSTC_WRAPPER=clippy-driver cargo check --release --target=${TARGET} --message-format=json > ${PWD}/rust_clippy_scan_result/${APP}.json',
+        'endif',
+    ]
+    return [r + EOL for r in raw]
+
+def strip_eol(s):
+    return s.rstrip('\r\n')
+
+def find_all_blocks(lines):
+    blocks = []
+    i = 0
+    while i < len(lines):
+        if re.match(r'^\s*all\s*:', lines[i]):
+            idx = [i]; j = i
+            while strip_eol(lines[j]).endswith('\\'):
+                j += 1
+                if j >= len(lines): break
+                idx.append(j)
+            blocks.append(idx)
+            i = idx[-1] + 1
+        else:
+            i += 1
+    return blocks
+
+def find_recipe_block(lines):
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(r'^rust_clippy_scan\s*:', ln):
+            start = i; break
+    if start is None: return None
+    for j in range(start + 1, len(lines)):
+        if re.match(r'^endif\b', lines[j]):
+            return (start, j)
+    return None
+
+def unhook_all(lines):
+    to_delete = set()
+    for idx in find_all_blocks(lines):
+        for k in idx:
+            body = strip_eol(lines[k])
+            cont = body.endswith('\\')
+            core = body[:-1] if cont else body
+            if core.strip() == 'rust_clippy_scan':
+                to_delete.add(k)
+                prev = None
+                for p in idx:
+                    if p < k and p not in to_delete: prev = p
+                if prev is not None:
+                    pc = re.sub(r'\s*\\\s*$', '', strip_eol(lines[prev]))
+                    lines[prev] = pc + EOL
+            elif re.search(r'\brust_clippy_scan\b', core):
+                newcore = re.sub(r'\s+rust_clippy_scan\b', '', core)
+                if newcore == core:
+                    newcore = re.sub(r'rust_clippy_scan\b\s*', '', newcore)
+                lines[k] = newcore + ('\\' if cont else '') + EOL
+    return [ln for n, ln in enumerate(lines) if n not in to_delete]
+
+def remove_recipe(lines):
+    blk = find_recipe_block(lines)
+    if not blk: return lines
+    s, e = blk
+    end = e
+    if end + 1 < len(lines) and lines[end + 1].strip() == '':
+        end += 1
+    return lines[:s] + lines[end + 1:]
+
+def transform_lib(lines):
+    return remove_recipe(unhook_all(lines))
+
+def transform_app(lines, drop_profiling=False):
+    blk = find_recipe_block(lines)
+    if not blk: return lines
+    s, e = blk
+    out = []
+    for n in range(len(lines)):
+        if n < s or n > e:
+            out.append(lines[n]); continue
+        ln = lines[n]
+        if re.search(r'#\s*framework', ln): continue
+        if 'cd framework &&' in ln: continue
+        ln = ln.replace('cargo clippy', 'RUSTC_WRAPPER=clippy-driver cargo check')
+        if drop_profiling:
+            ln = ln.replace(' --features ${CARGO_FEATURES_PROFILING}', '')
+        out.append(ln)
+    return out
+
+def transform_aide(lines):
+    blk = find_recipe_block(lines)
+    if not blk: return lines
+    s, e = blk
+    return lines[:s] + ['rust_clippy_scan:' + EOL] + aide_body() + lines[e + 1:]
+
+def main():
+    global EOL
+    mode = sys.argv[1]; path = sys.argv[2]
+    drop_prof = '--drop-profiling' in sys.argv[3:]
+    with open(path, newline='') as f:
+        lines = f.readlines()
+    EOL = '\r\n' if any(l.endswith('\r\n') for l in lines) else '\n'
+    if mode == 'lib':   out = transform_lib(lines)
+    elif mode == 'app': out = transform_app(lines, drop_prof)
+    elif mode == 'aide':out = transform_aide(lines)
+    else: sys.exit('bad mode')
+    with open(path, 'w', newline='') as f:
+        f.writelines(out)
+
+if __name__ == '__main__':
+    main()

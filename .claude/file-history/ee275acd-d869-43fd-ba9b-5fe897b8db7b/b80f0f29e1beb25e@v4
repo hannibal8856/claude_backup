@@ -1,0 +1,221 @@
+# Handoff — SNMP Plan E(2026-08-12,session "snmp-plan-E reopen 5")
+
+接續 `~/handoff-snmp-plan-E-2026-08-10.md`。**本輪主軸:fiber_check_event 搬遷完成 + 證據保存紀律。**
+
+---
+
+## 🔴 接手第一件事:DUT 停在 **p1**,而這代表什麼
+
+交接當下實測:
+
+```
+fwrbootpart = 1     BUILD_TIME = 2026_0812_1136   (本輪成果)
+bind mount  = 0     dlmod 啟用 = 32
+/tmp        = 有 1 個 fwdcheck.pcap(背景任務仍在跑,見下)
+```
+
+**⚠️ 這個狀態下燒錄會寫進 p2,覆蓋掉 mainline 對照組 `2026_0805_2335`。**
+swupdate 永遠寫「你沒在跑的那一邊」。**要燒錄必須先切到 p2**:
+
+```
+printf 'Y\nY\n' | /moxa/fwr_change.sh      # 等 uptime > 200s
+# 然後 stage 1 必須顯示 will WRITE: partition 1
+#                    且 control: running the expected control group
+```
+
+**⚠️ 有一個背景任務可能還在跑**(`fwdcheck.sh`,見「唯一還在跑的」那節)。
+它會用 `/tmp/fwdcheck.pcap`。**在它結束、pcap 取回 `~/pcap/` 之前,不要清 `/tmp`** ——
+本輪就是「交還前清 `/tmp`」這條規則銷毀了六次判定的證據。
+
+| partition | image | 角色 |
+|---|---|---|
+| 1 | `2026_0812_1136` | **本輪成果**,fiber_check_event 已搬遷並驗證 |
+| 2 | `2026_0805_2335` | mainline 對照組,**不可覆蓋** |
+
+`~/swu/` 有 `2026_0811_1349`(CIC 3 的頭條數字來源)與更早的備份。
+
+---
+
+## 本輪完成:fiber_check_event 搬到 framework(ADR-0029)
+
+| repo | commit | 內容 |
+|---|---|---|
+| `3rdparty_net_snmp` | `d4e35b8` | `net_mx_event_port.h` 加 group `.6` 的 8 筆 entry(80 → 88) |
+| `plugin_moxa_fiber_check` | `f9164c3` | `fiber_check_event.conf` 的 dlmod 行註解掉 |
+| `moxabuild` | `3f94a11` | ADR-0029 |
+
+兩個 code repo 在 `snmp-plan-E`,**未 push**。
+
+**關鍵發現**:它不是獨立子系統,是 **evtPort 那張表的第 6 組**。framework 已服務其餘九組,
+形狀逐位元組同型 → 不需要新註冊、新機制、也不需要移植取值邏輯。
+
+**驗收(全部通過)**:欄位 73 → **74**(新增只有 `.6.3.1.1`×12,消失 0);
+`fwdcheck` net TARGET/POSITIVE = **91%** SERVED BY framework;SET 真寫真讀 + index 欄
+正確 `notWritable`;dlmod 啟用 **33 → 32**。
+
+⚠️ **74 不是「多了 8 個功能」**,是「7 欄換了服務者 + 1 欄補回宣告過但從沒回過的物件」。
+
+---
+
+## ✅ 量測已全部完成(DUT 已切回 **p1**)
+
+### A → B → A2 交錯(`.1.3.6.1.4.1.8691.602.7.1.2.1`,各 9 輪)
+
+| 臂 | image | varbinds | **欄位** | median |
+|---|---|---|---|---|
+| A | Plan E `0812_1136`(擷取中) | 294 | **74** | 1.281s |
+| B | mainline `0805_2335` | 138 | **49** | 1.207s(walkpcap 版 1.222s) |
+| A2 | Plan E `0812_1136` | 294 | **74** | 1.299s |
+
+`|A − A2| = 1.4%`(重複性),`|A2 − B| = 7.1%`(效應)→ **效應約重複性的 5 倍,數字可用**。
+
+**正確講法**:不是「Plan E 比較慢」,而是
+
+| | mainline | Plan E |
+|---|---|---|
+| MIB 欄位 | 49 | **74(+51%)** |
+| 牆鐘時間 | 1.207s | 1.299s(+7.1%) |
+| **每 varbind** | 8.75 ms | **4.42 ms(快 2 倍)** |
+
+⚠️ 這是**跨 image 對照軸**,不是 CIC 3 文件裡那組同一顆 image 的 bind mount 單一變數對照。
+**兩者不可互相覆蓋。**
+
+⚠️ **我先前說「mainline 的 evtPort walk 約 37 秒」是錯的** —— 那是 ADR-0018 用 bind mount
+把 evtPort 強制註冊回 in-master 的實驗值,不是 mainline 自己的行為。實測 1.207s。
+
+### 唯一還在跑的:fiber_check_event 的 fwdcheck
+
+輸出在 `/tmp/claude-1000/.../tasks/bacd07o1e.output`(背景任務)。
+前一次同樣參數的結果是 **net TARGET/POSITIVE = 91%,SERVED BY framework**,
+本次只是為了留存 pcap。若該檔沒有產出,重跑:
+
+```
+~/.claude/skills/measure-snmp-walk/fwdcheck.sh \
+  .1.3.6.1.4.1.8691.602.7.1.2.1.6.1.0 \
+  .1.3.6.1.4.1.8691.603.3.4.1.1.0 \
+  .1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1 \
+  150 15 app_moxa_framew fiberCheckEvent
+```
+
+## 🔴 未完成的工作 —— 只剩文件(4 步)
+
+**優先順序**:9 → 6 → 7 → 8。第 9 步(通知 CIC 3)最急,因為他在等數字才能定稿簡報;
+第 6、7 步是把證據綁進紀錄,錯了比沒寫更貴。
+
+### 文件
+
+6. **ADR-0029 補上 pcap 檔案路徑**(驗收段落引用了證據,證據要有位址)
+7. **修訂 ADR-0027 ④**:交還前**先取回證據,再清 `/tmp`` ——
+   那條「清乾淨」的規則正是本輪銷毀六次 pcap 的直接原因
+8. **memory**:pcap 留存紀律(檔名格式 + `.tcpdump.log` sidecar)
+9. **通知 CIC 3 三個中位數**(A / B / A2)並標明**這是跨 image 對照軸**,
+   不可覆蓋他文件裡原本那組 bind mount 單一變數對照
+
+---
+
+## 已完成的 artifact(`~/pcap/`)
+
+```
+2026-08-12-evtPort-A-2026_0812_1136.pcapng               2.2 MB / 11,283 packets
+   ⚠️ 缺 .tcpdump.log(用了修正前的腳本)
+2026-08-12-evtPort-B-mainline-2026_0805_2335.pcapng      48 B / 0 packets(如預期為空)
+2026-08-12-evtPort-B-mainline-...pcapng.tcpdump.log      ⚠️ 只有起始行,見下
+2026-08-12-agentx-sessions-2026_0805_2335.txt            mainline:兩個 ss 查詢皆空
+2026-08-12-agentx-sessions-2026_0812_1136.txt            Plan E:LISTEN + 2 條 subagent session
+```
+
+檔名格式(使用者指定):`<測試日期>-<feature>-<image build date>.pcapng`,
+另存同名 `.tcpdump.log` sidecar。
+
+⚠️ **sidecar 目前是殘缺的**:只有
+`tcpdump: listening on lo, link-type EN10MB, snapshot length 262144`,
+**沒有 `N packets captured / 0 dropped by kernel` 的結尾摘要** —— 那行是 tcpdump
+**退出時**才印,而腳本在它完全退出前就 scp 了。
+→ **證明了擷取有正確啟動,但沒有證明無遺漏。** 這是待修的缺陷:
+scp `.err` 之前要確認 tcpdump 已結束(等 `-G` 期滿再多留幾秒,或改用會印摘要的終止方式)。
+
+對 mainline 這一份影響不大 —— `ss` 顯示 **705 根本沒有 listener**,結構上不可能有流量,
+那比 sidecar 更強。但一般案例不能靠這個。
+
+---
+
+## 🔴 本輪最重要的發現:mainline 完全沒有 AgentX
+
+實測 `2026_0805_2335`:
+
+```
+ss -tnp  | grep -c ":705"          →  0      一條 ESTABLISHED 都沒有
+ss -tlnp | grep -E ":(161|705)"    →  (空)   705 根本沒在 listen
+ISS.exe 1 個、snmpd 2 個都在跑
+```
+
+對照 p1 Plan E:`ISS.exe` 與 `app_moxa_framew` 各一條連到 `:705`。
+
+→ **不是「1 條 → 2 條」,是「0 條 → 2 條」。** AgentX subagent 模式是 **Plan E 才啟用的**。
+
+CIC 3 後續查證確認:ISS 預設是 standalone agent 綁 UDP 161,AgentX subagent 預設 DISABLE,
+且兩者在 `fssnmp3lw.c:84-85` **互斥**。
+
+**這使簡報有四處寫錯**(CIC 3 已列出 L197 / L216 / L383 / L1006),
+把「ISS 原生支援 AgentX」的**能力**寫成**既有組態**。
+「不需要新增傳輸層元件」仍成立,「本來就在運作」不成立。
+另外 ISS 端那 15 檔 / +249 −64 被寫成「既有實作的缺陷修正」也是低估 ——
+其中含「組態轉換」與「開機自動啟用」兩類新增行為。**CIC 3 會列給使用者裁示,不擅自改。**
+
+---
+
+## 本輪修掉的四個 harness 缺陷
+
+1. **跨 package header 不觸發 `lib_moxa_ies_auto_mibs` 重編**,而且**錯的那個 `.so` 會通過檢查**
+   → memory `project_cross_package_header_no_rebuild`。第一次建置 `make` exit 0、
+   `libnetsnmpmibs.so` md5 變了、字串 8 筆全過關,但那是 in-master 的**死碼**那側;
+   `libmoxaiesautomibs.so` md5 完全沒變。**燒下去會看到 `No Such Object`,
+   而最自然的解讀是「map 寫錯」。**
+   修法:`rm output/build/lib_moxa_ies_auto_mibs-custom/src/*.o` + `touch src/mapping_reuse.c`。
+2. **`fwdcheck.sh` 的 `TARGET/NEGATIVE` 判準不會隨 N 改善** —— 背景隨**時間**累積、
+   burst 長度隨 N 等比增加。已改為以負對照當背景估計、扣除後比 `TARGET/POSITIVE`
+   (≥50% SERVED,≤10% NOT SERVED)。回套先前兩次結論不變。
+3. **`fwdcheck.sh` 寫死只看 ISS stream** → 加 `PEER` 參數(`ISS` / `app_moxa_framew`)。
+   問「framework 有沒有服務」時用錯 peer 會得到假的否定。
+4. **pcap 沒有留存** → `fwdcheck.sh` / 新增的 `walkpcap.sh` 現在會自動 scp 回 `~/pcap/`
+   並轉成 `.pcapng`,同時保留 `.tcpdump.log`。
+
+⚠️ **`walkpcap.sh` 有一個已知瑕疵**:結尾清理那步的 expect 會卡住(背景 expect 佔住 session),
+**但檔案已經產生且正確**。看到它卡住不要重跑,先去 `~/pcap/` 確認檔案在不在。
+
+---
+
+## 遺留問題(未處理)
+
+- **evtPort 的 `.10`/`.11`(`ringProtectEvent`)共 14 欄宣告但無人服務**,既有缺口。
+  任何「evtPort 完整性」敘述要寫 **宣告 88 / 實際 74**。
+- **`plugin_moxa_system_information` 的 `.conf` 註解是錯的** —— 宣稱
+  「now owned by the app_moxa_framework AgentX subagent」,但它服務的六個 OID
+  (`sysDescr`/`sysContact`/`sysName`/`sysLocation` + `.602.1.1.1.{1,6}.0`)
+  **沒有一個在任何 `net_*.h` map 裡**。實測都還回得出值(`sysName` 與 `.602.1.1.1.6.0`
+  回 `"moxa"`,其餘四個回空字串),所以不是失服,但**服務者不是 framework,去向未確認**。
+  那四個空字串是不是 regression,要跟 mainline 比才知道。
+  另外 `status_system_information.conf` 的 dlmod **仍載入**。
+- **task #1**:mxTurboRingV2 的 GETNEXT 交給 net-snmp helper —— 使用者裁示**等架構穩定再做**。
+  評估已完成(選項 C 漸進),重點是 **ADR-0009 的 3.9s 不是否決 IterTable 的證據**。
+- `trustedIpTable` / `l3VlanIfTable` 已證實**已註冊但被 in-master 遮蔽**(封包證據,TARGET=0);
+  `snmpTrapHostTable` **驗不了**(沒有任何列,要先建一列才有 instance 可 GET)。
+
+---
+
+## 跨 session 協作(ADR-0027,本輪又觸發兩次)
+
+- **同名 session**:`ListAgents` 上曾同時有兩個 `snmp-plan-E reopen 5`
+  (`[d796d9]` 舊位址殘留、`[d1970d]` 才是活的)。**一律用 `from=` 的 `uds:` 位址回覆**,
+  而且 ref 要是「這一次」讀到的。
+- **用推論推翻量測**:CIC 3 用「ISS 原生支援 AgentX」去更正我的 `ss` 實測,
+  結果是他錯。**量測優先於推論,推論的前提要先查證。**
+
+## 本輪我自己犯的錯(都被抓回來了,但值得記)
+
+1. **不同基準相減** —— 推算搬遷後 81 欄,實際 74。錯在把「已經算在 73 裡的 7 欄」重複加。
+   同一天我已經對別人指出過兩次這個錯誤。
+2. **同一段話內自相矛盾** —— 寫了「兩組合計缺 14」,下一句寫成「落差 7」。
+3. **`ifmibdb/` 已驗證轉發** —— 把 ADR-0014 的「必須用 pcap 驗」(**要求**)讀成
+   「已驗過」(**結果**),並散播給兩個 session。已由 ADR-0028 收回。
+4. **銷毀證據** —— 六次 pcap 判定的擷取檔全刪,只剩數字。

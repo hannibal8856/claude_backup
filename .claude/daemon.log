@@ -1,0 +1,30 @@
+[2026-08-04T02:43:49.464Z] [supervisor] ─── daemon start ─── version=2.1.221 pid=4078082 origin=transient
+[2026-08-04T02:43:49.480Z] [supervisor] auth: scheduling proactive refresh in 16836s
+[2026-08-04T02:43:49.488Z] [supervisor] auth: scheduling proactive refresh in 16836s
+[2026-08-04T02:43:49.491Z] [supervisor] workers=0
+[2026-08-04T02:43:49.557Z] [bg] bg: control socket bound at /tmp/cc-daemon-1000/1ce7a644/control.sock
+[2026-08-04T02:43:49.604Z] [bg] bg spawned 8cfed5d8 (slash)
+[2026-08-04T02:43:49.611Z] [bg] bg spare spawned host pid=4078102
+[2026-08-04T07:24:25.451Z] [supervisor] auth: proactive refresh starting
+[2026-08-04T07:24:25.904Z] [supervisor] auth: scheduling proactive refresh in 28560s
+[2026-08-04T07:24:25.904Z] [supervisor] auth: proactive refresh succeeded
+[2026-08-04T15:20:25.890Z] [supervisor] auth: proactive refresh starting
+[2026-08-04T15:20:26.333Z] [supervisor] auth: scheduling proactive refresh in 28560s
+[2026-08-04T15:20:26.333Z] [supervisor] auth: proactive refresh succeeded
+[2026-08-04T22:44:52.256Z] [supervisor] binary at /home/moxa/.local/bin/claude changed (/home/moxa/.local/share/claude/versions/2.1.221 → /home/moxa/.local/share/claude/versions/2.1.222) — self-restarting for upgrade
+[2026-08-04T22:44:52.262Z] [supervisor] shutting down (cause=upgrade, uptime=72063s, leases=0, live_workers=1)
+[2026-08-04T22:44:52.560Z] [supervisor] ─── daemon start ─── version=2.1.222 pid=2375887 origin=transient
+[2026-08-04T22:44:52.574Z] [supervisor] auth: scheduling proactive refresh in 1894s
+[2026-08-04T22:44:52.575Z] [supervisor] auth: scheduling proactive refresh in 1894s
+[2026-08-04T22:44:52.577Z] [supervisor] workers=0
+[2026-08-04T22:44:52.591Z] [bg] bg: control socket bound at /tmp/cc-daemon-1000/1ce7a644/control.sock
+[2026-08-04T22:44:52.611Z] [bg] bg adopt: adopted=1 respawned=0 dead=0
+[2026-08-04T22:44:52.614Z] [bg] bg orphan-spare reap: 1
+[2026-08-04T22:44:52.627Z] [bg] bg spare spawned host pid=2375916
+[2026-08-04T22:45:07.644Z] [bg] bg: post-takeover prewarm burst — respawned 0/1 stale workers, 1 refused in 0s
+[2026-08-04T23:16:26.326Z] [supervisor] auth: proactive refresh starting
+[2026-08-04T23:16:27.694Z] [supervisor] auth: scheduling proactive refresh in 28560s
+[2026-08-04T23:16:27.695Z] [supervisor] auth: proactive refresh succeeded
+[2026-08-05T07:12:27.688Z] [supervisor] auth: proactive refresh starting
+[2026-08-05T07:12:28.062Z] [supervisor] auth: scheduling proactive refresh in 28560s
+[2026-08-05T07:12:28.062Z] [supervisor] auth: proactive refresh succeeded

@@ -1,0 +1,215 @@
+# nos-cc-skill
+
+Claude Code plugin for Moxa NOS buildroot development — build, commit, GitLab workflow, codebase research, event log generation, BR2 feature-flag gating, and the **nos-sdd-\*** SDD document family (requirements / design / test specs, implementation orchestration, chain router).
+
+## Prerequisites
+
+- [Claude Code](https://claude.ai/code) installed and working
+- Git credentials (SSH key or HTTPS token) with access to this GitLab repo
+- Python 3 with `pyyaml` module (required by `nos-workflow.py`)
+
+## Install
+
+Run these two commands inside a Claude Code session:
+
+```
+/plugin marketplace add git@gitlab.com:moxa/sw/switch/personal/miles.chen.switch/nos-cc-skill.git
+/plugin install nos-cc-skill@nos-cc-skill
+```
+
+If SSH doesn't work, use HTTPS instead:
+
+```
+/plugin marketplace add https://gitlab.com/moxa/sw/switch/personal/miles.chen.switch/nos-cc-skill.git
+/plugin install nos-cc-skill@nos-cc-skill
+```
+
+### Verify
+
+After installing, restart Claude Code and run `/plugin`. You should see:
+
+```
+nos-cc-skill@nos-cc-skill
+  Version: <current version>
+  Scope: user
+  Status: enabled
+```
+
+## Update
+
+```
+/plugin update nos-cc-skill
+```
+
+Claude Code also auto-updates plugins at startup. For background auto-updates on private repos (no interactive prompt), set a GitLab token in your shell profile:
+
+```bash
+# ~/.bashrc or ~/.zshrc
+export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+```
+
+The token needs at least `read_repository` scope.
+
+## Uninstall
+
+```
+/plugin uninstall nos-cc-skill@nos-cc-skill
+```
+
+## Skills Included
+
+### nos-build-buildroot
+
+Build and verify buildroot packages via Docker containers. Detects the project environment, derives the container name, selects build strategy (rebuild/dirclean/clean), and handles Rust framework dependencies.
+
+**Triggers automatically** when you finish code changes and want to verify compilation.
+
+### nos-commit
+
+Staging-verified commit workflow. Surveys changes, groups by area, confirms scope, stages explicitly, verifies staging, then generates a commit message with issue prefix auto-detection from the GitLab workflow manifest.
+
+**Invoke with:** `/nos-commit`
+
+### nos-gitlab-workflow
+
+Orchestrates GitLab issues and MRs for multi-repo NOS changes. Three workflows:
+- **Create** — new main issue + per-repo sub-issues + MRs
+- **Add Repo** — add repos to an existing main issue
+- **Update** — new MR after a previous one was merged
+
+Uses a persistent manifest (`nos-workflow.py`) to track state across sessions.
+
+#### Active-issue commands
+
+The skill uses a HEAD-style active pointer (`_active.yaml`) so every command always
+acts on the issue you explicitly selected. There is **no fallback guess** — if the
+pointer is absent or broken, the command gates and lists open candidates instead of
+picking the highest-numbered one silently.
+
+| Command | Description |
+|---|---|
+| `$WF active` | Print the active issue number (exit 3 if unset/dangling, exit 6 if closed) |
+| `$WF set-active <N>` | Set #N as the active issue; omit N to list candidates with `[active]` tag |
+| `$WF close <N> [--force]` | Sync → verify no open MRs → close #N on GitLab → clear the active pointer |
+| `$WF local-only` | Print repo IDs excluded from GitLab tracking (from `.claude/workflow/local-only.yaml`); the skill drops these from issue/MR scope silently |
+
+**Triggers automatically** when you need to create GitLab issues/MRs for multi-repo changes.
+
+### nos-research
+
+Structured NOS/ISS codebase investigation with three modes:
+
+- **Full research** — End-to-end feature investigation with 4 phases: scope entry points, trace paths with parallel agents, document with mermaid diagrams and gap analysis, interactive review. Produces a research doc.
+- **Quick trace** — Single-path question or debug lookup. Inline answer with file paths and evidence, no doc.
+- **Codebase + external** — Codebase trace first, then web search for vendor/industry comparison.
+
+Identifies process boundaries (moxashell/framework/ISS), enforces skip rules for deprecated code. Ships an architecture navigation map ([`references/architecture.md`](skills/nos-research/references/architecture.md)) of NOS-generic source-tracing traps as four generating principles (build-selected live variant · config's persisted home · representation shifts across layers · ISS multi-threading).
+
+**Invoke with:** `/nos-research <topic>` or triggers automatically during codebase investigation.
+
+### nos-eventlog
+
+Generate verified, accurate event log lists for NOS switch products. Uses a **tiered acceleration system** to classify events by verification cost:
+
+- **Tier 1** — 30 always-supported events (zero verification)
+- **Tier 2** — ISS module events determined by SW_PACKAGE (one check)
+- **Tier 3** — Single-flag-gated groups (one `.config` flag per group)
+- **Tier 4** — Unknown/new events only (full trigger-code verification)
+
+Produces two documents:
+- **Internal doc** — Event IDs, CEF data, source traceability, Not Supported section with reasons
+- **Customer-facing doc** — Simplified table with severity and message
+
+**Invoke with:** `/nos-eventlog` or triggers automatically when you mention event logs, syslog events, or CEF event IDs for NOS products.
+
+### nos-repos
+
+Multi-repo git operations across a NOS buildroot workspace (buildroot root + `dl/*` + moxa). One pure-bash script, no LLM. Subcommands:
+
+- **status** — one cross-repo table (STATE, BRANCH, BASE, AHEAD, BEHIND, DIRTY, latest title). DIRTY shows staged/unstaged counts: `S (2)` / `U (47)` / `SU (2/47)`. Offline by default; AHEAD is computed locally, BEHIND only with `--fetch`/`--behind`. Attention filters `--dirty`/`--ahead`/`--behind` (OR-combined); `--porcelain` for tab-separated L2 input.
+- **diff** — raw `git diff` / `git log` vs base for selected repos (`--dirty` for uncommitted, `--base <ref>` for commits vs base).
+- **fetch** — update remote-tracking refs; non-zero exit on any failure.
+- **rebase** — `--auto` (per-repo `.config` target) fetches first and aborts the whole run if any fetch fails; or explicit `rebase <onto>`. Skips dirty (unless `--autostash`) and in-progress repos; fail-fast on conflict unless `--continue-on-conflict`.
+- **checkout** — switch all in-scope repos to `<branch>`, skipping dirty/in-progress; `NO-BRANCH` where the branch is absent.
+- **target** — resolve a repo's target branch from `buildroot/.config` (`BR2_PACKAGE_<NAME>_REV`) or `develop` fallback.
+
+Input is always a repo list: discovery default, `--scope all|dl|<csv>`, or positional IDs — never a manifest. Mutating commands print a plan and confirm unless `--yes` (which requires explicit `--scope`).
+
+**Invoke with:** `bash ${CLAUDE_PLUGIN_ROOT}/skills/nos-repos/nos-repos.sh <subcommand>` from inside the workspace, or triggers automatically when you ask about repo status, what changed across repos, or rebasing all repos.
+
+### nos-feature-flag
+
+Gate a buildroot capability behind a `BR2_*` Kconfig flag so a product line can build it in or out with **zero behavior/install difference when off**. Distinguishes the two NOS gating layers (Buildroot package vs. Rust framework feature) and gives ordered checklists + copy-paste templates for:
+
+- **Pattern A** — a fine-grained behavior diff inside an existing package (C `-D`/`#ifdef`, or the Rust cargo-feature forwarding chain `rust_moxa_build.mk` → `app_moxa_framework` → `plugins_moxa_framework` → plugin crate + dummy script).
+- **Pattern B** — a brand-new optional package (B1 framework-integrated plugin, or B2 standalone daemon).
+
+Includes the multi-package umbrella-flag variant (e.g. LDAP across several crates), a footguns list (`select` vs `depends on`, dead `Config.in`, `default n`, `savedefconfig`, dummy-package script), and both-flag-state verification.
+
+**Triggers automatically** when adding or isolating a feature behind a BR2 flag.
+
+**Which nos-sdd-\* to invoke**: vague or state-based ask ("start feature X", "where is X") → `nos-sdd-workflow`; explicit document ask ("review the SRS", "write the STS", "update the api contract") → that document's skill directly; implementation → `nos-sdd-develop`, only after the SDS (with Stages) and STS v1 exist.
+
+### nos-rust-clippy
+
+Convert Rust Clippy scanning from **per-package** to **per-application**, and roll the resulting per-repo changes out as GitLab issue+branch+MR.
+
+A library scanned standalone has no `Cargo.lock`, so cargo re-resolves to the latest crates and demands a newer rustc — the scan fails under a pinned rustc even though `make <pkg>-rebuild` passes. The fix: scan only BIN crates, and have each application lint its whole local dependency closure via `RUSTC_WRAPPER=clippy-driver cargo check`, so the application's lock governs its libraries. (`cargo clippy -p <path-dep>` does not work — it prints `Checking` without running clippy.)
+
+Covers app/lib classification, the dl `Makefile` and `${moxa}` `.mk` edits, the `post-build.sh` coverage gate, verification, application `Cargo.lock` sync, and mass MR creation (`scripts/`, DRY-RUN by default) with the pre-flight checks that catch silent reverts and skipped repos.
+
+**Triggers automatically** on a Clippy scan failing under a pinned rustc, on bringing a new product branch onto by-application scanning, or on mass-creating the per-package MRs.
+
+### nos-interview
+
+The single pre-contract **settlement interview** entry point for NOS skills — a self-contained three-arm interview (vocabulary term sheet / falsifiable map laydown + human extraction / territory) specialized for the NOS buildroot domain. It keeps an AI-side laydown (not questioning-only), renders a `## Consensus` section, publishes consequence probes, and terminates at a readiness ruling.
+
+- **NOS base-domain layer (always on)** — pre-seeds a small NOS-buildroot term sheet, supplies a base verdict vocabulary (`settled` / `needs-workshop` / `blocked-by-syrs`), and realizes the territory arm as a research subagent dispatch (carrying nos-research's rules + the grounding/citation discipline) so repo facts are looked up, never asked of the human.
+- **Optional domain pack (four slots, each independently optional)** — a caller customizes the interview without forking it: question bank (slot 1) + priority order (slot 2) inject into extraction, verdict vocabulary (slot 3) overrides the base set, and a record sub-section (slot 4) **appends** after the fixed record skeleton. A slot that tries to overwrite/reorder a fixed section, or a malformed slot, is rejected with a surfaced error — never silently ignored.
+- **Output is a confirmed-facts source** — the record's `## Consensus` (with per-fact `[trace: …]`) + `## Readiness ruling` satisfy the shared confirmed-facts-source contract, so a downstream contract author derives facts without re-eliciting them.
+
+Chain-called by `nos-sdd-req`'s settlement loop; dependencies are one-way (`nos-sdd-req → nos-interview → nos-research`, no cycle).
+
+**Invoke with:** `/nos-interview` or triggers on "settle this", "settlement loop", "interview before spec", "run the settlement interview".
+
+### nos-sdd-req
+
+Spec-time **generate / revise / review** for NOS requirement documents — **SyRS and SRS** (SAS/SDS/STS are a future sibling skill). Not an implementation-coverage check (that's the STS's job). Generation and revision are review-driven: interview / apply decisions → draft or edit (with cascade checklist: renumbering → cross-refs, renames → all surfaces, History rows, downstream sync) → self-review with the same checks → deliver.
+
+- **SyRS review** — 9 commitment-quality checks (decided, right scope, testable, stated once, market-grounded — full list in `SKILL.md`). Output: Blocking gaps / Decisions needed / Non-blocking cleanup; verdict `settled` / `settle-after-answers` / `needs-workshop`.
+- **Settlement loop** — SyRS generation, and the escalation when a SyRS is absent or unsettled, **delegate to `nos-interview`** (the shared settlement interview). nos-sdd-req supplies its SDD domain pack (the settlement question bank + gap-question priority order + `DECISION`/`ASSUMPTION` clarification-record format from `references/review-examples.md`) and consumes the interview's consensus + verdict, keeping only its SDD-specific concerns: SyRS-first ordering, and the tracked-assumption output (user-answered decisions vs engineering assumptions, never silent guesses).
+- **SRS review** — gated on a settled SyRS — review degrades to a limited pre-review capped at `blocked-by-syrs`; generation is refused (or delivered only as a marked provisional draft). Nine ordered passes (0–8): template completeness (sections exist even if N/A, and N/A must be true) → platform-default pruning → single-home + conciseness → section roles → numbering/traceability/commitment → terminology → value-space honesty → testability → sibling alignment + genuine gaps. Deletion-biased with anti-inflation guards. Output: Delete/Consolidate / Correctness/Ambiguity / Add; objective verdict mapping (`ready` / `ready-after-deletes` / `needs-revision` / `blocked-by-syrs`).
+
+Findings map to the five review dimensions (consistency / conciseness / correctness / relatedness / readability) with a per-dimension coverage note in the verdict. Worked examples and the settlement question bank are in `references/review-examples.md`.
+
+**Invoke with:** `/nos-sdd-req` or triggers on "review syrs/srs", "write syrs/srs", "revise/update syrs/srs", "requirements review".
+
+### nos-sdd-design
+
+Generate / revise / review **SAS and SDS** (gated on a settled SRS, else `blocked-by-srs`). SAS is optional by default — written only for genuinely architectural features; skipped means the SDS opens with a brief Architecture Overview. Core checks: WHAT→WHERE→HOW level discipline (no SAS/SDS duplication — every fact has one home), **no code-recoverable detail in the SDS** (code is the source of truth; keep contracts, constraint/classification tables, rationale), **`## Implementation Stages` mandatory** (Scope / Done when / Depends on — no separate implementation-plan doc), reuse-first, open items code-gated, no spec IDs destined for code. Same three-bucket output and verdict mapping as nos-sdd-req.
+
+**Invoke with:** `/nos-sdd-design` or triggers on "review sas/sds", "write/generate sds", "revise sds".
+
+### nos-sdd-webapi
+
+Generate / revise / review the **frontend-facing OpenAPI contract** (BFF for the UI team), gated on a settled SRS but **deliberately not on the SDS** — the contract exists so frontend and backend design run in parallel; design-dependent semantics carry `needs decision` markers resolved when the SDS lands. Core checks: BFF-not-a-mirror (never a 1:1 copy of the config schema), SRS vocabulary and value-space fidelity, guideline rules the linter can't see, pattern reuse from the repo's reference feature, mounted + lint-clean (`api-lint` 0 errors) before delivery.
+
+**Invoke with:** `/nos-sdd-webapi` or triggers on "review web api", "write web api spec", "openapi contract".
+
+### nos-sdd-test
+
+Generate / revise / review the **STS** (gated on a settled SRS). The two signature checks: **every test command is copied from the SRS CLI section — never invented** — and the **reverse audit**: every SRS CLI command has a case (a real audit caught a command no test could reach). Plus: full REQ coverage that never shrinks, `Covers:` headers (no orphan tests), component/server boundary, write-then-readback and the other test principles, device-recoverability (restoration in finally), minimal-but-sufficient case sets, fixtures single-homed in the Appendix. Document skill only — running tests belongs to nos-sdd-develop.
+
+**Invoke with:** `/nos-sdd-test` or triggers on "review sts", "write/generate sts", "test spec".
+
+### nos-sdd-develop
+
+Execution orchestrator — consumes the settled chain, produces code; **edits no spec content itself**. Entry gate = SDS with Implementation Stages + STS v1 full coverage. Per-stage loop: tests first → implement → buildroot build → STS scenarios green **on the real target** (full image → device upgrade → harness; package-build green is not done) → user-confirmed commit through the per-commit review gate → stage marked DONE via delegation. The core discipline is the **divergence protocol**: reality disagrees with a doc → stop coding → delegate the revision to nos-sdd-design / nos-sdd-test / nos-sdd-req → resume. Write/review context isolation for tests; code states considerations, never spec IDs.
+
+**Invoke with:** `/nos-sdd-develop` or triggers on "implement feature", "next stage", "continue implementation".
+
+### nos-sdd-workflow
+
+Thin router at the top of the family for vague or state-based requests ("start feature X", "where is X now"). Scans the feature's chain state (SyRS link state, SRS/SAS/SDS/STS files, stage DONE markers), **announces the detected state and waits for confirmation — never auto-starts**, then dispatches to the right member. Holds the development gate (no implementation before SDS + STS v1). Pure dispatcher — no document or implementation logic; explicit single-station requests bypass it.
+
+**Invoke with:** `/nos-sdd-workflow` or triggers on "start feature", "resume feature", "what's next for <feature>".

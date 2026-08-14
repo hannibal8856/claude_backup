@@ -1,0 +1,126 @@
+# ADR-0013: agentx_owned.list 候選篩選改以「walk 耗時」為首要條件；stdrmodb/ 與 stdladb/ 否決
+
+Status:
+  **Accepted（2026-08-06）** —— 兩個候選經 DUT 實測否決，並據此修正候選篩選方法。
+  未產生任何 repo 改動（這正是本 ADR 的結論：這兩支不該搬）。
+
+Date: 2026-08-06
+
+Context:
+  ADR-0011（`stdethdb/`）與 ADR-0012（`mxportdb/`）之後，依既有篩選條件
+  （RO entry 數量、DUT 上有無資料、避開「RW 欄為表第 1 欄」的形狀）
+  挑出 B 類候選，由 `stdrmodb/`（104 RO，剩餘最大）開始。
+
+  當時的篩選條件**只看正確性與形狀，沒有看效能** —— 而 Plan C 的原始動機
+  （`ies_auto_mibs.c:3062` 註解載明）是「RW 欄的 GET 走本地 `ies_uri_handle`
+  value-file 路徑約 600ms，會拖垮整張表的 walk」。**速度才是這個機制存在的理由。**
+
+Decision:
+  1. **否決 `stdrmodb/`**：RMON 在此產品上根本沒有服務。
+  2. **否決 `stdladb/`**：委派後正確性淨損、速度零改善。
+  3. **候選篩選改以「walk 耗時」為首要條件**，其餘條件降為次要。
+
+  ### 1. `stdrmodb/`（RMON，`.1.3.6.1.2.1.16`，104 RO / 63 RW）
+  靜態條件全部通過：ISS `rmon/inc/stdrmodb.h` 涵蓋 `.16.{1..9}`，與 `net_stdrmodb.h`
+  需要的一對一；`RegisterSTDRMON()` 在 `rmonmain.c:814` 的 `#ifdef SNMP_2_WANTED` 內。
+
+  但 DUT 上 `.1.3.6.1.2.1.16` 回 **`No Such Object`**（整棵子樹無任何註冊，
+  不是空表），三種嘗試皆無效：
+  - 把 `rmonConfigEnableStatus`（`.603.5.7.1.1.0`，iss0、read-write TruthValue）
+    由 2(false) 設為 1(true) —— SET 成功、GET 確認，**RMON 仍未出現**
+  - 等待 30 秒後重測 —— 無變化
+  - **重開機後重測 —— 仍為 `No Such Object`**（推翻「ISS 啟動時讀旗標」的假設）
+
+  **NOS 7 mainline 對照組同樣沒有**，兩個獨立來源佐證：
+  - `~/WORK/SNMP_50ms/snmpwalk/mainline-20260804_0318/1.3.6.1.2.txt` 是 `.1.3.6.1.2`
+    的連續 walk，涵蓋 `.1 .2 .4 .5 .7 .11 .14 .17 .31 .241` —— **從 `.14` 直接跳到
+    `.17`，沒有 `.16`**
+  - 現場切到 mainline 實測，同樣 `No Such Object`
+  → 非 Plan E 缺陷，是產品層級未提供。這 104 個 RO entry 無從驗證。
+
+  ### 2. `stdladb/`（IEEE 802.3ad LAG，`.1.2.840.10006.300.43`，42 RO / 13 RW）
+  靜態條件同樣全部通過（ISS `la/inc/stdladb.h` 涵蓋 `1.1.1 1.1.2 1.2.1 1.2.2 1.2.3 1.3`，
+  與 in-master 需要的完全相同；`RegisterSTDLA()` 於 `latmr.c:264`），且 DUT 有 385 筆資料。
+
+  委派實測（Plan E `2026_0806_1730`）：
+
+  | | 未委派 | 委派後 |
+  |---|---|---|
+  | varbinds | **385** | **373**（-12） |
+  | walk 耗時（3 次） | 1.08 / 1.05 / 1.04 s | 0.88 / 1.12 / 1.13 s |
+
+  逐字 diff 只有 12 行，全部是 `.1.2.1.1.1`（`dot3adAggPortIndex`）消失；
+  其餘**逐字完全相同**。**耗時在雜訊範圍內，零加速。**
+  → 正確性淨損、效能無改善，**不應委派**。
+
+  ### 3. 新的篩選方法
+  **先量 `snmpwalk` 耗時，再談其他。** 一次 walk 即可，不需改任何設定：
+  - **慢（秒級）** → in-master 正在服務且走慢路徑 → 委派可能有實質收益
+  - **快（~1 秒內）** → ISS 早已在服務 → 委派無益，甚至因拆表而有害
+
+  依據：ISS 的註冊**與 `agentx_owned.list` 無關、本來就存在**；該 list 只控制
+  「in-master 要不要**也**註冊」。若 ISS 本就贏得 wire，委派只是移除 in-master 的
+  註冊，不會改善任何事，卻可能踩到拆表問題。這解釋了三支的差異：
+
+  | 群組 | 委派效果 | 推定原因 |
+  |---|---|---|
+  | `stdethdb/`（ADR-0011） | **+228** | in-master 在服務且實作不全，ISS 補上 5 個欄位 |
+  | `mxportdb/`（ADR-0012） | **+26** | 同上，ISS 補上兩個 portStatus index 欄 |
+  | `stdladb/`（本 ADR） | **-12** | **ISS 本來就在服務**，委派只拿掉 in-master 註冊 |
+
+Alternatives Considered:
+  - **維持原篩選條件（RO 數量 / 有資料 / 形狀）** —— 已證實會挑出 `stdladb/` 這種
+    「條件全過但實際無益」的候選，浪費一輪完整的委派–量測–還原循環。
+  - **為 `stdrmodb/` 繼續找啟用方法**（CLI 手冊、ISS 設定）—— 主 CLI 手冊
+    (`moxa-next-generation-os-cli-manual-v1.0.pdf`) 全文僅在告警通知脈絡提到 RMON
+    (`rmon-raising-alarm` / `rmon-falling-alarm`)，無啟用指令；且 mainline 亦無。
+    投入產出比不成立。
+  - **不顧 -12 仍委派 `stdladb/`** —— 沒有任何補償收益，純粹是把 `dot3adAggPortIndex`
+    弄不見。否決。
+
+Consequences:
+  - **剩餘 35 支候選需以新條件重新排序**，先做一輪 walk 耗時掃描再挑。
+    這比原方法便宜（純唯讀、不改設定、不需重啟 snmpd）。
+  - **`stdrmodb/` 從候選清單永久移除**（104 RO，原本是剩餘最大的一支）。
+    若日後產品啟用 RMON 可重新評估。
+  - **對 ADR-0011「拆表 → 第 1 欄消失」規則的最乾淨佐證**：`stdladb/` 同一群組內
+    兩張表一正一反，且是受控的 before/after：
+    | 表 | RO/RW | 委派後 col 1 |
+    |---|---|---|
+    | `.43.1.2.1` dot3adAggPortTable | 13 RO / **10 RW** → 拆表 | **消失** |
+    | `.43.1.2.2` dot3adAggPortStatsTable | 8 RO / **0 RW** → 整張給 ISS | **保留** |
+  - **`REPLACE_BIT_VALUE` 掛在 RO 欄的疑慮再次排除，且這次用真資料**：
+    `dot3adAggPortActorOperState` / `PartnerOperState` 是有內容的 LACP state BITS
+    （基線 `STRING: ">"` = 0x3E），委派前後**逐字相同**。
+    ADR-0011 當時的 `dot3ControlFunctionsSupported` 只回 `00`，說服力較弱。
+  - **DUT 狀態**：`stdladb/` 已從 DUT 的 list 移除並重啟 snmpd，筆數回到 385。
+    `rmonConfigEnableStatus` 仍留在 1(true) —— 無副作用（兩個 image 都不因此提供 RMON）。
+
+Constraints / Assumptions:
+  - 耗時量測取自單一 12 埠 MDS-G4000-L3-4XGS、同一網段的開發主機；
+    「快/慢」門檻（~1 秒 vs 秒級）是經驗值，不是嚴格閾值。
+  - 「ISS 本來就在服務」為**推論**，依據是委派前後值逐字相同且耗時無變化；
+    未以 pcap 逐 OID 確認 `stdladb/` 的歸屬。若要嚴格證實，方法見 ADR-0011
+    Constraint 2c（配一個「必經 ISS」的 RO 鄰居當對照組抓 `lo:705`）。
+  - RMON 的否決建立在「`No Such Object` = 無註冊」這個 net-snmp 語意上。
+
+Related Files / Modules:
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_stdrmodb.h`、
+    `ies_auto_mibs_setup_net_stdrmodb.c`（`READ_CREATE_vRMON` 等 flag 掛在整張表）
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_stdladb.h`、
+    `ies_auto_mibs_setup_net_stdladb.c`（4 個帶 flag 的欄：2 RW 留本地、
+    2 RO `*OperState` 會被委派）
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c:3062`
+    —— Plan C 動機註解（600ms 慢路徑），即本 ADR 效能條件的依據
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/rmon/{inc/stdrmodb.h,src/stdrmowr.c}`、
+    `code/future/rmon/src/rmonmain.c:814`
+  - `buildroot/dl/app_moxa_iss_10_1_0/code/future/la/{inc/stdladb.h,src/stdlawr.c}`、
+    `code/future/la/src/latmr.c:264`
+  - `~/WORK/SNMP_50ms/snmpwalk/` —— 既有的參考 walk 收集，含
+    `mainline-20260804_0318/`（本 ADR 用它免去一次 partition 切換）
+
+Related ADRs:
+  - ADR-0011（Accepted）—— `stdethdb/`；本 ADR 補強其拆表規則的證據，並修正其
+    候選篩選建議。
+  - ADR-0012（Accepted）—— `mxportdb/`；本 ADR 沿用其驗證流程（靜態檢查 → 基線 →
+    委派 → 逐字 diff → mainline 對照）。

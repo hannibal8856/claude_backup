@@ -1,0 +1,241 @@
+# ADR-0001: 評估雙層 AgentX 架構,並否決以靜態宣告作為權威路由鍵
+
+Status: Proposed
+
+Date: 2026-08-13
+
+## Context
+
+Vincent 提出一個架構:讓 `3rdparty_net_snmp` 退回未經 Moxa patch 的原版 open source
+net-snmp,把 `lib_moxa_ies_auto_mibs`(SNMP↔URI 對照表)從 snmpd 行程內搬進
+`app_moxa_framework`,由 framework 一個 AgentX 子代理承接整棵 Moxa MIB 子樹;framework
+再依欄位分流,iss0 的 GET/SET 與 iss1 的 SET 走 URI 到 status/config layer,iss1 的 GET
+再往下走第二段 AgentX 到 ISS。以下稱此為 **A 案(雙層 AgentX)**。
+
+提案人列出的 Pros 為:解放 net-snmp、單一對照表以節省 code size 與 memory、AgentX GET/SET
+路徑更單一;Cons 為 AgentX→ISS 讀取效率;Challenges 為「ISS 跟誰註冊」「如何轉發 AgentX
+PDU」「snmpwalk 會不會過」。使用者指示此階段**只評估、不實作**。
+
+本 ADR 記錄評估階段的發現、被排除的假設,以及據此提出的三個架構選項。
+
+### 名詞
+
+- **iss0 / iss1**:依 `ies_auto_mibs_entry` 的 `.iss_build` 欄位為 0 或 1 區分。
+  `iss_build == 1` 表示該欄位「宣告為由 ISS 提供」。
+- **in-master**:snmpd 行程內,由 ies-auto-mibs 註冊的 handler,經 LibFrameworkUri 取值。
+
+### 本次評估在 F1 樹上建立的靜態事實
+
+以 `dl/3rdparty_net_snmp/ies-auto-mibs/net_*.h` 為對象(HEAD `b1536f33`):
+
+| 項目 | 數值 |
+|---|---|
+| 帶 `iss_build` 的 `net_*.h` | 71 |
+| `iss_build == 1`(iss1)entry | 1391 |
+| `iss_build == 0`(iss0)entry | 779 |
+| 同一檔混用兩種值的檔案 | 1(`net_mxDot1xdb.h`,16 iss1 / 3 iss0) |
+| iss1 且 `.uri` 非空 | **1391(全部,無例外)** |
+| iss0 且 `.uri` 為空 | 22(全部在 `net_mxFiberCheck.h`,`.603.5.3`) |
+| iss1 使用的 URI 根命名空間 | 50 |
+| iss0 使用的 URI 根命名空間 | 55 |
+| **iss1 與 iss0 URI 命名空間交集** | **0** |
+| iss1 命名空間中,`plugin_moxa_*/framework/` 找得到 provider | **40 個根 / 964 entries(69%)** |
+| 找不到 provider | 10 個根 / 427 entries(31%) |
+
+找不到 provider 的 10 個集中在 L3 與認證:`stdospdb`(115)、`stdipdb`(78)、
+`stdpnadb`(77)、`stdpnodb`(76)、`stdot3db`(26)、`mxospfdb`(19)、`mxpsspdb`(16)、
+`mxvrrpdb`(15)、`mxarpdb`(4)、`fsvlandb`(1)。
+
+⚠️ **provider 覆蓋率是靜態上界,不是實測。**「grep 找得到命名空間字串」不等於
+「provider 真的服務那些欄位」。此數值的作用是縮小待實測範圍,不能取代實測。
+
+### 來自 Plan E 樹的實測證據(外部來源,F1 樹未獨立重現)
+
+由 `snmp-plan-E reopen 7` 於 2026-08-13 在其 DUT 上量得。F1 與 Plan E 已於同日脫鉤,
+以下數據**其作用域僅及於 Plan E 的樹與該 DUT**,在 F1 引用時須帶此界線:
+
+1. `iss_build == 1` 的執行期假陽性三例:`net_mxStcldb.h`(3 筆)、`net_mxRlpsdb.h`(4 筆)、
+   `net_mx_lldp.h`(6 筆),完整性與無 AgentX 子代理的 mainline 完全相同。
+2. 其中 `mxlldp` 屬「ISS 連該 root 都不存在」;`mxStcldb` / `mxRlpsdb` 屬
+   「ISS 的 `*db.h` 確實宣告了該 root」,兩層靜態檢查都通過而執行期仍無服務。
+3. `:705` 全程擷取的四發 GET(自帶正負對照,10 packets / 0 dropped):
+   `.603.4.4` 與 `.603.4.8` 的請求**從未到達 ISS**,由 in-master 合成的 index entry 回答。
+
+## Decision
+
+本階段做出兩項決定:
+
+**D1(證據充分,建議採納):否決以任何靜態宣告作為權威路由鍵。**
+`iss_build`、ISS 的 `*db.h` 宣告、以及 **ISS 的 AgentX 動態註冊**,三者皆為「事前宣告」,
+皆不得作為「該 OID 由誰服務」的權威依據。任何以宣告為路由鍵的設計,在宣告與執行期不符時
+會**靜默掉欄位**——這正是 `agentx_owned.list` 加錯旗標的失效模式,不得在新架構中重建。
+
+**D2(待決,本 ADR 不下結論):A 案列為待證明選項,不作為預設。**
+在「ISS 的洞有多大」量測完成前,不投入 A 案的實作。評估應同時涵蓋下列三案。
+
+### 三個架構選項
+
+| | 資料流 | framework 需新增 | 三個 Challenge |
+|---|---|---|---|
+| **A. 雙層 AgentX** | snmpd → framework → ISS | AgentX master + PDU 重派 + GETNEXT 合併 | 全都要解 |
+| **B. 平行雙子代理** | snmpd → {framework, ISS} | 無 | **全部消失** |
+| **C. framework 單一** | snmpd → framework →(URI) | 補 10 個命名空間的 provider(427 entries) | 全部消失 |
+
+**B 案**未經提案討論,但取得了提案列出的多數 Pros:snmpd 退回原版無 patch、對照表只有一份
+且住在 framework、AgentX→ISS **沒有任何額外 hop**(較今日更省,因 in-master 那層已移除)。
+三個 Challenge 全部不存在,因為跨區段路由與 GETNEXT 合併留在 snmpd 的 AgentX master,
+那是它的既有職責且今日已正確運作。
+
+**A 案唯一買到而 B 案買不到的**:只有請求經過 framework,fallback 才有機會發動,
+framework 才能修補 ISS 註冊了卻不服務的洞。取捨即為:
+**A = 以「AgentX master + 轉發層 + GETNEXT 合併」的複雜度,換「能自動修補 ISS 的洞」。**
+
+### 若採 A 案,已確立的設計約束
+
+- **C1**:`iss_build` 降級為效能提示(「先問 ISS」),正確性由**執行期 fallback** 保證:
+  轉發後回 `noSuchObject` / `noSuchInstance` 即退回本地 URI 路徑。退路已驗證齊備
+  (1391/1391 iss1 entry 皆有非空 `.uri`)。
+- **C2**:framework 的路由決策**必須來自函式庫的執行期 entry 列表,絕不能來自靜態解析的
+  副本**。理由見下方「合成 entry」一節。
+- **C3**:PDU 必須**語意層重派**,不可位元組層盲轉——單一 PDU 內的 varbind 可同時含
+  iss0 與 iss1 欄位,須拆解、分派、依原序合併,並重寫 sessionID / transactionID / packetID。
+- **C4**:SET 全數留在本地走 URI,不轉發給 ISS。此舉同時避開 ISS 的 undo 為 no-op
+  (`snxmain.c:396-398` 明載 *"We dont support Undo Process"*)。
+- **C5**:GETNEXT 不可用「回錯就重試」的方式 fallback,必須同時評估 ISS 候選與本地候選並取
+  字典序較小者。GETBULK 尚須按目標重算 non-repeaters / max-repetitions 再交錯合併。
+  此為轉發層最易寫錯、且錯誤會表現為「欄位消失」之處。
+
+## Alternatives Considered
+
+### 被否決:以 `iss_build` 靜態路由(A 案的原始形式)
+
+提案隱含以 `iss_build == 1` 決定轉發。否決理由為 Plan E 實測的第 ② 類假陽性:
+`iss_build == 1` **且** ISS 的 `*db.h` 宣告了該 root,兩個獨立靜態來源都說「有」,
+執行期仍無服務。任何層數的靜態交叉比對在此類面前都會過關。
+
+### 被推翻的假設:「ISS 向 framework 動態註冊」可校正 `iss_build` 的假陽性
+
+本評估初期曾主張:讓 ISS 改向 framework 註冊,framework 以實際註冊區段校正宣告,
+既解正確性也省一跳。**此主張已被推翻,原文保留於此。**
+
+推翻依據為 ISS 的註冊實作 `SnxMainRegisterMibs()`
+(`snxmain.c:869`):
+
+- L890-892 註解:*"The sub-agent does NOT support the capability to distribute a MIB
+  across multiple sub-agents"*
+- L951-965:*"if the root is already registered then sublevels are not required to be
+  registered"* —— 註冊一個 root 即跳過其下全部子 MIB
+- L922-943:`SNX_PROP_MIBID_2`(`.1.3.6.1.4.1.29601.2`,見 `snxdef.h:120-121`)整棵一次
+  註冊,並 *"neglect other MIBs under the proprietary tree"*
+
+即:**註冊與否只取決於 `gpMibReg` 內有無該 root,與執行期是否服務其下欄位無關。**
+動態註冊因此是另一種事前宣告,對第 ② 類會給出同一個錯誤答案,不構成校正機制。
+動態註冊仍可保留,但角色降級為**效能優化**(減少 miss 路徑),非正確性機制。
+
+### 被推翻的假設:第 ② 類的成因是「ISS 註冊了但沒服務」
+
+本評估與 Plan E 曾共同假設 `mxStcldb` / `mxRlpsdb` 屬「ISS 註冊了 root、master 正確路由、
+ISS 未服務欄位」。**Plan E 的 `:705` 擷取推翻了此假設:請求根本沒到達 ISS。**
+
+實際成因為**第三種形狀:合成 entry 遮蔽**。
+`moxaSnmpHandle_UtilMibEntryCreateIndexEntry()`(`moxa_snmp_handle_util.c:152-176`)在
+`:164` 以整包 `memcpy` 複製母 entry —— **`iss_build` 一併被繼承** —— 隨後 `:166` 將
+最後一節 OID 改為 1、`:168` 強制 `HANDLER_CAN_RONLY`,再由 in-master 就地註冊
+(`ies_auto_mibs.c:4080` → `moxa_snmp_handle_util.c:325` → `:152`)。
+
+結果是一個「宣告屬於 ISS、實際由本地服務」的 entry。它遮蔽了 ISS 方向的路由,而且
+**它不存在於任何靜態表中**,是執行期依表結構生成的。此即 C2 約束的由來。
+
+值得注意:此遮蔽的根因是**兩套互不知情的註冊系統競爭同一段 OID**(snmpd 內的 in-master
+合成註冊 vs ISS 的 AgentX 註冊,勝負由 snmpd 最長前綴決定)。A 案與 C 案下 snmpd 退回原版、
+不再有 Moxa handler,**該競爭關係消失**,合成 entry 與 ISS 轉發收斂為 framework 內部同一張
+表上的兩個分支。此為提案未列出的一項 Pro,與消滅 `agentx_owned.list` 同類:
+將「兩套機制競爭」收斂為「一張表決策」。
+
+### 未採用:framework 改以 snmp proxy 接受 snmpd 轉發
+
+提案討論中曾詢問是否由 snmpd 以 `proxy` 指令轉發。未採用:`proxy` 以 SNMP PDU 轉送至另一個
+SNMP agent,需在 framework 內另跑一個 SNMP agent 並另配 community / v3 安全參數(多一個會
+配錯的安全上下文),且為 snmpd.conf 內的靜態子樹設定,無動態註冊。framework 對上維持 AgentX
+子代理身分即可,對下再兼任 master,為**雙重身分而非身分互換**。
+
+### 未採用(但尚未排除):南向改走 URI 直連 ISS
+
+提案 Challenge 3 提出以 socket 直連 ISS 的 URI 接收 thread 取代第二段 AgentX。
+初期曾以「AgentX 帶來動態註冊」為由建議 AgentX;該理由已隨上述推翻而失效。
+
+現階段的判斷改以下列事實為基礎:iss1 的 50 個 URI 根與 iss0 的 55 個**交集為 0**,
+且 iss1 的命名(`stdrmodb`、`stdospdb`、`mxqosdb`、`vrrpdb`、`ifmibdb`)沿用 ISS 內部
+`*db.h` 模組慣例。即 **iss1 entry 的 `.uri` 並非另一個資料源,而是同一份 ISS 資料的第二個
+位址**。該路徑今日由 plugin 的 framework 側模組提供(例:`plugin_moxa_rmon/framework/src/iss.rs`),
+且已覆蓋 69% 的 iss1 entry。
+
+此事實直接縮小 A 案的作用域:**南向 AgentX 最多只對 31% 的 iss1 欄位有意義。**
+
+## Consequences
+
+- **D1 的成本**:任何路由設計都必須含執行期驗證機制(fallback 或等效物),不能只有一張表。
+  這是 A 案複雜度的下限,亦是評估 A 案時應計入的代價。
+- **D1 的收益**:正確性不再依賴 `iss_build` 是否正確,「加錯旗標靜默掉欄位」整類 bug 從
+  架構中移除。
+- **D2 的成本**:A 案的實作被延後,若最終仍選 A,則多花一輪量測時間。
+- **D2 的收益**:避免在「ISS 的洞可能根本不存在」的情況下,投入 AgentX master、PDU 重派與
+  GETNEXT 合併的完整複雜度。
+- **量測基準線的既有缺陷**:`entry_handle_exception()`(`ies_auto_mibs.c:1828`,呼叫點
+  1926 / 1985 / 1991)存在 GETNEXT 邊界缺陷,已知使部分欄位「直接 GET 拿得到、walk 走不到」。
+  F1 自 Plan E 切出,**此缺陷一併繼承**。其後果是:受影響欄位在新舊兩臂都看不到,會被誤讀為
+  「沒有回歸」。完整性比對**不得僅依賴 walk 差異**,受影響欄位須主動列舉逐一 GET。
+- **後續責任**:下列兩項量測需要 DUT,而 F1 的 DUT 取得方式尚未指定,為目前的阻塞點:
+  1. 那 31%(427 entries / 10 個命名空間)今日實際由誰服務、是否成功。
+     若 ISS 的 AgentX 服務良好,則 B 案足夠,A 案價值歸零。
+  2. 那 69%(964 entries)的 framework 側 provider 是否真的回得出值。
+     決定 C 案可行性,並決定 A 案的 fallback 是否有實質退路。
+  3. 效能須分「連續 walk」與「table view」兩種形狀分別量測並分別下結論。已知 in-master 讀
+     table 時會將整張表具象化至 tmpfs(單一全域槽、深度 1、200ms idle TTL),故 table view
+     形狀下搬離 in-master 有可能為淨賺;連續 walk 形狀下則多一段 AgentX 為淨賠。
+     **任何結論句子必須寫入其作用域形狀。**
+
+## Constraints / Assumptions
+
+- 使用者已確認圖中的 framework 即現有的 `app_moxa_framework` Rust 子代理
+  (`src/snmp_subagent.rs`),故 A/C 案為擴充既有行程,非新建行程。
+- 使用者已確認 framework 透過 FFI 可見 `lib_moxa_ies_auto_mibs` 的 OID/URI 對照表。
+  **FFI 使 framework 看到的是那張表,而那張表寫的是宣告;FFI 不會將宣告升級為執行期事實。**
+- ies-auto-mibs 需改建為 shared library(提案人已指出)。
+- SET 必須留在 framework 的既有不變量,在圖中被保留(iss1 的 SET 走 URI 而非 ISS)。
+- 22 個無 `.uri` 的 iss0 entry 全屬 `mxFiberCheck`(`.603.5.3`),由 framework 子代理直接
+  服務(見 net_snmp commit `fda1a505` "Add net_mxFiberCheck.h for the framework subagent"),
+  非孤兒。因其為 `iss_build == 0`,永不轉發 ISS,故不影響 C1 的退路完備性。
+- ISS 的 AgentX master 位址於 `snxmain.c:62-63` 於初始化時寫入全域結構
+  (`gAgtxGlobalInfo.u1TDomain` / `u2PortNo`),非散布的編譯期常數;`snmp3cli.h:26` 另有
+  `CLI_SNX_DEFAULT_MASTER_PORT`,可能已有 CLI 旋鈕。**尚未確認**,若成立則 A 案的 C1 成本下修。
+- Plan E 的實測數據為外部來源,F1 樹未獨立重現,引用時須帶作用域。
+- 本樹的 `iss_build` 假陽性數量**尚未在 F1 上量測**;已驗證者僅為其結構(靜態宣告 + 無條件讀取)。
+
+## Related Files / Modules
+
+- `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_*.h` — 71 檔,對照表本體
+- `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_handle_util.c`
+  - `:152-176` `...CreateIndexEntry()` — 合成 index entry;`:164` memcpy 繼承 `iss_build`
+  - `:265` `...MibEntryCheckFromIss()` / `:277` `...CheckFromUri()` — `iss_build` 的兩個 accessor
+  - `:325` `...GenerateTableIndexEntry()`
+- `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`
+  - `:1828` `entry_handle_exception()`(呼叫點 `:1926` / `:1985` / `:1991`)— GETNEXT 邊界缺陷
+  - `:4080` 合成 entry 的呼叫點
+- `buildroot/dl/app_moxa_iss_10_1_0/code/future/snmpv3/snxmain.c`
+  - `:62-63` AgentX master 位址初始化
+  - `:396-398` undo 未實作
+  - `:869-982` `SnxMainRegisterMibs()` — root 粒度註冊
+- `buildroot/dl/app_moxa_iss_10_1_0/code/future/snmpv3/snxdef.h:117-121` — `SNX_PROP_MIBID_1/2`
+- `buildroot/dl/app_moxa_iss_10_1_0/code/future/inc/cli/snmp3cli.h:26` — `CLI_SNX_DEFAULT_MASTER_PORT`
+- `buildroot/dl/app_moxa_framework/src/snmp_subagent.rs` — framework 子代理
+- `buildroot/dl/plugin_moxa_rmon/framework/src/iss.rs` — iss1 URI provider 之範例
+- `buildroot/moxa/configs/mdsg4000l34xgs_defconfig` — 套件 REV 釘選
+
+## Related ADRs
+
+None(本樹首份 ADR)。
+
+Plan E 的 `~/mds4xgl3/.adr/` 為**獨立的決策日誌**,兩樹已於 2026-08-13 脫鉤
+(F1 的 13 個套件 `_REV` 改釘 `snmp-plan-F1`)。Plan E 的 ADR 不對 F1 自動成立,
+引用時須視為外部來源並標註作用域。

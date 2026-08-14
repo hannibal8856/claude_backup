@@ -1,0 +1,93 @@
+#!/bin/sh
+# fwdcheck_remote.sh <TARGET_OID> <POSITIVE_OID> <NEGATIVE_OID> [N] [IDLE]
+#
+# Runs ON THE DUT. Decides whether TARGET_OID's GET is answered by the ISS
+# AgentX subagent, by counting packets on ISS's own AgentX TCP stream.
+#
+# Why it is built this way:
+#   - the DUT has no `timeout`, so the capture self-terminates via -G/-W
+#   - :705 carries the framework subagent too, so we filter on ISS's ephemeral
+#     port, re-read here because it changes on every snmpd restart
+#   - a positive and a negative control are mandatory; without them a broken
+#     capture is indistinguishable from "not forwarded"
+set -u
+
+TARGET=${1:?usage: fwdcheck_remote.sh <target> <positive> <negative> [N] [IDLE]}
+POS=${2:?missing POSITIVE control OID}
+NEG=${3:?missing NEGATIVE control OID}
+N=${4:-150}
+IDLE=${5:-15}
+
+PCAP=/tmp/fwdcheck.pcap
+COMM=${COMMUNITY:-public}
+SNMPGET=/usr/bin/snmpget
+
+[ -x "$SNMPGET" ] || { echo "FATAL: $SNMPGET missing"; exit 1; }
+
+ISSPORT=$(ss -tnp 2>/dev/null | grep ':705 ' | grep ISS | \
+          sed -n 's/.*127\.0\.0\.1:\([0-9]*\) *127\.0\.0\.1:705.*/\1/p' | head -1)
+if [ -z "$ISSPORT" ]; then
+    echo "INVALID: no ESTABLISHED ISS.exe connection to 127.0.0.1:705."
+    echo "         The ISS AgentX subagent is not connected -- nothing can be"
+    echo "         forwarded, and the whole measurement is meaningless."
+    exit 2
+fi
+echo "ISS AgentX ephemeral port: $ISSPORT"
+
+# Self-terminating capture: exits after one -G period, no kill needed.
+DUR=$((IDLE * 2 + 90))
+rm -f "$PCAP"
+tcpdump -i lo -n -U -w "$PCAP" -G "$DUR" -W 1 port 705 >/dev/null 2>&1 &
+sleep 3
+[ -f "$PCAP" ] || { echo "INVALID: tcpdump did not start (no $PCAP)."; exit 2; }
+
+cnt() { tcpdump -r "$PCAP" -n port "$ISSPORT" 2>/dev/null | wc -l; }
+burst() { i=0; while [ $i -lt "$N" ]; do
+              "$SNMPGET" -v2c -c "$COMM" -On 127.0.0.1 "$1" >/dev/null 2>&1
+              i=$((i + 1)); done; }
+
+sleep "$IDLE";            W0=$(cnt)
+burst "$TARGET";          W1=$(cnt)
+sleep "$IDLE";            W2=$(cnt)
+burst "$POS";             W3=$(cnt)
+burst "$NEG";             W4=$(cnt)
+
+D_TARGET=$((W1 - W0))
+D_IDLE=$((W2 - W1))
+D_POS=$((W3 - W2))
+D_NEG=$((W4 - W3))
+
+echo
+echo "window                                   cumulative   delta"
+printf "idle %-3ss                                %-12s -\n"      "$IDLE" "$W0"
+printf "%-4s x TARGET   %-24s %-12s %s\n" "$N" "$TARGET" "$W1" "$D_TARGET"
+printf "idle %-3ss                                %-12s %s\n"     "$IDLE" "$W2" "$D_IDLE"
+printf "%-4s x POSITIVE %-24s %-12s %s\n" "$N" "$POS" "$W3" "$D_POS"
+printf "%-4s x NEGATIVE %-24s %-12s %s\n" "$N" "$NEG" "$W4" "$D_NEG"
+echo
+
+# Guard against a zero denominator without pulling in bc.
+NEGF=$D_NEG
+[ "$NEGF" -lt 1 ] && NEGF=1
+
+echo "control ratio POSITIVE/NEGATIVE = $((D_POS / NEGF))x"
+if [ $((D_POS)) -lt $((NEGF * 5)) ]; then
+    echo
+    echo "INVALID: the positive control did not exceed the negative control by 5x."
+    echo "         The harness is wrong, not the target. Check: did tcpdump run?"
+    echo "         is $ISSPORT still ISS's port (snmpd restarted mid-run)?"
+    echo "         is the POSITIVE OID really served by ISS?"
+    exit 2
+fi
+
+echo "target ratio  TARGET/NEGATIVE   = $((D_TARGET / NEGF))x"
+if [ $((D_TARGET)) -ge $((NEGF * 5)) ]; then
+    echo "VERDICT: FORWARDED -- $TARGET is answered over AgentX by ISS."
+elif [ $((D_TARGET)) -le $((NEGF * 2)) ]; then
+    echo "VERDICT: NOT FORWARDED -- $TARGET is answered locally (in-master)."
+else
+    echo "VERDICT: INCONCLUSIVE -- re-run with a larger N (currently $N)."
+fi
+
+echo
+echo "capture left at $PCAP (delete it when done)"

@@ -1,0 +1,146 @@
+# Task 6 Steps 2–3 — 第一次上機失敗的紀錄（2026-08-05）
+
+程式碼寫完、build 乾淨、DUT 上跑得起來、AgentX 註冊成功，**但整段 arc 變成
+noSuchObject**。DUT 已還原。這份記錄的重點是失敗的形狀和下一步怎麼切開假設。
+
+## 狀態
+
+| 項目 | 狀態 |
+|---|---|
+| Task 6 Step 1（before 對照組） | 完成，p50 113.3ms，`RESULT` 待寫 |
+| Task 6 Step 2–3（註冊 + 服務 GET） | 程式碼完成、build 過、**上機不通** |
+| Task 6 Step 4–5（walkdiff、after） | 未開始 |
+| Task 7 Step 1（oracle） | 完成，`snmpwalk/ORACLE-phase3-task7.txt` |
+| DUT | 已還原成原廠 binary，device_io 7 筆與 oracle 逐字相同 |
+
+commit（都在 `snmp-plan-E2`，**未 push**）：
+
+- `lib_moxa_snmp_agentx` `0e85b01`
+- `lib_moxa_rust_snmp_agentx` `2058a15`
+- `app_moxa_framework` `a5bd7a3`、`6ef8974`
+
+## 為什麼改用 table_iterator（§4.2）
+
+原本 Task 2 的 `mx_agentx_register_arc()` 用 plain `netsnmp_register_handler`，
+net-snmp 對這種註冊**不提供 GETNEXT 支援**，`mx_agentx_dispatch()` 只好拒收
+非 MODE_GET。設計文件 §4.2 早就寫明「表用 `netsnmp_register_table_iterator2`」，
+所以偏離設計的是 Task 2 的 shim，不是這個決定。
+
+順帶解掉 index 欄的問題：註冊時給 `min_col..max_col` = 2..2，net-snmp 永遠不會問
+col 1，`mxDeviceIo.mib` 的 not-accessible 語意就結構性地成立，不需要
+`uri_index == "index"` 那種判別式。
+
+## 上機結果
+
+**成功的部分**（都有證據，不是推論）：
+
+- 四次 `register_iter_table` 全部回成功
+- framework log：`AgentX registered 4 mx_device_io tables, column 2 only, priority 100`
+- log 同時印 `ping 5s`（舊 image 是 15s）→ 確認跑的是新 binary
+- 服務 active、pid 1311、`NRestarts=0` → `run_subagent` 沒有回錯（回錯會 drop
+  Session 進而 `mx_agentx_shutdown`）
+- 同一個 process 的 status layer 正常：
+  `/api/v1/status/io/power/system` → `[{"status":"on"},{"status":"N/A"}]`
+
+**失敗的部分**：
+
+```
+snmpwalk .1.3.6.1.4.1.8691.602.8.6.2          -> No Such Object
+snmpget  .…602.8.6.2.1.1.2.1  (status 欄)     -> No Such Object
+snmpgetnext .…602.8.6.1                       -> .1.3.6.1.4.1.8691.603.1.1.1.1.1.1.1
+```
+
+整段不見，不只是我刻意不服務的 index 欄，**連 7 筆 status 也不見**。
+還原後 7 筆立刻回來 → 因果確立。
+
+## 關鍵區別：noSuchObject 不是 noSuchInstance
+
+一張註冊成功但零列的 table，GET 會得到 **noSuchInstance**。
+我們拿到的是 **noSuchObject** —— 意思是請求根本沒有找到願意回答的 handler。
+所以「`count_rows` 回 0」這個直覺解釋**與證據不符**，不能當成主因。
+
+## 主要假設
+
+不是註冊被搶走，而是**轉發把整段吃掉**：
+
+in-master 是 per-column 註冊（namelen 14），framework 是 Entry 註冊（namelen 13）。
+排序鍵是 (namelen 由長到短, priority 由小到大)，所以 in-master 仍是 children 鏈的
+head，GET 和 GETNEXT 都先落在它身上。它底下現在有 AgentX 節點了，於是
+`mox_snmp_forward_get_to_subagent()`（`ies_auto_mibs.c:3151`）觸發 ——
+而**它不檢查 `reqinfo->mode`**，GETNEXT 也一起轉。轉出去之後 in-master 回
+`IES_GET_FORWARDED`，本來可以在本地產生的值就再也不會產生。我們這邊若答不出東西，
+兩種 mode 都變空 → 整段變黑。
+
+這裡要更正一個先前的判斷：我原本認為 §4.4 的 namelen 不變式成立（in-master 較長）
+就沒事。不變式確實成立、也確實保住了 SET，**但「in-master 是 head」正是問題所在**，
+因為只要有任何 subagent 覆蓋該 OID，它就無條件轉發。不變式保護 SET，不保證 GET 會通。
+
+## 下一步：先量測，不要再推論
+
+兩個假設可以一刀切開：
+
+- (a) 轉發互動把整段吃掉，我們的 handler 根本沒被呼叫
+- (b) 我們的 handler 有被呼叫，但回報零列 / 答不出值
+
+**在 `count_rows()` 與 `answer_get()` 進入點各加一行 log**，重跑一次熱抽換即可分辨。
+沒被呼叫 → (a)，往轉發那條路查；被呼叫但回空 → (b)，往 status 讀取那條路查。
+
+在分辨出來之前不要改 `mox_snmp_forward_get_to_subagent()`，那會同時影響已經在服務的
+1391 筆 ISS OID。
+
+## 環境備忘
+
+- 熱抽換免燒韌體：`~/.claude/skills/dut-console/dut_hotswap.sh <產物路徑…>`，
+  還原用 `--restore`。這次換的是 `usr/bin/app_moxa_framework` 與
+  `usr/lib/libmoxa_snmp_agentx.so`（Rust crate 是 static rlib，已編進 binary）。
+- host 的 `~/.local/bin/snmp*` 是 pysnmp、對這台 agent 會炸
+  （`ValueError: too many values to unpack`）。一律用 `/usr/bin/snmp*`。
+- build 指令結尾別接 `echo`，否則 `$?` 是 echo 的。這次就是這樣誤讀成功一次。
+
+---
+
+# 續:根因與 Step 4/5 結果（2026-08-06）
+
+## 根因：註冊根給錯一層
+
+`netsnmp_register_table_iterator` 的註冊根要給 **Table** 節點,不是 Entry。
+helper 會自己補 Entry 的 `.1`。原本給了 Entry(`.…602.8.6.2.1.1`),於是 helper
+在 `.…2.1.1.1.欄.列` 提供服務,而真正的 `.…2.1.1.2.1` 被判定不屬於這張表 →
+整段 noSuchObject,且註冊本身回成功、沒有任何錯誤。
+
+診斷方式是在 `answer_get` / `count_rows` 加 log 燒一顆 image 上機看:
+`count_rows` 四張表都正確(2/2/1/2),`AgentX GET` 印出的 OID 比真實 OID
+多一個 subid —— 一眼就看出多出來的那個 `.1`。
+
+修正後(image `2026_0806_0011`)walk 回到 7 筆,值與 `ORACLE-phase3-task7.txt`
+的 device_io 基線逐字相同,**missing=0 / surplus=0**。index 欄回 noSuchObject,
+符合 `mxDeviceIo.mib` 的 not-accessible,也就是刻意不複製 in-master 的行為。
+
+## Step 5 的數字：沒有變快，而且尾巴很糟
+
+| | n | p50 | p95 | p100 |
+|---|---|---|---|---|
+| before（in-master） | 100 | 113.3ms | 135.7ms | 153.5ms |
+| after（framework） | 98 | 114.5ms | 7014.6ms | 10016.0ms |
+
+`~/pcap/mxdeviceio-7oid-{before-20260805_1904,after-20260806_0009}.pcapng`
+
+**`mx_device_io` 不是能展示 Plan E 效益的 pilot。** 它的成本在 status plugin
+的硬體讀取,不在傳輸層:`plugin_moxa_io` 的 `get_cache_timeout_in_second()` 回
+**0**,完全不快取,每次讀都重新讀硬體;單次狀態讀取經 HTTP 量到約 43ms(含 curl
+啟動與 nginx)。before 的 113ms 裡絕大部分就是這個,Plan E 拿掉的 HTTP 那一跳
+本來就只佔幾 ms。
+
+實作本身還讓讀取次數變多:一次 7-varbind PDU 會做「每 varbind 一次
+`answer_get`」加「每張表一次 `count_rows`」,約 11 次狀態層讀取。
+
+p95/p100 的 7–10 秒與掉 2 個請求**尚未定位**。合理嫌疑是 subagent 那條 tokio
+task 持有 `status_operation` mutex 做阻塞式硬體讀取,與 actix worker 互相排隊,
+但沒有量測支持,不要當結論。
+
+## 對計畫的影響
+
+設計文件 §10.2 Phase 4 的 go/no-go 需要一組前後對比,這組對比說「沒有改善」。
+那不是實作失敗,是 pilot 選錯:Task 6 選 `mx_device_io` 的理由是「8 筆唯讀、
+SET 不受影響、最安全」,但「安全」和「能展示效益」是兩回事。Task 8 的 D19
+要照實寫,不要把這組數字當成 Phase 4 的通過依據。

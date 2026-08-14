@@ -1,0 +1,126 @@
+#!/bin/bash
+# 改了某個 library 的 Cargo.toml 之後,哪些 application 的 Cargo.lock 需要一起重新產生?
+#
+#   ./which_locks_need_update.sh lib_moxa_rust_iss [lib2 ...]
+#   ./which_locks_need_update.sh --changed [<base-ref>]     # 自動偵測 dl 下改過 Cargo.toml 的 repo
+#
+#   env: BUILDROOT(預設 $PWD 往上找)
+#
+# 為什麼需要:lock 住在 application 的 repo,Cargo.toml 卻改在 library 的 repo。
+# 改 library 的人看不到自己被誰依賴,而 CI 要等整合 build 才會抓到不同步。
+# 這支腳本從「已提交的 lock 本身」反推 library → applications,不需要 build。
+#
+# 判定方式:Cargo.lock 裡沒有 `source =` 欄位的 [[package]] 就是本地 path 依賴。
+# 唯讀,不改任何檔案。
+
+set -u
+
+# --- 找 buildroot ---
+BUILDROOT=${BUILDROOT:-}
+if [ -z "$BUILDROOT" ]; then
+    d=$PWD
+    while [ "$d" != "/" ]; do
+        [ -d "$d/dl" ] && [ -d "$d/output" ] && { BUILDROOT=$d; break; }
+        [ -d "$d/buildroot/dl" ] && { BUILDROOT=$d/buildroot; break; }
+        d=$(dirname "$d")
+    done
+fi
+[ -n "$BUILDROOT" ] && [ -d "$BUILDROOT/dl" ] || { echo "找不到 buildroot(可用 BUILDROOT= 指定)"; exit 2; }
+DL=$BUILDROOT/dl
+
+[ $# -ge 1 ] || { echo "usage: $0 <lib> [lib ...]   |   $0 --changed [<base-ref>]"; exit 2; }
+
+# --- lock 來源:逐 application 取用,dl 已提交的優先,缺的才退回 output/build ---
+# 不能「dl 有任何一份就整個用 dl」:Step 6 做到一半時只有少數 app 提交了 lock,
+# 那樣會只掃到那幾份就宣稱某 library 沒有被任何 app 依賴。
+declare -A LOCKOF
+n_dl=0; n_ob=0
+while read -r f; do
+    [ -n "$f" ] || continue
+    k=$(dirname "${f#"$BUILDROOT/output/build"/}"); k=${k//-custom/}
+    LOCKOF[$k]=$f; n_ob=$((n_ob+1))
+done < <(find "$BUILDROOT/output/build" -maxdepth 3 -name Cargo.lock 2>/dev/null | sort)
+while read -r f; do
+    [ -n "$f" ] || continue
+    k=$(dirname "${f#"$DL"/}")
+    [ -n "${LOCKOF[$k]:-}" ] && n_ob=$((n_ob-1))
+    LOCKOF[$k]=$f; n_dl=$((n_dl+1))
+done < <(find "$DL" -maxdepth 4 -name Cargo.lock -not -path '*/target/*' 2>/dev/null | sort)
+LOCKS=("${LOCKOF[@]}")
+[ ${#LOCKS[@]} -gt 0 ] || { echo "找不到任何 Cargo.lock"; exit 2; }
+SRC="dl 已提交 $n_dl 份 + output/build 補 $n_ob 份"
+[ "$n_ob" -gt 0 ] && SRC="$SRC(Step 6 尚未完成,補上的部分僅供參考)"
+
+# --- 目錄名 → crate 名(兩者不一定相同)---
+crate_of(){
+    local q=$1 t
+    for t in "$DL/$q/Cargo.toml" "$DL/$q/framework/Cargo.toml" "$DL/$q/app/Cargo.toml"; do
+        [ -f "$t" ] || continue
+        sed -n '/^\[package\]/,/^\[/p' "$t" | sed -n 's/^name *= *"\(.*\)"/\1/p' | head -1
+        return
+    done
+    echo "$q"   # 找不到就當作已經是 crate 名
+}
+
+# --- 要查的 library 清單 ---
+targets=()
+if [ "$1" = "--changed" ]; then
+    base=${2:-}
+    for p in "$DL"/*/; do
+        p=${p%/}; [ -d "$p/.git" ] || continue
+        if [ -n "$base" ]; then
+            chg=$(git -C "$p" diff --name-only "$base" HEAD 2>/dev/null | grep -c 'Cargo\.toml$')
+        else
+            chg=$(git -C "$p" status --porcelain 2>/dev/null | grep -c 'Cargo\.toml$')
+        fi
+        [ "${chg:-0}" -gt 0 ] && targets+=("$(basename "$p")")
+    done
+    [ ${#targets[@]} -gt 0 ] || { echo "dl 底下沒有 Cargo.toml 變動${base:+(vs $base)}。"; exit 0; }
+    echo "偵測到 Cargo.toml 有變動的 repo: ${targets[*]}"
+    echo
+else
+    targets=("$@")
+fi
+
+echo "lock 來源: $SRC(${#LOCKS[@]} 份)"
+echo
+
+need=0
+for q in "${targets[@]}"; do
+    c=$(crate_of "$q")
+    hits=()
+    for f in "${LOCKS[@]}"; do
+        # paragraph 模式逐 [[package]] 區塊掃;沒有 source = 的才是本地 path 依賴
+        awk -v want="$c" 'BEGIN{RS=""} /^\[\[package\]\]/{
+              n=""; s=0; k=split($0,L,"\n")
+              for(i=1;i<=k;i++){
+                if(L[i]~/^name = /){ n=L[i]; sub(/^name = "/,"",n); sub(/"$/,"",n) }
+                if(L[i]~/^source = /) s=1
+              }
+              if(n==want && s==0) found=1
+            } END{ exit !found }' "$f" || continue
+        app=$(dirname "${f#"$DL"/}"); app=${app#"$BUILDROOT/output/build/"}; app=${app//-custom/}
+        hits+=("$app")
+    done
+    if [ ${#hits[@]} -eq 0 ]; then
+        printf '%-40s 沒有任何 application 的 lock 引用它\n' "$q ($c)"
+        printf '%-40s   → 可能是尚未被任何 app 依賴,或該 app 的 lock 還沒提交\n' ""
+    else
+        printf '%-40s 需要重新產生 lock 的 application: %s\n' "$q ($c)" "${#hits[@]}"
+        for h in "${hits[@]}"; do echo "    - $h"; done
+        need=$((need+${#hits[@]}))
+    fi
+done
+
+echo
+echo "-----------------------------------------------------------------------"
+echo "共 $need 份 application lock 需要重新產生。"
+cat <<'EOF'
+
+流程提醒:lock 只能由實際 resolve 產生,所以是
+  改 library 的 Cargo.toml → 在 buildroot 裡 build 一次
+  → 把 output/build/<app>-custom/**/Cargo.lock 撈回 dl/<app>/
+  → 在該 application 的 repo 提交 "Synchonize Cargo.lock"
+library 的 MR 與這些 application lock MR 必須一起合,否則整合 build 會抓到不同步。
+EOF
+exit 0

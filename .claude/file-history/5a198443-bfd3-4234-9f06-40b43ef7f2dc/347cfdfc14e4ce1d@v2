@@ -1,0 +1,175 @@
+Task 7 Step 1 oracle — mx_portmirror REPLACE_TRUTH_VALUE entries, read through the
+in-master (ISS) path while it still serves this arc.
+
+Captured  : 2026-08-05 ~18:55–19:01
+DUT       : 192.168.127.253, BUILD_TIME 2026_0805_1738 (Plan E)
+AgentX    : two session pairs on 127.0.0.1:705 — snmpd(pid 2479) <-> ISS.exe(pid 298)
+            and snmpd(pid 2479) <-> app_moxa_framew(pid 3558). Framework registers
+            zero OIDs, so everything below is served by in-master ISS.
+Tools     : /usr/bin/snmpwalk, /usr/bin/snmpget, /usr/bin/snmpset (net-snmp 5.8 on
+            the host). NOT ~/.local/bin/snmp* — those are pysnmp-based and crash
+            with "ValueError: too many values to unpack" against this agent.
+Config    : read on the DUT, same source the in-master GET path uses —
+            curl -H "Authorization: $(cat /moxa/run/auto_mibs/s_token)" \
+                 http://127.0.0.1/api/v1/setting/data/portMirror
+            (127.0.0.1:80, IES_URI_CONFIG_PATH = /api/v1/setting/data;
+             Authorization header carries the raw token, no "Bearer" prefix.)
+
+--------------------------------------------------------------------------------
+1. The four REPLACE_TRUTH_VALUE entries, per source
+--------------------------------------------------------------------------------
+OIDs read from ies-auto-mibs/net_mx_portmirror.h, flags from
+ies-auto-mibs/ies_auto_mibs_setup_net_mx_portmirror.c. Not copied from any MIB file.
+
+  #  entry name                        URI / uri_index                          OID
+  1  portMirror_enable                 portMirror/enable            .1.3.6.1.4.1.8691.603.5.5.1.1.0
+  2  portMirror_remoteSpanIntmedRole   portMirror/remoteSpanIntmedRole
+                                                                    .1.3.6.1.4.1.8691.603.5.5.1.3.0
+  3  portMirrorTable_entryEnable       portMirror/portMirrorTable/ + entryEnable
+                                                              .1.3.6.1.4.1.8691.603.5.5.1.2.1.2.<idx>
+  4  portMirrorTable_reflectPortMode   portMirror/portMirrorTable/ + reflectPortMode
+                                                             .1.3.6.1.4.1.8691.603.5.5.1.2.1.12.<idx>
+
+#3 additionally carries URI_CONFIG_CHAIN.
+Table index mapping: SNMP index N <-> JSON array element N-1 (ies_auto_mibs.c:2794,
+`index = req_oid[last]; index--`). SNMP index 1 = sessionId 1 = portMirrorTable[0].
+
+--------------------------------------------------------------------------------
+2. THE ORACLE
+--------------------------------------------------------------------------------
+Both directions of the mapping are covered on both a scalar and a table column.
+
+  #  OID                                 config JSON   in-master GET   state
+  1  .…5.5.1.1.0      portMirror/enable  true          INTEGER: 1      as found
+  2  .…5.5.1.3.0      remoteSpanIntmedRole
+                                         false         INTEGER: 2      as found
+  3  .…5.5.1.2.1.2.1  entryEnable        false         (no instance)   as found
+  3  .…5.5.1.2.1.2.1  entryEnable        true          INTEGER: 1      induced
+  4  .…5.5.1.2.1.12.1 reflectPortMode    true          INTEGER: 1      induced
+  4  .…5.5.1.2.1.12.1 reflectPortMode    false         INTEGER: 2      induced
+
+"induced" = produced by SNMP SET through the in-master path, then restored (§5).
+
+2a. Arc as found, and as restored — these two walks are identical, which is the
+    proof the DUT state was returned to baseline:
+
+  .1.3.6.1.4.1.8691.603.5.5.1.1.0 = INTEGER: 1     portMirror/enable
+  .1.3.6.1.4.1.8691.603.5.5.1.3.0 = INTEGER: 2     portMirror/remoteSpanIntmedRole
+  .1.3.6.1.4.1.8691.603.5.5.1.4.0 = INTEGER: 0     portMirror/remoteSpanIntmedVlanId
+  .1.3.6.1.4.1.8691.603.5.5.1.5.0 = INTEGER: 0     portMirror/remoteSpanIntmedVlanIdSecond
+
+2b. The one enabled row, full walk of 1.3.6.1.4.1.8691.603.5.5.1.2
+    (session 1 enabled, reflectPortMode false, everything else left at defaults):
+
+  .…5.5.1.2.1.1.1  = INTEGER: 1    index
+  .…5.5.1.2.1.2.1  = INTEGER: 1    entryEnable        <- JSON true
+  .…5.5.1.2.1.3.1  = INTEGER: 1    sessionId
+  .…5.5.1.2.1.4.1  = INTEGER: 0    destPort
+  .…5.5.1.2.1.5.1  = ""            sourcePortRxTable  <- JSON "0000…" (64 hex chars)
+  .…5.5.1.2.1.6.1  = ""            sourcePortTxTable  <- JSON "0000…"
+  .…5.5.1.2.1.7.1  = ""            destPortTable      <- JSON []
+  .…5.5.1.2.1.8.1  = ""            sourcePortChRxTable
+  .…5.5.1.2.1.9.1  = ""            sourcePortChTxTable
+  .…5.5.1.2.1.10.1 = INTEGER: 0    remoteSpanType
+  .…5.5.1.2.1.11.1 = INTEGER: 0    remoteSpanVlanId
+  .…5.5.1.2.1.12.1 = INTEGER: 2    reflectPortMode    <- JSON false
+  .…5.5.1.2.1.13.1 = STRING: "[]"  sourceVlanRxTable  <- JSON []
+
+    Note col 5/6: an all-zero 64-hex-char JSON string comes out as an EMPTY octet
+    string, while col 13's empty JSON array comes out as the two-character STRING
+    "[]". Two different empty-ish JSON shapes, two different SNMP renderings.
+    Task 7 must not normalise them to the same thing.
+
+2c. Config JSON as found and as restored (identical; values abridged only where the
+    7 rows are identical apart from sessionId):
+
+  {"enable":true,
+   "portMirrorTable":[ 7 rows, sessionId 1..7:
+     {"entryEnable":false, "destPort":0, "destPortTable":[],
+      "sourcePortRxTable":"0"x64, "sourcePortTxTable":"0"x64,
+      "sourcePortChRxTable":[], "sourcePortChTxTable":[],
+      "remoteSpanType":0, "remoteSpanVlanId":0,
+      "reflectPortMode":false, "sourceVlanRxTable":[]} ],
+   "remoteSpanIntmedRole":false,
+   "remoteSpanIntmedVlanId":0,
+   "remoteSpanIntmedVlanIdSecond":0}
+
+--------------------------------------------------------------------------------
+3. Row publication is gated on entryEnable — not on the row existing
+--------------------------------------------------------------------------------
+The config layer always holds 7 rows. SNMP publishes only the rows whose
+entryEnable is true. With all 7 false, the entire table subtree is absent:
+
+  snmpwalk    .…5.5.1.2        -> No Such Object available on this agent
+  snmpgetnext .…5.5.1.2        -> .…5.5.1.3.0   (skips straight past the table)
+  snmpget     .…5.5.1.2.1.2.1  -> No Such Instance
+  snmpget     .…5.5.1.2.1.12.1 -> No Such Instance
+
+After `snmpset .…5.5.1.2.1.2.1 i 1`, all 13 columns of index 1 appear at once
+(§2b). This is the behaviour Task 7 has to reproduce — a framework implementation
+that publishes all 7 rows unconditionally would show up as 78 surplus OIDs, and one
+that publishes none would pass a walkdiff against today's baseline while being wrong
+the moment a mirror session is enabled.
+
+Row expansion is not implemented in ies_auto_mibs.c. The table branch writes the raw
+JSON to a temp file and shells out to /sbin/generate_uri_snmp_table (3715 lines, on
+the DUT) which expands it into OID=value lines; the result is renamed over the temp
+file. The file (/moxa/run/auto_mibs/portMirror_portMirrorTable_tbl) exists only
+while a row is published — it was present with the row enabled and gone after the
+restore, so it cannot be read retrospectively.
+
+Two oddities worth knowing before Task 7 Step 5 reads a walkdiff:
+
+  (a) A GET on an absent row comes back with a REWRITTEN varbind OID — the trailing
+      index is dropped and the column subid incremented:
+        request .2.1.2.1  -> response .2.1.3
+        request .2.1.12.1 -> response .2.1.13
+      Arc-specific: a GET of a nonexistent OID elsewhere (.1.3.6.1.2.1.1.99.5.1)
+      echoes the requested OID normally. Not a host-tooling artifact — identical
+      under `rtk proxy`.
+  (b) sysDescr (.1.3.6.1.2.1.1.1.0) reads as an empty string on this image.
+      Unrelated to portmirror, but it will show up in any full walkdiff.
+
+--------------------------------------------------------------------------------
+4. Conversion rule, from source (both directions confirmed)
+--------------------------------------------------------------------------------
+GET  ies_auto_mibs.c:2541  JSON "true" -> '1', "false" -> '2', anything else ->
+                           error return, i.e. no varbind rather than a wrong value.
+SET  ies_auto_mibs.c:2839  MIB 1 -> "true", 2 -> "false", anything else -> error.
+
+Task 7 must reproduce the GET direction, including the "neither true nor false is
+an error, not a default" part.
+
+--------------------------------------------------------------------------------
+5. What was done to the DUT, and how it was undone
+--------------------------------------------------------------------------------
+Every step went through the in-master SET path (SNMP SET), so nothing bypassed the
+mechanism under study.
+
+  1. snmpset .…5.5.1.2.1.2.1  i 1   entryEnable(session 1) = true   -> row appears
+  2. snmpset .…5.5.1.2.1.12.1 i 1   reflectPortMode = true          -> reads back 1
+  3. snmpset .…5.5.1.2.1.12.1 i 2   reflectPortMode = false         -> reads back 2
+  4. snmpset .…5.5.1.2.1.2.1  i 2   entryEnable = false             -> row disappears
+
+Restore verified two ways: the arc walk in §2a is identical before and after, and
+the config JSON in §2c is identical before and after. Running config only — nothing
+was saved to startup-config.
+
+This also pre-validates Task 7 Step 3 (SET still works, unchanged) on the
+entryEnable and reflectPortMode columns. Step 3's own round-trip on
+.…5.5.1.1.0 (portMirror/enable) has NOT been run yet.
+
+--------------------------------------------------------------------------------
+6. Correction to the plan: 17 entries, not 18
+--------------------------------------------------------------------------------
+plan-e-phase3-PLAN-2026-08-05.md Task 7 says "18 entries, RO 2 / RW 16". That count
+assumes both MOXA_MIRROR_VLAN_MIRROR and BCM_ROBO2_XSDK. In this build:
+
+  BR2_MOXA_MIRROR_VLAN_MIRROR=y     (buildroot/.config:4125, becomes
+                                     -DMOXA_MIRROR_VLAN_MIRROR in
+                                     3rdparty_net_snmp.mk:124)
+  BCM_ROBO2_XSDK                    never defined anywhere in this tree
+
+so net_mx_portmirror.h yields 4 scalars + 13 table columns = 17 entries,
+RO 2 (index, sessionId) / RW 15. The walk in §2b confirms it: columns 1..13 and no
+column 14 (sourceVlanTxTable, the BCM_ROBO2_XSDK-only one).

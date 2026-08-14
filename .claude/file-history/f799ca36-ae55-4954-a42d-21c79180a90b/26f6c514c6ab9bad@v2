@@ -1,0 +1,407 @@
+# Plan C — AgentX PoC Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 驗證「ifTable/ifXTable GET 經 AgentX → ISS nmh 直讀」latency < 50ms,並把 SET ifAdminStatus 端到端打通(ISS → URI PATCH → framework config_layer),產出 baseline vs Plan C 量測報告供 Plan D 投資決策。
+
+**Architecture:** snmpd 開 master agentx (tcp:127.0.0.1:705);framework `ies-auto-mibs` 不再註冊 ifmibdb(ifNumber/ifTable/ifXTable),讓位給 ISS Aricent AgentX subagent;GET 經 ISS 既有 nmh ifTable 函式直讀 `/proc/net/dev`+netlink;SET ifAdminStatus 由 ISS handler 呼 `/sbin/ies_uri_handle_client --type update` 寫回 framework。
+
+**Tech Stack:** net-snmp 5.9.3 AgentX (RFC 2741)、Aricent ISS SNMP subagent (snxmain.c)、CFA nmh ifTable (cfa2)、buildroot C、snmpbulkwalk + Wireshark/tcpdump。
+
+**Authoritative design:** `~/plan-c-agentx-poc-design-2026-06-12.md`(6/12 演進版)。本 plan 為其逐步執行版。
+
+---
+
+## 重要:這是 hardware-in-the-loop PoC,不是純軟體 TDD 專案
+
+- 沒有 pytest/cargo test 層級的 unit test。**「驗證」= DUT 上的實機觀察指令**(netstat / snmpget / Wireshark / ip link),這些取代「run the test」。
+- DUT 操作可用 `dut-console` skill(serial console)或手動。每個 milestone 的 verification gate 都給確切指令與預期輸出。
+- **M1(transport)本質是 diagnostic milestone** — 使用者已知「705 還沒通」但根因未診斷。M1 用 diagnostic ladder 逐層收斂,不預先假設修法。
+
+## 前置狀態(survey 已確認)
+
+| 項目 | 狀態 |
+|---|---|
+| ISS branch | `snmp-trace-time_diff-2`,`SNMP_LNXIP_WANTED` 已 enable(`8bcca814`+`5e8b0da33`) |
+| ISS AgentX 機制 | **已存在**:`app_moxa_iss_10_1_0/code/future/snmpv3/snxmain.c`(`SnxMainAgentxEnable`、`gAgtxGlobalInfo.MasterIpAddr`、`SNX_DEFAULT_MASTER_PORT=705`) |
+| ISS nmh ifTable | **已存在**:`cfa2/src/ifmstdll.c`、`cfa2/inc/ifmiblow.h` |
+| URI write 工具 | **已存在**:`/sbin/ies_uri_handle_client`(verbs: read/update/read_oid_scalar/read_oid_table/update_oid),source 在 `app_moxa_iss_10_1_0/code/uri_ctrl_hook/src/` |
+| framework ifTable 註冊點 | `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c:285` `MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry);` |
+| ifmibdb 組成 | `net_ifmibdb.h`:ifNumber + ifTable(各 column)+ ifXTable,**同一個 entry 陣列** |
+| snmpd.conf 生成器 | `plugin_moxa_snmp/app/config_moxa_snmp_control.c::setup_snmpd_config`(fp 開於 line 773/783,com2sec 區塊始於 813) |
+
+## File Structure
+
+| Repo / File | 責任 | 動作 |
+|---|---|---|
+| `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c` | framework MIB 群組註冊 | Modify(skip ifmibdb) |
+| `plugin_moxa_snmp/app/config_moxa_snmp_control.c` | snmpd.conf 生成 | Modify(master agentx) |
+| `app_moxa_iss_10_1_0/.../snmpv3/snxmain.c` | ISS AgentX subagent 主控 | Modify/diagnose(enable + master IP/port) |
+| `app_moxa_iss_10_1_0/.../cfa2/src/ifmstdll.c` | ISS ifTable nmh handler | Verify + printf(M2) |
+| ISS ifAdminStatus SET handler(M4 task 1 定位) | ifAdminStatus 寫入點 | Modify(呼 ies_uri_handle_client) |
+
+---
+
+## Milestone 0 — Baseline 量測(零 code 改動)
+
+**目的:** 取得現行 image ifTable/ifXTable walk latency,並驗證量測方法本身。
+**Files:** 無(純量測)。
+
+- [ ] **Step 1: 記錄測試環境**
+
+在量測前記錄(寫進 `~/planc-measure/env.txt`):DUT 型號、image 版本(`cat /etc/version` 或 console banner)、port 總數、link up 數、量測當下 `top` 的 CPU idle、NMS 與 DUT 是否直連。
+
+- [ ] **Step 2: NMS 端起 Wireshark/tcpdump 抓 UDP 161**
+
+NMS PC 上:
+```bash
+sudo tcpdump -i <if_to_dut> -w ~/planc-measure/baseline.pcap udp port 161
+```
+保持背景執行。
+
+- [ ] **Step 3: 跑 ifTable + ifXTable walk × 10**
+
+NMS PC 上(`<DUT>`=DUT IP,`<community>`=RO community):
+```bash
+for i in $(seq 1 10); do
+  snmpbulkwalk -v2c -c <community> <DUT> ifTable  >/dev/null
+  snmpbulkwalk -v2c -c <community> <DUT> ifXTable >/dev/null
+done
+```
+
+- [ ] **Step 4: 停止抓包,計算 RTT**
+
+停掉 tcpdump。用 Wireshark 開 `baseline.pcap`,對每次 walk 量「第一個 GetBulk request → 最後一個對應 response」的時間差。
+取 ifTable / ifXTable 各自的 median + p95,記進 `~/planc-measure/baseline.txt`。
+
+- [ ] **Step 5: Verification gate**
+
+確認:(a) 每次 walk 都完整(varbind 數一致、收到正常 END),(b) median 與認知 ~600ms 同量級。
+**若數字落差很大**(例如 <50ms 或 >2s),先停下釐清量測方法或環境,不要進 M1。
+
+---
+
+## Milestone 1 — Transport 打通(diagnostic milestone)
+
+**目的:** snmpd 開 master agentx;ISS attach 到 `tcp:127.0.0.1:705` 並 REGISTER ifTable/ifXTable;framework 讓位。
+**Files:**
+- Modify: `plugin_moxa_snmp/app/config_moxa_snmp_control.c`(change B)
+- Modify: `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c:285`(change A)
+- Modify/diagnose: `app_moxa_iss_10_1_0/code/future/snmpv3/snxmain.c`(change C)
+
+### 1a. Change B — snmpd.conf 開 master agentx
+
+- [ ] **Step 1: 加 master agentx directive**
+
+`config_moxa_snmp_control.c`,在 `setup_snmpd_config` 內 fp 開檔之後、`com2sec` 區塊之前(現約 line 791,即兩個 `fopen` 分支結束、json 讀取之前)插入:
+```c
+    /* Plan C PoC: enable AgentX master so ISS subagent can attach (tcp:127.0.0.1:705) */
+    fprintf(fp, "master         agentx\n");
+    fprintf(fp, "agentXSocket   tcp:127.0.0.1:705\n");
+    fprintf(fp, "agentXTimeout  5\n");
+    fprintf(fp, "agentXRetries  1\n");
+```
+
+- [ ] **Step 2: Build plugin_moxa_snmp**
+
+依專案 build 流程 build `plugin_moxa_snmp`(注意 build 順序見 memory:plugin_moxa_snmp → rust_moxa_build → final make)。
+Expected: build 成功,無 error。
+
+- [ ] **Step 3: 部署到 DUT 並重啟 snmp service,驗證 conf 內容**
+
+DUT(root):
+```sh
+grep -E "master|agentXSocket" /var/run/.../snmpd.conf   # 路徑 = SNMP_CONF_FILE
+```
+Expected: 看到 `master agentx` 與 `agentXSocket tcp:127.0.0.1:705`。
+
+- [ ] **Step 4: 驗證 snmpd 在 705 listen**
+
+DUT(root):
+```sh
+netstat -tlnp | grep 705
+```
+Expected: snmpd 在 `127.0.0.1:705` LISTEN。
+**若沒有** → snmpd 沒吃到 conf 或 net-snmp 未編 AgentX master 支援。先解這個再往下。
+
+### 1b. Change A — framework 讓出 ifmibdb
+
+- [ ] **Step 5: 註解掉 ifmibdb 註冊**
+
+`ies_auto_mibs_setup.c:285`:
+```c
+    /* Plan C PoC: hand ifNumber/ifTable/ifXTable over to ISS AgentX subagent.
+       Skip framework registration so ISS REGISTER wins (no shadow). */
+    /* MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry); */
+```
+
+- [ ] **Step 6: Build 3rdparty_net_snmp + 部署**
+
+Build `3rdparty_net_snmp`,部署到 DUT,重啟 snmp service。
+Expected: build 成功。
+
+- [ ] **Step 7: Verification gate — framework 不再應答 ifTable**
+
+此時 ISS 還沒接上,ifTable 應「無人應答」。NMS:
+```bash
+snmpget -v2c -c <community> <DUT> ifDescr.1
+```
+Expected: timeout 或 noSuchObject(代表 framework 確實讓位了)。
+非 ifTable 的 OID(如 sysDescr.0)應**照常**回應 — 確認 skip 沒誤殺其他 entry:
+```bash
+snmpget -v2c -c <community> <DUT> sysDescr.0   # 預期正常
+```
+
+### 1c. Change C — ISS attach + REGISTER(diagnostic ladder)
+
+- [ ] **Step 8: 確認 ISS AgentX 設定(master IP/port + enable)**
+
+讀 `snxmain.c` 與 `snxdef.h`,確認:(a) `gAgtxGlobalInfo.MasterIpAddr` 被設成 `127.0.0.1`,(b) `u2PortNo` = `SNX_DEFAULT_MASTER_PORT`(=705),(c) `SnxMainAgentxEnable()` 在 ISS 啟動路徑被呼叫。
+記錄目前實際值(可能就是「705 不通」的根因所在)。
+
+- [ ] **Step 9: Build ISS + 部署,開 AgentX**
+
+Build `app_moxa_iss_10_1_0`(branch `snmp-trace-time_diff-2`),部署。
+透過 ISS CLI 或啟動設定 enable AgentX subagent(依 step 8 找到的 enable 路徑)。
+
+- [ ] **Step 10: Diagnostic gate 1 — TCP 連線**
+
+DUT(root):
+```sh
+netstat -tnp | grep 705
+```
+Expected: 一條 ISS → `127.0.0.1:705` ESTABLISHED。
+**若只有 snmpd LISTEN、沒有 ESTABLISHED**:ISS 沒發起連線。查 `SnxMainAgentxEnable` 是否真的跑、MasterIpAddr/port 是否正確、ISS log(`SNMPTrace`)。
+
+- [ ] **Step 11: Diagnostic gate 2 — AgentX Open/Register PDU**
+
+DUT(root)抓 loopback:
+```sh
+tcpdump -i lo -w /tmp/agentx.pcap tcp port 705 &
+# 觸發 ISS 重連 / 重啟 AgentX
+```
+把 `/tmp/agentx.pcap` 拉回用 Wireshark 看。
+Expected: AgentX **Open-PDU** 後跟著 ifTable/ifXTable 的 **Register-PDU**(master 回 Response 成功)。
+**若有 Open 沒 Register**:ISS 沒把 ifTable 註冊出去 → 查 ISS ifTable MIB 是否在 AgentX 模式下被 register。
+**若 Register 被 master 拒**:看拒絕原因(可能 OID 範圍衝突 — 確認 change A 真的讓位了)。
+
+- [ ] **Step 12: Verification gate — master dispatch 到 ISS**
+
+NMS:
+```bash
+snmpget -v2c -c <community> <DUT> ifDescr.1
+```
+同時 DUT `tcpdump -i lo tcp port 705`。
+Expected: 看到 Get-PDU 進 705(master 有 dispatch 給 ISS)。**回值正確與否留給 M2**;此處只要證明 dispatch 路徑通。
+
+- [ ] **Step 13: Commit M1 改動(3 repo 各自 commit)**
+
+```bash
+# 在各 repo 的 PoC branch 上
+git add app/config_moxa_snmp_control.c && git commit -m "Plan C PoC: enable AgentX master @ tcp:127.0.0.1:705"
+git add ies-auto-mibs/ies_auto_mibs_setup.c && git commit -m "Plan C PoC: skip ifmibdb registration, hand off to ISS"
+# ISS 端 change C 視 step 8-9 實際改動 commit
+```
+
+---
+
+## Milestone 2 — GET 接線驗證
+
+**目的:** 確認 AgentX GET/GETNEXT/GETBULK 經 ISS nmh ifTable 函式回正確值。
+**Files:** Modify(暫時 printf): `app_moxa_iss_10_1_0/code/future/cfa2/src/ifmstdll.c`
+
+- [ ] **Step 1: 在 ifTable nmh handler 加 printf**
+
+在 `ifmstdll.c` 的 ifTable GET handler(`nmhGetIfOperStatus` / ifTable get 進入點)加暫時 trace:
+```c
+    /* Plan C PoC trace — REMOVE before M3 measurement */
+    printf("[PLANC] ifTable get: ifIndex=%d oid_leaf=...\n", (int)i4IfIndex);
+```
+
+- [ ] **Step 2: Build ISS + 部署**
+
+Build `app_moxa_iss_10_1_0`,部署到 DUT。
+
+- [ ] **Step 3: Verification gate — 單筆值正確**
+
+NMS:
+```bash
+snmpget -v2c -c <community> <DUT> ifDescr.1 ifInOctets.1 ifOperStatus.1
+```
+DUT 上對照:
+```sh
+cat /proc/net/dev    # 比對 ifInOctets
+ip link              # 比對 ifOperStatus
+```
+Expected: SNMP 回值與 `/proc/net/dev` / `ip link` 一致;DUT console 看到 `[PLANC]` trace。
+
+- [ ] **Step 4: Verification gate — 完整 walk 正確**
+
+NMS:
+```bash
+snmpbulkwalk -v2c -c <community> <DUT> ifTable
+snmpbulkwalk -v2c -c <community> <DUT> ifXTable
+```
+Expected:(a) walk 不漏 column、不重複、正確 END;(b) varbind 數與 M0 baseline 一致(資料完整性);(c) GETNEXT 邊界正確(最後一筆後跳出 ifTable subtree)。
+
+- [ ] **Step 5: Commit(含 printf,M3 前會移除)**
+
+```bash
+git add cfa2/src/ifmstdll.c && git commit -m "Plan C PoC: trace ifTable nmh get path (temporary)"
+```
+
+---
+
+## Milestone 3 — GET 量測(PoC 核心命題)
+
+**目的:** 同 M0 方法量 Plan C image,產出對照。
+**Files:** Modify(移除 printf): `ifmstdll.c`
+
+- [ ] **Step 1: 移除/關閉所有 PoC printf**
+
+把 M2 的 `[PLANC]` printf 移除(或包進 debug flag 預設關)。
+```bash
+grep -rn "PLANC" app_moxa_iss_10_1_0/code/future/cfa2/   # 應為空
+```
+Expected: 無殘留。console printf 會嚴重污染 latency。
+
+- [ ] **Step 2: Build + 部署 clean image**
+
+Build ISS,部署到 DUT,重啟。
+
+- [ ] **Step 3: 重跑 M0 的量測流程**
+
+完全照 M0 Step 2–4(同 DUT、同拓撲、同 walk 指令、同 10 次、同 RTT 定義),輸出 `~/planc-measure/planc.pcap` + `planc.txt`。
+
+- [ ] **Step 4: 產出對照表**
+
+```
+                  baseline(median/p95)   Plan C(median/p95)   改善
+ifTable walk      ___ / ___              ___ / ___            __x
+ifXTable walk     ___ / ___              ___ / ___            __x
+```
+寫進 `~/planc-measure/REPORT.md`。
+
+- [ ] **Step 5: Verification gate — 成功標準**
+
+**成功:** ifTable + ifXTable 整段 walk median < 50ms。
+**部分成功:** 數量級改善但未達 50ms → 在 REPORT 記錄瓶頸假設,排 1–2 天 profile(snmpd 解碼 / AgentX 通道 / nmh 層)。
+**未改善:** 進 profile,結論仍對 Plan D 有用(校準 GET 路徑設計)。
+無論哪種,REPORT 都是 Plan D 投資決策的依據。
+
+---
+
+## Milestone 4 — SET 接線(ifAdminStatus → URI PATCH)
+
+**目的:** AgentX SET ifAdminStatus → ISS handler → `/sbin/ies_uri_handle_client --type update` → framework config_layer,端到端打通且無 drift。
+**Files:** Modify(M4 Step 1 定位): ISS ifAdminStatus SET handler
+
+- [ ] **Step 1: 定位 ifAdminStatus SET handler + 確認 framework URI**
+
+在 ISS cfa2 找 ifAdminStatus 的 set 進入點(`nmhSetIfAdminStatus` 或 AgentX SET callback)。
+確認 framework 對應 URI:
+```bash
+grep -rn "admin\|ifAdminStatus\|adminState" plugin_moxa_*/  --include=*.rs | grep -i interface | head
+```
+記錄確切 URI 路徑(預期類似 `interface/.../adminStatus`)。
+
+- [ ] **Step 2: 驗證 ies_uri_handle_client update 可手動寫**
+
+先不改 code,DUT(root)手動驗證寫入管道:
+```sh
+echo '{"adminStatus":2}' > /tmp/set.json   # 2=down,實際 payload 格式依 framework schema
+/sbin/ies_uri_handle_client --type update --uri <確認的URI> --file /tmp/set.json
+```
+DUT 對照:
+```sh
+ip link   # 對應 port 應變 down
+```
+Expected: framework 真的收到並生效。**若格式不對**,調整 payload/URI 直到手動可寫 — 這是 handler 接線的前提。
+
+- [ ] **Step 3: 在 ISS SET handler 接 ies_uri_handle_client**
+
+ifAdminStatus SET handler(PoC 簡化 phase):
+```c
+    /* Plan C PoC: ifAdminStatus SET -> framework via URI PATCH.
+       TESTSET: validate range (1=up,2=down). COMMIT: write. UNDO: undoFailed (PoC). */
+    if (/* phase == TESTSET */) {
+        if (i4SetVal != 1 && i4SetVal != 2) return SNMP_ERR_WRONGVALUE;
+        return SNMP_ERR_NOERROR;
+    }
+    if (/* phase == COMMIT */) {
+        char cmd[512], payload[64];
+        snprintf(payload, sizeof(payload), "{\"adminStatus\":%d}", (int)i4SetVal);
+        /* write payload to temp file, then invoke client */
+        FILE *f = fopen("/tmp/planc_set.json", "w");
+        if (f) { fputs(payload, f); fclose(f); }
+        snprintf(cmd, sizeof(cmd),
+            "/sbin/ies_uri_handle_client --type update --uri %s --file /tmp/planc_set.json",
+            "<確認的URI>");
+        if (system(cmd) != 0) return SNMP_ERR_COMMITFAILED;
+        return SNMP_ERR_NOERROR;
+    }
+    /* UNDO phase: PoC 不做 rollback */
+    return SNMP_ERR_UNDOFAILED;
+```
+(實際 phase 判斷依 Aricent SET handler 框架;URI/payload 用 Step 1–2 確認的格式。)
+
+- [ ] **Step 4: Build ISS + 部署**
+
+- [ ] **Step 5: Verification gate 1 — SET 生效**
+
+NMS:
+```bash
+snmpset -v2c -c <rwcommunity> <DUT> ifAdminStatus.<X> i 2   # down
+```
+DUT: `ip link` 對應 port 應 down。
+
+- [ ] **Step 6: Verification gate 2 — 無 drift**
+
+```bash
+curl -s http://<DUT>/api/v1/.../interface/<X> | grep -i admin   # framework 也看到 down
+```
+Expected: framework REST / web UI / CLI 都顯示 admin = down(走 URI 的意義)。
+
+- [ ] **Step 7: Verification gate 3 — 雙向還原**
+
+```bash
+snmpset -v2c -c <rwcommunity> <DUT> ifAdminStatus.<X> i 1   # up
+```
+DUT: port 回 up;framework 同步。
+
+- [ ] **Step 8: Verification gate 4(加分)— 非法值被擋**
+
+```bash
+snmpset -v2c -c <rwcommunity> <DUT> ifAdminStatus.<X> i 99
+```
+Expected: 回 wrongValue;framework **完全沒收到** PATCH(TESTSET 擋下)。
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add <iss ifAdminStatus handler> && git commit -m "Plan C PoC: ifAdminStatus SET -> framework via ies_uri_handle_client"
+```
+
+---
+
+## PoC 收尾
+
+- [ ] **產出 REPORT.md**:baseline vs Plan C 對照表 + pcap + AgentX 行為記錄(Open/Register PDU、SET phase 實機行為)→ 給 Plan D。
+- [ ] **程式碼處置**:PoC branch 保留不 merge mainline。change A(skip ifmibdb)若 M3 達標,去留另議。
+- [ ] **DUT 還原**:刷回正式 image。
+
+---
+
+## Self-Review(對照 design 7 個 open questions)
+
+| design open Q | plan 對應 | 狀態 |
+|---|---|---|
+| 1. Aricent AgentX 模組位置 | M1 Step 8(snxmain.c)| ✅ 已 ground |
+| 2. lib URI patch symbol | E = `/sbin/ies_uri_handle_client --type update`,M4 Step 2 手動驗 | ✅ 已 ground(實為 CLI 而非 lib function) |
+| 3. ifAdminStatus framework URI | M4 Step 1 定位 | ⚠️ 需 DUT 上確認確切 URI/payload(已排成 task) |
+| 4. snmpd -Dagentx debug | M1 用 tcpdump loopback 取代(更直接) | ✅ |
+| 5. 拓撲 / 抓包環境 | M0 Step 1–2 | ✅ |
+
+**Placeholder scan:** `<DUT>`/`<community>`/`<確認的URI>` 為執行期環境值,非設計placeholder,已在對應 step 標明取得方式。M4 Step 3 的 phase 判斷標「依 Aricent SET handler 框架」— 這是 M4 Step 1 定位的產物,合理 gated。
+
+**Type consistency:** `ies_uri_handle_client --type update` 全篇一致;`ifmibdb_MibEntry` / `MOX_SNMP_INIT_ENTRY` 與 survey 一致。

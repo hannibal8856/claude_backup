@@ -1,0 +1,51 @@
+MAKEFLAGS += --silent
+
+VERSION=$(shell dpkg-parsechangelog --show-field Version)
+MAJOR_VERSION=$(word 1,$(subst ., ,${VERSION}))
+
+PWD=$(shell pwd)
+
+BUILD_PATH=$(PWD)/build
+SRC_PATH=$(PWD)/src
+INCLUDE_PATH=$(PWD)/include
+
+CFLAGS+=-std=c99 -Wall -Werror -I $(INCLUDE_PATH) -D_DEFAULT_SOURCE
+# mapping_reuse.c #includes the canonical ies-auto-mibs net_*.h; the .mk passes
+# the -I paths + the same product -D flags as 3rdparty_net_snmp via EXTRA_CFLAGS.
+CFLAGS+=$(EXTRA_CFLAGS)
+# config_set.c drives config writes through the framework's REST endpoint.
+LDLIBS+=-lmoxaframeworkuri -lparson -lmoxa_system
+
+SRC_FILES=$(shell find ${SRC_PATH} -type f -name "*.c")
+HEADER_FILES=$(shell find ${INCLUDE_PATH} -type f -name "*.h")
+
+LIBRARY_BUILD_PATH=$(BUILD_PATH)/library
+LIBRARY_OBJ_FILES=$(patsubst %.c,%.o,$(subst ${SRC_PATH},${LIBRARY_BUILD_PATH},${SRC_FILES}))
+
+LIBRARY_NAME=libmoxaiesautomibs
+LIBRARY_SO_NAME=$(LIBRARY_NAME).so.$(MAJOR_VERSION)
+LIBRARY_FILE_NAME=$(LIBRARY_NAME).so.$(VERSION)
+
+.PHONY: all install clean
+all: $(LIBRARY_BUILD_PATH)/$(LIBRARY_FILE_NAME)
+
+$(LIBRARY_BUILD_PATH)/$(LIBRARY_FILE_NAME): $(LIBRARY_OBJ_FILES)
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -shared -Wl,-soname,$(LIBRARY_SO_NAME) \
+		-o $@ ${LIBRARY_OBJ_FILES} $(LDLIBS)
+	ln -sf $(shell basename $@) $(LIBRARY_BUILD_PATH)/$(LIBRARY_SO_NAME)
+	ln -sf $(shell basename $@) $(LIBRARY_BUILD_PATH)/$(LIBRARY_NAME).so
+
+$(LIBRARY_OBJ_FILES): $(SRC_FILES) $(HEADER_FILES)
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -fvisibility=hidden -fPIC -c -o "$@" \
+		"$(patsubst %.o,%.c,$(subst ${LIBRARY_BUILD_PATH},${SRC_PATH},$@))"
+
+install: all
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/lib/
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/include/lib_moxa_ies_auto_mibs
+	$(SILENCE)cp -P $(LIBRARY_BUILD_PATH)/$(LIBRARY_NAME).so* $(DESTDIR)/usr/lib/
+	$(SILENCE)cp $(INCLUDE_PATH)/*.h $(DESTDIR)/usr/include/lib_moxa_ies_auto_mibs
+
+clean:
+	$(SILENCE)rm -rf $(BUILD_PATH)

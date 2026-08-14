@@ -1,0 +1,102 @@
+# ADR-0004: iss_build==0 —— SNMP GET 由 framework 原生服務、SET 留 in-master（native dual-registration + live table_iterator）
+
+Status: Accepted
+Date: 2026-07-27
+Context:
+  ADR-0003（Proposed）主張用「forward」機制：in-master 保留註冊贏 wire，
+  在 mox_snmp_handle_entry 的 GET 分支呼叫 mox_snmp_forward_get_to_framework()
+  把 GET 前送給 framework AgentX subagent（表註冊成唯讀 table_data_set），
+  終局收斂到「forward-only」。此 ADR 依 trustAccess 於 DUT 的實測結果，
+  修正 ADR-0003 的核心機制。
+  三項關鍵實測發現（BUILD 2026_0724_1233 / 2026_0727_0927，trustAccess）:
+  1. **forward 是死路**：在 framework 把表註冊成 net-snmp 表（先 table_data_set、
+     後 table_iterator）後,snmpd 對 trustedIp 的 GET/GETNEXT/walk **完全不會進
+     in-master 的 handler**（debug_log_5 的 PlanE-DBG trace 空白，空表與有資料時皆然）。
+     即 mox_snmp_forward_get_to_framework() 從未執行。net-snmp 是**按能力（capability）
+     分流**：GET/GETNEXT/GETBULK → framework 的唯讀表原生服務；SET → in-master 的
+     RWRITE 註冊（framework 表唯讀，吃不下 SET）。已於 DUT 驗證：snmpset trustedIp
+     欄 → config 檔改動（in-master→config）；snmpwalk 由 framework 服務。
+     → ADR-0003 的「in-master 靠 priority 贏 wire、GET 需 forward」前提被推翻；
+     forward 這段程式碼是多餘的。
+  2. **空 table_data_set 曾疑似卡 walk**：早期 build（1053）空表 GETNEXT timeout，
+     但完整重編（1233）後不重現 → 判定為 build 不一致，非架構缺陷。
+  3. **table_data_set 有 refresh gap（致命）**：table_data_set 是 startup 一次性快照,
+     config 改了（CLI 或 SNMP SET）SNMP GET 要 reboot 才反映；對照 mainline（逐請求
+     live 讀 config 的舊 REST 慢路徑）永遠同步。framework 其餘 OID 走 moxa_config_handler
+     本來就 live（read_config_value 鎖的是 live running_config），只有 table_data_set 脫節。
+Decision:
+  對 iss_build==0 的 config 表，採「**native dual-registration + live table_iterator**」,
+  不用 forward、不用 agentx_owned.list skip:
+  1. **framework 以 net-snmp table_iterator 註冊該表**（唯讀 RONLY，priority 200）：
+     get_first/get_next 由 C 側枚舉 INTEGER row index 1..N，N 由 Rust callback
+     row_count() 每次 **live 讀 config** 取得；node handler 由 Rust 逐請求 live 讀 config
+     填欄值（型別由 handler 明確設定：INTEGER / IpAddress / rowStatus…）。
+     → net-snmp 原生排序 GET/GETNEXT/GETBULK，且**無快取、config 一改立即反映、免 reboot**,
+       行為等同 mainline 但保有 net-snmp 排序。此即修掉 refresh gap 的關鍵（取代 ADR-0003 的
+       table_data_set 快照）。
+  2. **in-master 保留 MOX_SNMP_INIT_ENTRY 註冊（RWRITE, priority 127）**：SET 走既有
+     readCreate_v2 多階段（rowStatus 原生原子建列不變）。
+  3. **路由靠 net-snmp 依能力自然分流**，不需任何顯式閘門/清單/forward：
+     同一 OID region 由 framework（RONLY 表）與 in-master（RWRITE）併存註冊 →
+     GET/GETNEXT/GETBULK 落 framework 表，SET 落 in-master。實測證實。
+  4. trustAccess/trustedIp 為第一張（reference）表；其餘 iss0 config 表可比照，
+     依需要逐張採用（YAGNI，不預先全套）。
+  保留 ADR-0002 的資料層決策（lib_moxa_ies_auto_mibs = 純資料/分類，framework 續重用）。
+  本 ADR **supersede ADR-0003** 的 forward 機制與 forward-only 終局。
+Alternatives Considered:
+  - ADR-0003 的 forward（dual-register + 迭代 subtree 挑非自身 handler 前送 GET）:
+    實測 forward 從未被觸發（net-snmp 已原生把 GET 分流到 framework 表）→ 是死碼，
+    徒增 hot path 複雜度；否決並移除。
+  - table_data_set（ADR-0003 fix-1）：能排序 GET/GETNEXT，但為 startup 快照 →
+    refresh gap（config 改需 reboot 才反映）→ 不可出貨；改用 table_iterator。
+  - 對 refresh gap 改「table_data_set + config-change 時重建」：需一條 config-change
+    通知打進 AgentX subagent thread（不確定有此 hook）+ 重建邏輯 + 短暫脫節窗；
+    比「拿掉快取、live 讀」複雜且脆弱 → 否決。
+  - 「拿掉 skip、用通用 register_instance 逐 OID」服務 trustedIp：moxa_config_handler
+    只 render INTEGER/OCTET_STR，無 ASN_IPADDRESS 路徑 → ipAddress/netmask 會被當
+    STRING（型別錯）；除非改通用 handler + 依賴 mapping 的 val_type，較脆弱 → 用
+    iterator 自控型別。
+  - forward-only 終局（ADR-0003 #6-8，退休 skip、隱式閘門、iss1 一併收斂）：前提是
+    forward 為唯一機制；既然 forward 對 iss0 讀路是死碼，此終局不再適用 → 收斂改為
+    「native dual-register，net-snmp 依能力分流」。
+Consequences:
+  - GET/GETNEXT/GETBULK 快（framework in-process live 讀，非 REST ~600ms）、SET 正確
+    （in-master readCreate_v2）、且 **config 改動免 reboot 即時反映**（refresh gap 關閉）。
+  - 每張採用的表需一組 Rust callback：row_count()（live 讀 config 列數）+ node handler
+    （依 col 填型別正確的值）；欄型別在 handler 明確控制（含 IpAddress via set_ipaddress）。
+  - dual registration 仍在：framework RONLY 表 + in-master RWRITE INIT_ENTRY 併存，
+    靠 net-snmp 依能力（RONLY vs RWRITE）與表 helper 分流；**不需驗證/維護 priority 贏 wire
+    的假設**（ADR-0003 該假設已被實測否決）。
+  - forward 程式碼（mox_snmp_forward_get_to_framework / entry_is_trustedip / trustedip
+    prefix / PlanE-DBG trace）與 table_data_set demo + 通用 builder wrappers 已移除
+    （2026-07-27 清理）；Plan C 的 mox_snmp_forward_get_to_iss（iss_build==1）不受影響，保留。
+  - agentx.c 內 netsnmp_init_table_dataset() 與 table_data(set).h include 目前為 inert
+    dead（無 table_data_set 使用者），暫留以免動 init 造成 runtime 風險，可後續移除。
+  - ADR-0001（mxTrap，Plan D「framework 擁有 SET / Rust valid-toggle」）**尚未**依本模型
+    遷移 —— mxTrap 是動態 rowStatus createAndGo 的硬骨頭，trustAccess（固定槽）未驗證此路;
+    是否把 mxTrap 的 SET 收回 in-master、GET 改 table_iterator，列為後續，且動 0001（Accepted）
+    前需與 user 確認。本 ADR 不變更 0001/0002 狀態。
+Constraints / Assumptions:
+  - iss_build==0 = framework/config 擁有；iss_build==1 = ISS 擁有（不變，Plan C 續行）。
+  - framework table_iterator node handler 逐請求讀 live config（read_config_value 鎖
+    running_config，與 actix workers 同一 Arc<Mutex>）→ 天生同步、無快取。
+  - net-snmp 5.9.3：同 OID region 併存 RONLY 表（framework, prio 200）與 RWRITE 註冊
+    （in-master, prio 127），實測 GET 落表、SET 落 in-master（依能力分流）—— 為實測確立行為。
+  - SET 正確性依賴 in-master readCreate_v2 多階段。
+  - index 為單一 INTEGER row number（1..N，依 config 陣列位置）；col 型別由 handler 決定。
+Related Files / Modules:
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c
+    (MoxaAgentX_RegisterIterTable + moxa_iter_get_first/get_next；MoxaAgentX_SetIpAddress)
+  - buildroot/dl/lib_moxa_snmp_agentx/include/lib_moxa_snmp_agentx.h (MoxaRowCountFn 等宣告)
+  - buildroot/dl/lib_moxa_rust_snmp_agentx/src/lib.rs (register_iter_table / set_ipaddress)
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs
+    (register_trustedip_table = iterator；trustedip_row_count / trustedip_iter_handler；
+     TRUSTEDIP_ROOT；skip-loop 讓 iterator 獨佔 .2；read_config_value = live)
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c (g_reuse_srcs 含 mxSysTrustAccess_MibEntry)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c
+    (mox_snmp_handle_entry：SET 留 in-master；Plan C 的 forward_get_to_iss 保留)
+  - 參考範本：net-snmp 5.9.3 agent/mibgroup/mibII/vacm_context.c（最小唯讀 table_iterator）
+Related ADRs:
+  - Supersedes: ADR-0003（forward 機制與 forward-only 終局；ADR-0003 改 Status = Superseded by ADR-0004）
+  - 保留: ADR-0002 的資料層決策（lib_moxa_ies_auto_mibs 純資料）
+  - ADR-0001（mxTrap Plan-D framework-SET）：尚未依本模型遷移，狀態不變；mxTrap 遷移為後續議題

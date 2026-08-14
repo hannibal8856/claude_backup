@@ -1,0 +1,92 @@
+# Handoff — framework SNMP subagent(branch `snmp-plan-E`)最後更新 2026-07-29
+
+> 檔名沿用 2026-07-28 的「readpath」,但**該案已被推翻並 revert**(見下)。本檔內容為 2026-07-29 收盤現況。
+> 歷史脈絡在 ADR;本檔只寫「現在是什麼狀態、下一步做什麼」。
+
+## TL;DR
+
+2026-07-28 以為 framework 的 SNMP 問題出在「GET 的資料讀取路徑」(ADR-0007 改走 REST、ADR-0008 改 hybrid)。
+**2026-07-29 實測全部推翻**:讀值從來不慢(單發 `snmpget` 11–17ms),真因是 **GETNEXT 的 OID 尋訪**。
+ADR-0007/0008 的程式碼**已全數 revert**,config GET 回到 in-process。真解是 **ADR-0009:subtree 註冊 + framework 自行回答 GETNEXT**,已 DUT 驗證(3.915s → 0.023s)。
+
+---
+
+## 現況(全部已驗證;除 GROUPS 重構外皆已 commit)
+
+| 項目 | 狀態 |
+|---|---|
+| **turboRing status shaping**(named-key `ring<N>` + MAC 6-byte) | ✅ walk 正確 |
+| **GETNEXT 效能**(TR2 subtree 註冊 + `handle_getnext` + 跳過無值 OID) | ✅ 3.915s → **0.023s** |
+| **`interface` 欄 16 個壞 OID 移除**(`is_index_table` 排除 named-key ring) | ✅ |
+| **宣告式 `GROUPS` 註冊表**(收斂三種註冊方式 + skip 自動推導 + 全域 `SORTED_OIDS`) | ✅ 47 varbind 逐字全等 |
+| ADR-0007 / ADR-0008 → **Deprecated**;ADR-0009 → **Accepted** | ✅ |
+
+**四條驗收基準線**(重構前後全等,日後回歸比對用):
+`.603.3.4` **25** 筆 / `.602.1.4.1.2` **4** 筆 / `.602.7.2.1` **2** 筆 / `.605.1.1.1.1` **16** 筆。
+
+### 註冊架構(現況)
+`snmp_subagent.rs` 的 `static GROUPS` 是**註冊清單的唯一真實來源**,四筆:
+- `trustedIpTable` / `snmpTrapHostTable` / `l3VlanIfTable` → `RegKind::IterTable`(SET 含 rowStatus 留 in-master)
+- `mxTurboRingV2` → `RegKind::Subtree`(GETNEXT 由 framework 自答)
+
+未被 GROUPS 涵蓋的 mapped OID 才 fallback 逐一 `register_instance`;**skip 集合由 GROUPS 自動推導**。
+新增群組 = 加一行。
+
+---
+
+## ⚠️ 下一步:三件事(依優先序)
+
+### 1. 與 NOS v7.0 mainline 的三處已知差異(memory `project_framework_vs_mainline_snmp_diffs`)
+`snmpwalk .603.3.4`:我們 25 筆 vs mainline 23 筆。
+
+| # | OID | 我們 | mainline | **依 MIB 誰對** |
+|---|---|---|---|---|
+| 1 | `.1.2.1.1.x` / `.2.1.1.1.x` ring index | `1`,`2` | 無 | **我們對**(MAX-ACCESS `read-only`) |
+| 2 | `.1.2.1.4.x` ring interface | 無 | `01 02`,`03 04` | **mainline 對**(我們缺功能) |
+| 3 | `.1.3.3.0` coupling port | `4` | `5` | **mainline 對**(我們值錯) |
+
+**#3 優先處理(值是錯的)**,而且是**一類問題**:in-master 對帶 `IES_FLAG_SNMP_URI_INTERFACE` 的 entry 做 `uri_iface + 1`(0-based→1-based),framework 沒做。
+**根因:`struct ies_map_entry` 沒有 flags 欄位** —— in-master 的 flag 只有 `is_status` 被搬過來。需清查還有哪些 group 用到該 flag。
+
+### 2. 把 MIB 當權威來源(2026-07-29 新結論)
+`buildroot/dl/snmp_moxa_mib/private/*.mib`(目錄是**單數** `snmp_moxa_mib`)是 SNMP 側權威:
+MAX-ACCESS 決定該不該出現在 walk、SYNTAX 決定型別編碼、INDEX 子句決定 table 結構。
+**framework 的 ies_map 完全沒參照 MIB**,只用 `net_mx_*.h`(URI 側)。`.h` 的 `mode` 沒有 not-accessible 概念 —— 這正是缺口。
+turboRing 這次繞路(index 欄該不該回、MAC 幾 byte、named-key 還是陣列)**MIB 一開始就寫明**。
+→ **開發時先查 MIB,不要用 walk 實驗猜**;可考慮寫 ies_map ↔ MIB 的比對腳本。
+
+### 3. `Subtree` 推廣的前提(ADR-0009 Consequences)
+- **必須先確認 ISS subagent 的註冊範圍與 priority** —— subtree 會一併涵蓋 framework 沒資料的 OID(gap / `iss_build==1`),可能遮蔽 ISS。
+- **有 rowStatus 的 group**(trustAccess / mxTrap / mxIpIf)改 subtree 前,要確認 in-master 仍贏 wire(priority 200 vs 127),否則 createAndGo/destroy 會被 framework 攔下而失效。
+- mxTurboRingV2 之所以安全:**沒有 rowStatus**,且 in-master 的 `MOX_SNMP_INIT_ENTRY(mxTurboRingV2_MibEntry)` 是註解掉的。
+
+---
+
+## 暫緩項目
+- **mxIpIf col2(ifVlanId)walk 出 `0/0`** = in-master 在 shadow(`atoi("vlanN")`),framework 未服務該表。使用者判定**暫緩**,非 framework bug。memory `project_mxipif_col2_inmaster_deferred`。
+- **每次 AgentX round-trip ~0.107s**(loopback IPC 應 <1ms)。它是 GETNEXT 慢的「放大器」(18 × 0.107),subtree 把次數降到 1 後已無感。**保留為日後其他 group 仍慢時的首要調查方向**;嫌疑:`lib_moxa_snmp_agentx` 的 framing(既有筆記「single recv + partial send」)。
+
+## Build 指令
+- 只動 rust(`app_moxa_framework` / `lib_moxa_rust_*`):`app_moxa_framework` + rust 鏈 → 打包。
+- 動 `lib_moxa_ies_auto_mibs` 或 `lib_moxa_snmp_agentx`(C):該 package → rust 鏈 → `app_moxa_framework` → 打包。
+- **不需** rebuild `3rdparty_net_snmp`(除非動 `ies_auto_mibs_setup.c` 之類的 in-master 側)。
+- 建置與 DUT 由使用者執行。DUT=192.168.127.253,admin/moxa,write community `private`。
+
+## ADR 地圖(`~/mds4xgl3/.adr/`)
+- ADR-0001 → Superseded by ADR-0006
+- ADR-0002 資料層(lib_moxa_ies_auto_mibs 純資料 + REST bridge)→ Accepted
+- ADR-0003 → Superseded by ADR-0004
+- ADR-0004 native dual-reg + table_iterator → Accepted(ADR-0009 精修其「註冊粒度」面向)
+- ADR-0005 iss0 end-state → Proposed
+- ADR-0006 mxTrap → Plan E → Accepted + DUT 驗證
+- **ADR-0007 REST 讀取路徑 → Deprecated(已 revert;動機 mxIpIf 實為 in-master shadow)**
+- **ADR-0008 hybrid 讀取 → Deprecated(已 revert;因果認定被 ADR-0009 推翻)**
+- **ADR-0009 subtree 註冊 + 自行回答 GETNEXT → Accepted + DUT 驗證(含 GROUPS 重構)**
+
+## 關鍵 gotchas
+- **walk 慢 ≠ 讀值慢**:先 `snmpget` vs `snmpgetnext` 分辨,再抓 AgentX loopback pcap(`tcpdump -i lo port 705`,外部 :161 看不到 master↔subagent)。memory `project_snmp_walk_slow_diagnosis`。
+- **「與 mainline 不同」≠「我們錯」**:先查 MIB 的 MAX-ACCESS/SYNTAX 再判斷(見上面 #1)。
+- **GETNEXT 回 noSuchInstance 會終止 client 的 walk** —— subtree handler 必須在 in-process 迴圈裡跳過無值 OID。
+- **col1 index 對每個 server 都回 row number**,無法辨識誰在服務;只有特殊值欄能當照妖鏡(mxIpIf col2=0 是 in-master、=VLANid 是 framework)。
+- **snmpset 回顯的是 request varbind,不算確認**;要看事後 GET + config 檔。
+- tshark 對 AgentX response 常標 `[Malformed Packet]`(dissector 限制),不代表封包真的壞。

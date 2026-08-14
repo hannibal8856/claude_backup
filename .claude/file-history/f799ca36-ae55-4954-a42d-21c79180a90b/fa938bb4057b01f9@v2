@@ -1,0 +1,20 @@
+---
+name: project-plan-d-two-subagent-oid-reachability
+description: Plan D — verified only 2 AgentX subagents (ISS + framework) needed; no daemon serves OIDs directly
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: f799ca36-ae55-4954-a42d-21c79180a90b
+---
+
+Plan D (future) = make the framework (ies-auto-mibs) an AgentX **subagent** instead of an in-process snmpd dlmod; before that, ies-auto-mibs will first be split into a shared library so everything can see it. Question verified 2026-07-01: **is any OID data trapped inside an individual daemon (which would force that daemon to also be a subagent)?** Answer: **No — two subagents (ISS + app_moxa_framework) suffice.**
+
+Evidence (traced the SNMP GET handler `mox_snmp_handle_entry` methods 1–4 + daemon side):
+- All ies-auto-mibs OIDs register with handler `mox_snmp_handle_entry`; its data sources are ONLY: (1a) `getEntryValue_uriScalar{Config,Status}_*` → `MOXA_SNMP_{CONFIG,STATUS}_URI` → LibFrameworkUri (= **framework** config/status layer); (1b) `getEntryValue_issScalarEntry` → `LibUtil_ExecShCmd(MOXA_SNMP_URI_CTRL_CLIENT --type read --uri…)` (= **ISS** via uri-control-client); (1c) `getEntryValue_generalInfo_*` (MAC/serial/model/portNum) → `LibSystem_*` (in-process shared lib, reads EEPROM/file); (2) `entry_handle_generate_uri_value_file` → framework; (3) `entry_handle_generate_iss_value_file` → ISS. (4) dlmod = **not used** (no Moxa .so loaded; config_moxa_snmp_control.c snmpd.conf gen + init_snmpd.sh have no dlmod directive).
+- Whole-tree scan of every `getEntryValue_*`: only `LibFrameworkUri_* / LibSystem_* / URI_CTRL_CLIENT` appear — **zero** `socket()/shm_open/shmget/connect()//var/run/…` → no getter talks to a daemon directly.
+- `grep agentx|netsnmp_register|SNMPRegisterMib|init_agent` across `app_moxa_*` daemons = empty → **no non-ISS daemon registers OIDs or is a subagent** (only ISS registers, via SNMPRegisterMibWithLock).
+
+Semantics: daemon data physically lives in daemons, but daemons do NOT serve SNMP — they expose data only through the framework config/status layer (Morris layering: daemon → status/config layer → up). So framework is the single window for all non-ISS OIDs; ISS is the only other source.
+
+**Why:** determines Plan D scope — no need to make each daemon a subagent; ISS + framework cover everything.
+**How to apply:** Plan D framework-subagent must retain LibFrameworkUri (config/status layer) + LibSystem + uri-control-client (inherent — it IS the framework). **Design constraint to enforce:** any NEW SNMP OID must read via the config/status layer, never directly from a daemon socket/shm — else the "2 subagents suffice" invariant breaks. Note: the framework/URI path is the ~600ms slow path; Plan D is an architecture/layering win, not a perf win (perf still bounded by the config/status layer). Related: [[project-plan-c-agentx-set-path-and-framing]]. Caveat also noted there: the in-process ifAdminStatus/ifXTable GET-forward (netsnmp_call_handlers to ISS's in-master reg) only works while framework is an in-process dlmod; moving to a subagent breaks it and reopens the RW GET-fast/SET-clean split.

@@ -1,0 +1,16 @@
+# Plan E PoC (trustAccess) — progress ledger
+
+Plan: ~/plan-e-iss0-get-forward-framework-set-in-master-plan-2026-07-23.md
+Note: builds CANNOT run in this session (external toolchain BR2_TOOLCHAIN_EXTERNAL_PATH
+=/usr/local/gcc-linaro-7.5.0-... absent). Code applied inline + statically verified;
+build + commit + DUT are run by the user. Task status below = code state, not build-gated.
+
+Task 1: code applied (lib_moxa_ies_auto_mibs/src/mapping_reuse.c:47 include, :104 REUSE_SRC;
+  in-master INIT_ENTRY at ies_auto_mibs_setup.c:352 intact). UNCOMMITTED. build+commit pending user.
+Task 2: code applied (lib_moxa_snmp_agentx/src/agentx.c:63 reg->priority=200). UNCOMMITTED.
+Task 3: code applied (3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c: mox_trustedip_prefix,
+  mox_snmp_entry_is_trustedip, mox_snmp_forward_get_to_framework, MODE_IS_GET insertion). UNCOMMITTED.
+Task 4: pending user's DUT results (RISK #1 dual-reg by priority, #2 subtree-iterate forward, SET-in-master).
+
+Static verification done: netsnmp_subtree has ->next/->reginfo; netsnmp_mib_handler has access_method;
+mox_snmp_handle_entry prototype at :122-129; all new symbols present.

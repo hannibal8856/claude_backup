@@ -1,0 +1,54 @@
+#!/bin/bash
+# 從 test_snmp_get_loop.sh 的 pcap 分「三組監控情境」重算延遲統計。
+#
+# 輸出對外用的三個數字:平均 / 最壞情況 / 超過 50ms 佔比。
+# 不輸出中位數 —— 中位數會掩蓋尾端問題。
+#
+# 配對方式與 latency_stats.sh 一致:wire time,以 snmp.request_id 配對
+# request/response,不採用 client 端 wall clock。分組依據是 request 內
+# 第一個 varbind 的 OID 前綴。
+#
+# usage: latency_stats_bygroup.sh <pcap> [threshold_ms]
+set -u
+
+P="${1:?usage: latency_stats_bygroup.sh <pcap> [threshold_ms]}"
+TH="${2:-50}"
+
+tshark -r "$P" -Y snmp -T fields \
+       -e frame.time_epoch -e snmp.request_id -e udp.srcport -e snmp.name 2>/dev/null \
+| awk -F'\t' -v th="$TH" '
+function grp(o) {
+  if (o ~ /^1\.3\.6\.1\.2\.1\.2\.2\.1\.8\./)                       return "1. Link Status"
+  if (o ~ /^1\.3\.6\.1\.2\.1\.2\.2\.1\.(10|14)\./ ||
+      o ~ /^1\.3\.6\.1\.2\.1\.31\.1\.1\.1\.15\./)                  return "2. Traffic & Bandwidth"
+  if (o ~ /^1\.3\.6\.1\.4\.1\.8691\.603\.5\.3\.2\.1\.1\.1\.(8|9)\./) return "3. Fiber Statistics"
+  return ""
+}
+{
+  t=$1; id=$2; sp=$3; oid=$4
+  sub(/,.*/, "", oid)                 # 只取第一個 varbind 的 OID
+  if (sp==161) {
+    if (id in req) {
+      g=reqg[id]
+      if (g != "") {
+        d=(t-req[id])*1000
+        n[g]++; s[g]+=d
+        if (d>max[g]) max[g]=d
+        if (d>th) over[g]++
+      }
+      delete req[id]; delete reqg[id]
+    }
+  } else {
+    req[id]=t; reqg[id]=grp(oid)
+  }
+}
+END {
+  printf "%-24s %8s %10s %10s %16s\n", "測試項目", "n", "平均", "最壞", ">" th "ms 佔比"
+  split("1. Link Status,2. Traffic & Bandwidth,3. Fiber Statistics", G, ",")
+  for (i=1; i<=3; i++) {
+    g=G[i]
+    if (n[g]+0 == 0) { printf "%-24s %8s\n", g, "(無資料)"; continue }
+    printf "%-24s %8d %8.2fms %8.2fms %7d/%d (%.2f%%)\n", \
+      g, n[g], s[g]/n[g], max[g], over[g]+0, n[g], (over[g]+0)*100/n[g]
+  }
+}'

@@ -1,0 +1,386 @@
+/*
+ * lib_moxa_ies_auto_mibs — mxFiberCheck data processing.
+ *
+ * Ported from plugin_moxa_fiber_check/snmp/plugin_snmp_fiber_check.c, the dlmod
+ * plugin this group is migrating off. Six of mxFiberCheck's 22 columns are not
+ * plain config/status leaves, so the generic IES_COL_IDXTBL_VALUE path cannot
+ * serve them:
+ *
+ *   config .5/.7  txPowerWarning[1] / rxPowerWarning[1]  (array high end)
+ *   config .6/.8  txPowerWarning[0] / rxPowerWarning[0]  (array low end)
+ *   config .9     resetToDefault — an action column with no backing field
+ *   status .12/.13 txPowerLimit / rxPowerLimit           (array, both ends)
+ *
+ * Split of responsibilities, and why it is not a straight copy of the plugin:
+ *
+ *   GET — the plugin's _GetStringArray* each begin with LibFrameworkUri_GetUri(),
+ *   i.e. one loopback HTTP round trip per OID. The framework subagent reads
+ *   config and status in-process, and a full mxFiberCheck walk is 264 varbinds;
+ *   reinstating a fetch here would put back exactly the cost Plan E removes. So
+ *   the *fetch* stays in the caller and only the *extraction* lives here,
+ *   operating on the JSON text the caller already has. The extraction itself is
+ *   the plugin's, unchanged: take at most the first two array elements, missing
+ *   ones read as "".
+ *
+ *   SET — ies_fc_set() is a faithful port of the plugin's _PatchUri(), keeping
+ *   the whole-object read-modify-write, the C<->F conversion, the back-filling
+ *   of empty thresholds with the SFF defaults, and the reset-to-default
+ *   semantics. SET is rare, so it reuses the same loopback GET+PATCH the plugin
+ *   uses and stays byte-identical to it.
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+#include "ies_internal.h"
+
+#include "lib_moxa_framework_uri/lib_moxa_framework_uri.h"
+#include "parson/parson.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* plugin_snmp_fiber_check.c: MAX_STRING_LEN */
+#define IES_FC_STR_LEN 32
+
+/* app_moxa_fiber_check/include/fiber_check_api.h — the SFF8472/8436/8636
+ * defaults the plugin substitutes for an empty threshold. Copied rather than
+ * included: this library must not gain a dependency on app_moxa_fiber_check,
+ * and these are fixed values from the transceiver standards. */
+#define IES_FC_DDM_STD_DBM_MIN     (-40.0)
+#define IES_FC_DDM_STD_DBM_MAX     (8.2)
+#define IES_FC_DDM_STD_TEMP_C_MAX  (128.0)
+#define IES_FC_DDM_STD_TEMP_F_MAX  (262.4)
+
+#define IES_FC_CFG_URI  "/api/v1/setting/data/mxfiberCheck/general/portTable"
+
+/* Read at most the first two elements of a JSON string array into out[0]/out[1].
+ * Elements that are absent or non-string become "". Mirrors the identical loop
+ * in the plugin's _GetStringArray / _GetStringArrayFirst / _GetStringArraySecond.
+ * Returns 0 when `json_text` parsed as an array. */
+static int
+fc_pair(const char *json_text, char out[2][IES_FC_STR_LEN])
+{
+    JSON_Value *v;
+    JSON_Array *a;
+    size_t      n, i;
+
+    out[0][0] = '\0';
+    out[1][0] = '\0';
+
+    if (json_text == NULL)
+    {
+        return -1;
+    }
+    v = json_parse_string(json_text);
+    if (v == NULL)
+    {
+        return -1;
+    }
+    a = json_array(v);
+    if (a == NULL)
+    {
+        json_value_free(v);
+        return -1;
+    }
+
+    n = json_array_get_count(a);
+    for (i = 0; i < n && i < 2; i++)
+    {
+        const char *s = json_array_get_string(a, i);
+        snprintf(out[i], IES_FC_STR_LEN, "%s", s ? s : "");
+    }
+
+    json_value_free(v);
+    return 0;
+}
+
+int
+ies_fc_array_elem(const char *json_text, int which, char *out, size_t out_len)
+{
+    char pair[2][IES_FC_STR_LEN];
+
+    if (out == NULL || out_len == 0 || (which != 0 && which != 1))
+    {
+        return -1;
+    }
+    if (fc_pair(json_text, pair) != 0)
+    {
+        return -1;
+    }
+    snprintf(out, out_len, "%s", pair[which]);
+    return 0;
+}
+
+int
+ies_fc_array_pair(const char *json_text, char *out, size_t out_len)
+{
+    char pair[2][IES_FC_STR_LEN];
+
+    if (out == NULL || out_len == 0)
+    {
+        return -1;
+    }
+    if (fc_pair(json_text, pair) != 0)
+    {
+        return -1;
+    }
+    /* Exactly the plugin's format string, including the space after the comma:
+     * a manager comparing against the dlmod build must see the same bytes. */
+    snprintf(out, out_len, "[%s, %s]", pair[0], pair[1]);
+    return 0;
+}
+
+/* Reject anything that is not an optionally-negative decimal number, the same
+ * character-level check the plugin runs before touching the config layer. */
+static int
+fc_value_is_number(const char *value, size_t len)
+{
+    size_t i;
+    int    point = 0;
+
+    for (i = 0; i < len; i++)
+    {
+        if (i == 0)
+        {
+            if (value[i] == '-')
+            {
+                continue;
+            }
+            if (value[i] == '.')
+            {
+                return -1;   /* ".123" */
+            }
+        }
+        if (i == 1 && value[0] == '-' && value[i] == '.')
+        {
+            return -1;       /* "-.123" */
+        }
+        /* ASCII 46..57 is ". / 0-9"; '/' (47) is not a number character. */
+        if (value[i] > '9' || value[i] < '.' || value[i] == '/')
+        {
+            return -1;
+        }
+        if (value[i] == '.')
+        {
+            if (point)
+            {
+                return -1;   /* more than one decimal point */
+            }
+            point = 1;
+        }
+    }
+    return 0;
+}
+
+/* Substitute the SFF defaults for thresholds the config layer left empty, so a
+ * partial write never pushes "" back down. Plugin _PatchUri lines 742-790. */
+static void
+fc_backfill_defaults(JSON_Object *obj)
+{
+    char        str_c[IES_FC_STR_LEN];
+    char        str_f[IES_FC_STR_LEN];
+    char        str_pwr[IES_FC_STR_LEN];
+    const char *s;
+    JSON_Array *arr;
+
+    s = json_object_get_string(obj, "temperatureWarningF");
+    if (s == NULL || s[0] == '\0')
+    {
+        snprintf(str_f, sizeof(str_f), "%.2f", IES_FC_DDM_STD_TEMP_F_MAX);
+        snprintf(str_c, sizeof(str_c), "%.2f",
+                 (IES_FC_DDM_STD_TEMP_F_MAX - 32) * 5 / 9);
+        json_object_dotset_string(obj, "temperatureWarningF", str_f);
+        json_object_dotset_string(obj, "temperatureWarningC", str_c);
+    }
+
+    s = json_object_get_string(obj, "temperatureWarningC");
+    if (s == NULL || s[0] == '\0')
+    {
+        snprintf(str_f, sizeof(str_f), "%.2f",
+                 IES_FC_DDM_STD_TEMP_C_MAX * 9 / 5 + 32);
+        snprintf(str_c, sizeof(str_c), "%.2f", IES_FC_DDM_STD_TEMP_C_MAX);
+        json_object_dotset_string(obj, "temperatureWarningF", str_f);
+        json_object_dotset_string(obj, "temperatureWarningC", str_c);
+    }
+
+    arr = json_object_get_array(obj, "txPowerWarning");
+    if (arr != NULL)
+    {
+        s = json_array_get_string(arr, 1);
+        if (s == NULL || s[0] == '\0')
+        {
+            snprintf(str_pwr, sizeof(str_pwr), "%.2f", IES_FC_DDM_STD_DBM_MAX);
+            json_array_replace_string(arr, 1, str_pwr);
+        }
+        s = json_array_get_string(arr, 0);
+        if (s == NULL || s[0] == '\0')
+        {
+            snprintf(str_pwr, sizeof(str_pwr), "%.2f", IES_FC_DDM_STD_DBM_MIN);
+            json_array_replace_string(arr, 0, str_pwr);
+        }
+    }
+
+    arr = json_object_get_array(obj, "rxPowerWarning");
+    if (arr != NULL)
+    {
+        s = json_array_get_string(arr, 1);
+        if (s == NULL || s[0] == '\0')
+        {
+            snprintf(str_pwr, sizeof(str_pwr), "%.2f", IES_FC_DDM_STD_DBM_MAX);
+            json_array_replace_string(arr, 1, str_pwr);
+        }
+        s = json_array_get_string(arr, 0);
+        if (s == NULL || s[0] == '\0')
+        {
+            snprintf(str_pwr, sizeof(str_pwr), "%.2f", IES_FC_DDM_STD_DBM_MIN);
+            json_array_replace_string(arr, 0, str_pwr);
+        }
+    }
+}
+
+/* Apply one option onto the row object. Plugin _PatchUri's switch. */
+static void
+fc_apply(JSON_Object *obj, int option, const char *value)
+{
+    char        str_c[IES_FC_STR_LEN];
+    char        str_f[IES_FC_STR_LEN];
+    char        str_pwr[IES_FC_STR_LEN];
+    JSON_Array *arr;
+    float       tempc, tempf, pwr;
+
+    switch (option)
+    {
+    case IES_FC_TEMP_WARN_C:
+        tempc = (float) atof(value);
+        tempf = tempc * 9 / 5 + 32;
+        snprintf(str_f, sizeof(str_f), "%.2f", tempf);
+        snprintf(str_c, sizeof(str_c), "%.2f", tempc);
+        /* Both ends always move together — the MIB exposes C and F as separate
+         * columns but the device has one threshold. */
+        json_object_dotset_string(obj, "temperatureWarningC", str_c);
+        json_object_dotset_string(obj, "temperatureWarningF", str_f);
+        break;
+
+    case IES_FC_TEMP_WARN_F:
+        tempf = (float) atof(value);
+        tempc = (tempf - 32) * 5 / 9;
+        snprintf(str_f, sizeof(str_f), "%.2f", tempf);
+        snprintf(str_c, sizeof(str_c), "%.2f", tempc);
+        json_object_dotset_string(obj, "temperatureWarningF", str_f);
+        json_object_dotset_string(obj, "temperatureWarningC", str_c);
+        break;
+
+    case IES_FC_TX_POWER_HI:
+        pwr = (float) atof(value);
+        snprintf(str_pwr, sizeof(str_pwr), "%.2f", pwr);
+        arr = json_object_dotget_array(obj, "txPowerWarning");
+        json_array_replace_string(arr, 1, str_pwr);
+        break;
+
+    case IES_FC_TX_POWER_LO:
+        pwr = (float) atof(value);
+        snprintf(str_pwr, sizeof(str_pwr), "%.2f", pwr);
+        arr = json_object_dotget_array(obj, "txPowerWarning");
+        json_array_replace_string(arr, 0, str_pwr);
+        break;
+
+    case IES_FC_RX_POWER_HI:
+        pwr = (float) atof(value);
+        snprintf(str_pwr, sizeof(str_pwr), "%.2f", pwr);
+        arr = json_object_dotget_array(obj, "rxPowerWarning");
+        json_array_replace_string(arr, 1, str_pwr);
+        break;
+
+    case IES_FC_RX_POWER_LO:
+        pwr = (float) atof(value);
+        snprintf(str_pwr, sizeof(str_pwr), "%.2f", pwr);
+        arr = json_object_dotget_array(obj, "rxPowerWarning");
+        json_array_replace_string(arr, 0, str_pwr);
+        break;
+
+    case IES_FC_MODE_AUTO:
+        json_object_dotset_number(obj, "mode", 0);
+        break;
+
+    case IES_FC_MODE_USER:
+        json_object_dotset_number(obj, "mode", 1);
+        break;
+
+    case IES_FC_RESET_DEFAULT:
+        /* Back to auto with every threshold cleared; the device recomputes them
+         * from the transceiver's own limits. */
+        json_object_dotset_number(obj, "mode", 0);
+        json_object_dotset_string(obj, "temperatureWarningC", "");
+        json_object_dotset_string(obj, "temperatureWarningF", "");
+        arr = json_object_dotget_array(obj, "txPowerWarning");
+        json_array_replace_string(arr, 1, "");
+        json_array_replace_string(arr, 0, "");
+        arr = json_object_dotget_array(obj, "rxPowerWarning");
+        json_array_replace_string(arr, 1, "");
+        json_array_replace_string(arr, 0, "");
+        break;
+
+    default:
+        break;
+    }
+}
+
+int
+ies_fc_set(unsigned int port_index, int option, const char *value)
+{
+    struct LibFrameworkUri_Handle *handle = NULL;
+    const char                    *token = NULL;
+    JSON_Value                    *data = NULL;
+    JSON_Value                    *resp = NULL;
+    JSON_Object                   *obj;
+    char                           row_uri[128];
+    char                           patch_uri[136];
+    int32_t                        ret;
+
+    if (ies_uri_handle(&handle, &token) != 0)
+    {
+        return -1;
+    }
+
+    /* Threshold options carry a value and must be numeric; the mode/reset
+     * options are actions and pass NULL. */
+    if (option < IES_FC_MODE_AUTO)
+    {
+        if (value == NULL || fc_value_is_number(value, strlen(value)) != 0)
+        {
+            return -1;
+        }
+    }
+
+    snprintf(row_uri, sizeof(row_uri), "%s/%u", IES_FC_CFG_URI, port_index);
+
+    ret = LibFrameworkUri_GetUri(handle, row_uri, token, &data);
+    if (ret != 0)
+    {
+        json_value_free(data);
+        return -1;
+    }
+
+    obj = json_value_get_object(data);
+    if (obj == NULL)
+    {
+        json_value_free(data);
+        return -1;
+    }
+
+    /* The plugin skips the back-fill for the two whole-row actions: auto mode
+     * and reset both clear the thresholds anyway. */
+    if (option != IES_FC_MODE_AUTO && option != IES_FC_RESET_DEFAULT)
+    {
+        fc_backfill_defaults(obj);
+    }
+
+    fc_apply(obj, option, value);
+
+    snprintf(patch_uri, sizeof(patch_uri), "%s?save", row_uri);
+    ret = LibFrameworkUri_PatchUri(handle, patch_uri, token, data, &resp);
+
+    json_value_free(data);
+    json_value_free(resp);
+
+    return (ret != 0) ? -1 : 0;
+}

@@ -1,0 +1,70 @@
+# ADR-0002: ies-auto-mibs 分層 —— 對映資料可拆為 shared lib,net-snmp agent 角色不可拆
+
+Status: Accepted
+Date: 2026-07-22
+Context:
+  Plan D 把 iss_build==0 的 config MIB 群組從 snmpd in-master(ies-auto-mibs)
+  遷到 app_moxa_framework 的 AgentX subagent。過程中反覆出現一個架構問題:
+  ies-auto-mibs 能不能離開 3rdparty_net_snmp、獨立成一個不依賴 net-snmp 的
+  shared library?兩個發現逼出結論:
+  (1) RowStatus:framework subagent 用 netsnmp_register_instance(每個 OID 一個
+      instance),一個 createAndGo 的 SET PDU 多個 varbind 會被 net-snmp 各自
+      路由到自己的 handler,rowStatus handler 看不到同列的其他欄位 → 動態
+      append 表無法原子建列。in-master 靠 net-snmp 的 table 註冊 +
+      readCreate_uri_set_tableRowStatus_v2 + 多階段 SET 才做得到。
+  (2) 「所有 iss0 SNMP GET 都走 AgentX 到 framework」這個需求,
+      lib_moxa_ies_auto_mibs 自己辦不到 —— 它連向 master 註冊一個 OID 都不做。
+Decision:
+  把 ies-auto-mibs 視為兩層,分別處置:
+  1. 對映 DATA + 分類層(net_*.h 的 OID↔URI 陣列、table_col 分類):
+     不依賴 net-snmp,可獨立、且已獨立成 lib_moxa_ies_auto_mibs,由 subagent 重用。
+  2. net-snmp HANDLER 引擎(mox_snmp_handle_entry 的 GET/SET 分派、
+     readCreate_uri_set_tableRowStatus_v2 + table 註冊 + RESERVE/ACTION/COMMIT
+     多階段 SET):與 net-snmp 不可分 —— 它的存在目的就是「當一個 net-snmp
+     MIB module」。不抽出。
+  Plan D 不「抽出」引擎,而是在 app_moxa_framework 內「重實作」值語意:
+  GET 走 in-process config 讀、SET 走 REST PATCH、RowStatus 走 valid-toggle
+  (見 ADR-0001)。服務 SNMP GET 本質上一定活在某個 net-snmp agent(in-master
+  snmpd 或 AgentX subagent);lib_moxa_ies_auto_mibs 必要但不充分,無法自行
+  註冊/路由/服務。「iss0 GET 全走 framework」需三方協作:
+  lib(資料)+ app_moxa_framework/lib_moxa_snmp_agentx(AgentX 註冊 + handler)
+  + 3rdparty_net_snmp(註解 INIT_ENTRY 讓出 OID 擁有權)。
+Alternatives Considered:
+  - 把整個 ies-auto-mibs(資料 + handler 引擎)抽成不依賴 net-snmp 的 lib:
+    不可行 —— 引擎的本質就是 net-snmp agent module,RowStatus read_create 依賴
+    net-snmp 的 table 註冊與 SET 階段;硬抽等於把 net-snmp 一起拖走,或重寫
+    net-snmp 的 agent 核心。
+  - 全部留 in-master(不做 lib):放棄了 Plan D 追求的 in-process GET 效率與
+    可追溯性(先前已否決)。
+  - 讓 lib_moxa_ies_auto_mibs 自己註冊/服務 OID:層次錯誤 —— 它會因此依賴
+    net-snmp/AgentX,失去「純資料契約」的意義,並與 subagent 重複。
+Consequences:
+  - lib_moxa_ies_auto_mibs 維持純資料/分類(無 net-snmp、無註冊、無 I/O),
+    應持續守住這條界線。
+  - AgentX 註冊 + GET/SET handler 由 framework subagent 負責;
+    3rdparty_net_snmp 的 INIT_ENTRY 註解是擁有權交接點。
+  - RowStatus 等 net-snmp 耦合語意是「重實作」非「移植」,每一張表都要對產品
+    行為驗證。
+  - 殘留的硬邊界:動態長度陣列上、需同 PDU 原子性多欄建列(append 式
+    createAndGo)是 per-instance subagent 唯一複製不了的情境。lifecycle 為固定槽
+    `valid` toggle 的表(trap,或 trustAccess 待驗)可行;真正動態的表
+    (ipIfdb l3VlanIfTable,VLAN 動態長度)可能撞到天花板,遷移前先驗 lifecycle。
+  - 因此部分 iss0 群組刻意留 in-master(dynamic RowStatus、runtime/command 資料
+    來源、產品未編入)—— Plan D 的覆蓋是有界的,不是全量。
+Constraints / Assumptions:
+  - framework subagent 用 netsnmp_register_instance(逐 OID instance),非 table
+    註冊(lib_moxa_snmp_agentx/src/agentx.c)。
+  - iss_build==0 = framework/config 擁有;iss_build==1 = ISS 擁有(不變)。
+  - RowStatus 表的 config lifecycle 是 running_config 內每列一個 `valid` boolean,
+    而非 MIB 的 rowStatus 欄。
+Related Files / Modules:
+  - buildroot/dl/lib_moxa_ies_auto_mibs/ (資料 + 分類;src/mapping_reuse.c,
+    include/lib_moxa_ies_auto_mibs.h)
+  - buildroot/dl/lib_moxa_rust_ies_auto_mibs/src/lib.rs (FFI mirror)
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c (netsnmp_register_instance)
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs (註冊 + GET/SET handler)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c (INIT_ENTRY 交接)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_handle_read_create_v2_*.c
+    (net-snmp 綁定的 RowStatus 引擎,示範不可拆的那一層)
+Related ADRs:
+  - ADR-0001 (mxTrap RowStatus via IES_COL_ROWSTATUS —— 本 ADR 概念化的「重實作」手法)

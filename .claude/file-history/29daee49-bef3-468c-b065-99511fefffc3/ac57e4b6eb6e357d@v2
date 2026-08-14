@@ -1,0 +1,83 @@
+# ADR-0022: MIB 與實作不符的處置 —— 每一案都是「改 `.mib`」或「改 code」二選一(**未決**)
+
+Status:
+  **Proposed(2026-08-10)—— 待決議,尚未採取任何行動。**
+  本 ADR 只負責把已知案例列齊、把選項講清楚,**不做決定**。
+  在決議之前,任何一輪搬遷都**維持現狀、不順手修**(理由見 Decision 的「臨時原則」)。
+
+Date: 2026-08-10
+
+Context:
+  ADR-0010 立下「MIB 為權威」。實務上我一直把它讀成「實作要去配合 MIB」,
+  所以每次遇到不符只考慮**改 code**。使用者 2026-08-10 指出這是假二分:
+  **不符時同樣可以是 `.mib` 寫錯了**,選項有兩個,不是一個。
+
+  這個重新框定很重要,因為下列幾案裡,**`.mib` 才是異常的那一方**看起來更可能:
+
+  - table 的 INDEX 物件在 SMIv2 慣例上應為 `not-accessible`
+    (RFC 2578:index 物件除非別無取得途徑,否則不應可讀)。
+    `mxFiberCheck` 卻宣告 `read-only` —— 反而是 mainline 不註冊的行為符合慣例。
+  - `mxMms` 那四個是 `/api/v1/setting/data/mxmms/...` 底下的**設定值**,
+    dlmod plugin 也實作了 SET,MIB 卻寫 `read-only`。
+
+  同時也暴露我自己前兩輪的不一致:
+
+  | 輪次 | 不符之處 | 當時處置 |
+  |---|---|---|
+  | ADR-0020 `mxMms` | MIB `read-only`,wire 是 RWRITE | **保留不符**(維持單純搬遷) |
+  | ADR-0021 `mxFiberCheck` | MIB `read-only`,mainline 未註冊 | **順手修好**(多回 2 欄) |
+
+  同樣情境、相反處置。這是缺乏共同原則造成的,不是各案判斷不同。
+
+Decision（本 ADR 唯一的決定）:
+  **臨時原則:在本 ADR 決議前,搬遷輪次一律維持現狀,不夾帶 MIB 相容性修正。**
+
+  搬遷的驗收標準是「對 mainline 完整性不減」;夾帶修正會讓每次驗收都得先解釋
+  多出來的欄位是修正而非多註冊,也讓回歸比對失去單純性。修正應該獨立一輪、
+  獨立決策,並**一次涵蓋所有同類案例**而不是零星處理。
+
+  ⚠️ **ADR-0021 已經違反這條**(`mxFiberCheck` 多回 2 欄已上線於 `2026_0810_0021`)。
+  是否回退到與 mainline 一致,屬於下方案例 B-2 的決議內容。
+
+Open items（待決議,每案兩個選項）:
+
+  **A. 實作有、`.mib` 沒有定義的 OID**
+  這類「改 code」= 取消註冊;「改 `.mib`」= 補上定義。
+  使用者的既有規則是「多出 NOS 7 的 OID 一律確認是 `.mib` 定義的」,
+  這三案都**不是**,所以目前都被判定為「不算效益」:
+
+  | 案例 | 數量 | 來源 |
+  |---|---|---|
+  | `mxPort` `PortConfigTid` | 12 | 前期 session 查證 |
+  | `evtPort` `chainProtectEvent`(`.602.7.1.2.1.8/.9`) | 24 | 前期 session 查證 |
+  | `mxLp` `lpConfiguration.3` 整張 per-port 表 | 2 欄 | 2026-08-09 本輪查證;`mxLp.mib` 只定義 `{lpConfiguration 1}` 與 `{2}` |
+
+  **B. MAX-ACCESS 與實際行為不符**
+
+  **B-1. dlmod scalar 一律 RWRITE ——「波及面最大」的一案**
+  `lib_moxa_snmp_plugin/src/handler/scalar.c:126` **無條件**用
+  `HANDLER_CAN_RWRITE` 註冊每一個 dlmod scalar,完全不看 MIB 的 MAX-ACCESS。
+  → **影響全部 35 個 dlmod 模組**,不是 `mxMms` 特例。
+  - 改 code:讓註冊模式依 MIB 決定。**會移除今天實際可用的 SET 能力**,
+    若有客戶正在用就是破壞性變更。
+  - 改 `.mib`:把確實可設定的物件改成 `read-write`。
+    需要逐一確認「可設定」是設計意圖而非實作副作用。
+
+  **B-2. `mxFiberCheck` 的兩個 index 欄**
+  `fiberCheckConfigPortIndex` / `fiberCheckStatPortIndex`,MIB 皆 `read-only`;
+  NOS 7 mainline `2026_0805_2335` 對兩者回 **`No Such Object`**(完全未註冊)。
+  - 改 code:Plan E 回退成不註冊,與 mainline 逐位元組一致。
+  - 改 `.mib`:改成 `not-accessible`(符合 SMIv2 慣例),
+    則 mainline 與 Plan E 回退後都正確,且 Plan E 目前的實作要跟著拿掉。
+  - 維持現況:Plan E 多回 2 欄。**依上方臨時原則,這是三者中最不該留的**。
+
+Constraints / Assumptions:
+  - 改 `.mib` 牽涉對外發布的 MIB 檔,影響既有 manager /客戶整合,
+    決策層級高於 code,**需要產品側參與**,不是工程單方面能定的。
+  - A 類的三案彼此獨立,可分別決議;B-1 影響 35 個模組,應整批決議。
+  - 本 ADR 不預設哪個選項較好。上方 Context 裡「`.mib` 才是異常」的推測
+    是**觀察不是結論**,尤其 B-1 需要逐物件確認設計意圖。
+
+Related ADRs:
+  ADR-0010(MIB 為權威 —— 本 ADR 指出它沒有回答「MIB 本身錯了怎麼辦」)、
+  ADR-0017(完整性以 MIB 物件集合判定)、ADR-0020、ADR-0021。

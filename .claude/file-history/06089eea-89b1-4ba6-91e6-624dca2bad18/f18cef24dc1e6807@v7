@@ -1,0 +1,30 @@
+---
+name: clippy-by-application-scan
+description: By-application clippy scanning of 19 Rust BIN packages via RUSTC_WRAPPER=clippy-driver (NOT -p; -p on non-members does not lint)
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 06089eea-89b1-4ba6-91e6-624dca2bad18
+---
+
+2026-06-10: rust_clippy_scan rules for all 21 Rust BIN crates (18 Makefiles incl. plugin_moxa_firmware_update and 3rdparty_net_snmp/snmp_script_rust — the latter found only at find -maxdepth 4, holds 2 bins: generate_iss_snmp_merge_table, generate_uri_snmp_table w/ path dep lib_moxa_rust_iss) were changed so each application lints its whole **local dependency closure** (app + rust_moxa_common + lib_moxa_rust_*) in one pass.
+
+**Critical lesson — `cargo clippy -p <path-dep>` does NOT lint non-workspace-members.** It prints `Checking <dep>` but runs a plain rustc check (clippy-driver only wraps workspace members via RUSTC_WORKSPACE_WRAPPER). Verified with a canary (`pub fn f() -> bool { 1 == 1 }` = deny-level `clippy::eq_op` planted in rust_moxa_common-custom): `-p` stayed green; the working form fails correctly:
+
+```
+RUSTC_WRAPPER=clippy-driver cargo check --release --target=... --target-dir=${RUST_TARGET_DIR} [--features ...]
+```
+
+RUSTC_WRAPPER applies clippy-driver to every unit; crates.io deps are silenced by cargo's `--cap-lints allow` (only local path crates surface lints). Bare name `clippy-driver` resolves via PATH (~/.cargo/bin) under make. Cached warnings replay on later runs, so the second `--message-format=json > rust_clippy_scan_result/<name>.json` pass still captures them. First scan after conversion re-checks the whole graph (slow once, then cached).
+
+Layout of the 17 Makefiles: 6 standalone app_moxa_* (scan at repo root), rust_moxa_build (workspace; kept `-p ${PRJ_*}` per member, 4 lines), 8 plugins (`cd app|control|modify_stackcfg`), md_type_detect (2 bins), plugin_moxa_aide (app scan was newly ADDED — uses `${APP_PATH}`, no --target-dir, json `${APP}.json`); framework/ scan lines elsewhere left untouched; firmware_update has no framework scan (user removed it). All uncommitted; each dl/<pkg> is its own repo.
+
+**How to confirm libs are linted** (the canary method): append a deny-level lint to a lib src in the build tree, run the scan command, expect `error: equal expressions ... rust_moxa_common-custom/src/lib.rs`, restore the file. Json proof: `jq 'select(.reason=="compiler-artifact")|.package_id'` lists checked crates; `select(.reason=="compiler-message")` carries lib file paths. Real findings: rust_moxa_common has 2 pre-existing `clippy::ptr_arg` warnings (&Vec → &[_]) now surfaced by the new scan.
+
+**Workspace alternatives (2026-06-10):** root in the app dir fails — members must be hierarchically below the root (`../../<lib>-custom` rejected); symlink workaround breaks members' relative path deps. **BUT the PDF variant WORKS (verified by canary)**: put a transient virtual root at `output/build/Cargo.toml` (`[workspace] members=["<pkg>-custom/<bindir>", ...]`, `resolver="3"`), `cp` a bin's Cargo.lock to `output/build/Cargo.lock`, run `cargo clippy` from output/build — path deps living inside output/build **auto-become workspace members** and get linted. Multi-member single scan OK; `--features` accepted at the virtual root (members' `[profile.*]` ignored, harmless for scan). **Deployment constraint (verified): while output/build/Cargo.toml exists, every other cargo invocation under output/build fails** (`current package believes it's in a workspace when it's not`) — so it must be a transient post-build scan step (create→scan→delete), NOT inside per-package Makefiles during parallel builds. PDF: /home/moxa/WORK/clippy-scan-binary-packages/. RUSTC_WRAPPER (committed branch) remains the per-package-integrated alternative.
+
+**Coverage math (2026-06-11):** union of local crates across the 21 BIN locks covers 180/181 dl crates. Sole orphan: `rust_moxa_profiling` (no other Cargo.toml references it) — removing per-lib scans loses only its coverage. Plugin `framework/` crates are covered via app_moxa_framework → `plugins_moxa_framework` (aggregator with optional path deps on every `plugin_moxa_*-custom/framework`) → rust_moxa_build's scan; coverage is feature-gated (disabled plugin = not built = no loss). ~10 plugin repos (auto_config, dhcp_server, …) are not in this dl checkout but their -custom dirs exist in output/build. rust_moxa_build is symlink-membered (`app_moxa_framework -> ../app_moxa_framework-custom`) — the symlink workspace trick in production.
+
+Side-finding: output/build/rust_moxa_common-custom/Cargo.lock is a stale BAD lock (bytestring 1.5.1/icu 2.2.0, from manual cargo runs) — standalone cargo there hits the MSRV error; dl/rust_moxa_common has no lock. dirclean of that package clears it.
+
+Related: [[rust-clippy-scan-msrv-fix]], [[user-verifies-builds-himself]].

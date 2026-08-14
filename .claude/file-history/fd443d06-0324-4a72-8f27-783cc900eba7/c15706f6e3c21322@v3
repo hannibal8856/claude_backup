@@ -1,0 +1,116 @@
+# DUT 設定 → snmpwalk 結果的對應表
+
+snmpwalk 回傳的是「這台機器**被設定成**有什麼」，不只是「韌體**實作**了什麼」。
+兩份設定不同的 capture 做 walkdiff，差異數字沒有意義。這份文件記錄哪些 CLI 設定
+會改變哪些 OID 子樹，以及擷取基線時該一併記錄什麼。
+
+實測證據（2026-08-04，plan-E2 partition 1 vs NOS7 partition 2）：
+
+| OID | plan-E2 | NOS7 mainline |
+|---|---|---|
+| `ipAdEntAddr` `1.3.6.1.2.1.4.20.1.1` | 2 筆 | 0 筆 |
+| `dot1qVlanStaticName` `1.3.6.1.2.1.17.7.1.4.3.1.1` | 2 筆 | 0 筆 |
+
+兩邊的**欄位**都存在，mainline 只是沒有列——純設定差異，不是實作缺口。
+
+---
+
+## 權威來源
+
+`Moxa Layer 3 Managed Switch Next Generation OS Command Line Interface`，
+v1.0 / 2021-03，適用機種 **MDS-G4000-L3**。
+<https://www.moxa.com/getmedia/31f83274-82e1-4784-b0dd-ca12273bc748/moxa-layer-3-managed-switch-next-generation-os-command-line-interface-v1.0.pdf>
+
+**這本手冊只涵蓋 Layer 3**：Static Route、IP Interface、Debug、OSPF、VRRP。
+以下表格中標為「手冊未涵蓋」的項目，指令名稱**尚未確認**，不要照抄。
+
+---
+
+## 手冊涵蓋的部分（指令可信）
+
+| CLI 指令 | 手冊頁 | 影響的 OID |
+|---|---|---|
+| `show ip interface [loopback <id>]` | 3-6 | `ipAddrTable` `1.3.6.1.2.1.4.20` |
+| `show ip route` / `show ip route static` | 3-2 | `ipCidrRouteTable` `1.3.6.1.2.1.4.24`、`mxStaticRoutedb` |
+| `show ip arp` | 3-3 | `ipNetToMediaTable` `1.3.6.1.2.1.4.22`、`mxArpdb` `8691.605.1.3` |
+| `show interfaces mtu [vlan <id>]` | 3-7 | `ifMtu` `1.3.6.1.2.1.2.2.1.4` |
+| `show ip proxy-arp` | 3-8 | （無直接對應，但屬 L3 介面狀態） |
+| `show ip ospf` 及其 `neighbor` / `interface` / `database` / `route` / `area-range` / `border-routers` / `virtual-links` / `request-list` / `retransmission-list` | 3-18 起 | `net_stdospdb`、`mxOspfdb`——**子樹極大**，OSPF 有無設定會讓上千個 OID 出現或消失 |
+| `show vrrp` 及其 `interface` / `detail` / `statistics` | 3-35 起 | `net_vrrpdb`、`net_vrrp3db`、`mxVrrpdb`——**子樹極大** |
+
+`show ip interface` 在手冊裡只示範了 `loopback` 形式（3-6 頁例子是
+`show ip interface loopback 10`）。**不帶參數時會不會列出 VLAN 介面，手冊沒寫**，
+要在機器上確認。
+
+## 實機驗證（2026-08-04，`show running-config` 全文對照）
+
+進入方式：`su` 之後執行 `moxash`（`/usr/bin/moxash` 是 `moxashell.exe` 的 symlink），
+在 `moxa#` 提示下 `sh ru`（可縮寫）。`dut-console` skill 進不去，見該 skill 的限制。
+
+輸出約 60 行，**小到可以跟每份 capture 一起存**。這讓「擷取時一併 snapshot 設定」
+從理論變成明顯划算。實測輸出直接解釋了先前量到的兩個差異：
+
+| running-config 那一行 | 對應的 OID 事實 |
+|---|---|
+| `vlan 1` / `vlan 222` + `vlan active` | `dot1qVlanStaticName` **2 筆**——與量到的完全一致 |
+| `interface vlan 1` → `ip address 192.168.127.253` | `ipAdEntAddr` 第 1 筆 |
+| `interface vlan 222` → `ip address 192.168.222.253` | `ipAdEntAddr` 第 2 筆 |
+| `trusted-access ip-source 192.168.127.209 255.255.255.0` | `8691.602` trustedIpTable——**確認有進 running-config** |
+| `snmp-server access enable` | SNMP 服務本身 |
+| `interface vlan 222` → `ip mtu 1515` | `ifMtu` `1.3.6.1.2.1.2.2.1.4` |
+| `interface ethernet 1/3` → `no event-notification port-event port-link-up` | `mx_event_port` |
+| `router ospf` → `area 0.0.0.0` | `net_stdospdb` 子樹被填滿 |
+| `interface ethernet 1/1..3/4`（12 個） | `ifIndex` 1..12，加上 130、131 共 14 筆 |
+
+header 還附帶機種與韌體版本，正好是比對兩份 capture 時最需要先確認的東西：
+
+```
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0804_1331
+! IP address: 192.168.127.253
+! Serial number: TBCHB1139862
+```
+
+**結論：`show running-config` 單獨一份就足以當設定 snapshot。** 上面那張「手冊未涵蓋」
+的表可以收掉——VLAN、trust-access、port 都在裡面。
+
+## 手冊未涵蓋的部分
+
+**`show running-config` 是總表**（使用者確認，2026-08-04）。這本 L3 手冊沒有記載它
+——只在 3-9 頁出現 `copy running-config startup-config`——但它存在，而且是設定
+snapshot 的**主要**來源。各功能另有自己的 `show` 指令，作為細項佐證。
+
+| 需要記錄的設定 | 影響的 OID | 指令 |
+|---|---|---|
+| VLAN（static VLAN、port PVID、egress/untagged） | `dot1qVlanStaticTable` `1.3.6.1.2.1.17.7.1.4.3`、`dot1qVlanCurrentTable` `...4.2`、`mx_vlan` | `show running-config`；細項指令待查 L2 手冊。這正是上表 2 vs 0 的那張表 |
+| trust-access IP | `8691.602` `trustedIpTable`、`mx_trustAccess` | 同上 |
+| port 設定與連線狀態 | `ifTable` / `ifXTable` 多欄 | 同上 |
+| SNMP 本身（community、v3 user、trap host） | `mx_snmp`、`mxTrap` | 同上 |
+
+所以基線 snapshot 的最小集合是：
+
+```
+show running-config          <- 總表，一定要存
+show ip interface            <- L3 細項，手冊 3-6
+show ip route
+show ip arp
+show ip ospf                 <- 有設定時子樹極大
+show vrrp
+```
+
+L2 各功能的細項 `show` 指令仍需要 Layer 2 / 通用版 CLI 手冊才能確認名稱，
+但缺了它們不致命——`show running-config` 已經涵蓋設定面。
+
+---
+
+## 尚未實作
+
+`tools/capture_baseline.sh` 目前只存 OID，不存任何設定，所以**過去的 capture 無法
+事後回推當時的設定**。要讓 mainline vs Plan E 的比對站得住腳，兩條路：
+
+1. **擷取時一併 snapshot 設定** —— 便宜，但需要走 serial console（見 `dut-console`
+   skill）或 telnet，而且在 L2 指令確認前只能記到一半。
+2. **改成同一個 partition 前後對比**（換韌體不換設定）—— 設計上乾淨得多，
+   代價是每次比對要多燒一次韌體。
+
+2 是正確做法，1 是每次擷取的附帶佐證。兩者都還沒做。

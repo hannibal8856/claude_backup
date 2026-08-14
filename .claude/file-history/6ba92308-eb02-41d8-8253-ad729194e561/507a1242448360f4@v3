@@ -1,0 +1,71 @@
+# ADR-0006: mxTrap 遷移到 Plan E —— host table GET 走 framework table_iterator、SET（含 rowStatus createAndGo）收回 in-master
+
+Status: Accepted (implemented + DUT-verified 2026-07-27, BUILD 2026_0727_1526)
+Date: 2026-07-27
+Context:
+  ADR-0001 把 mxTrap 依 Plan D 遷到 framework 獨佔：rowStatus createAndGo/destroy
+  在 app_moxa_framework 以 **Rust 重實作**（snmp_subagent.rs handle_rowstatus_set +
+  default_trap_host，whole-array PATCH 對映 config `valid`），並註解 INIT_ENTRY 讓
+  framework 獨佔、明言「避免 dual registration」。
+  之後 trustAccess 的 Plan E（ADR-0004）驗證出**更好的範式**：framework 用唯讀
+  table_iterator 服務 GET（快、live）、SET 留 in-master 用**既有 C readCreate_v2 引擎**
+  （不重實作）、刻意 dual-registration 靠 net-snmp 依能力/粒度分流。ADR-0001 的
+  「Rust 重實作 rowStatus」正是 ADR-0002 標記的殘留硬邊界（每表重寫 + 逐表產品驗證,
+  脆弱）。
+  關鍵可行性：**in-master 的 `ies_auto_mibs_handle_read_create_v2_mxTrap_host.c`（14.4K）
+  仍在 tree**，即 mxTrap host table 的 rowStatus createAndGo 原子建列 C 引擎現成可用
+  （與 trustAccess_trustedIpTable.c 同類）→ 「SET 收回 in-master」不需新造原子 SET 碼。
+  mxTrap 結構（snmpTrap = .602.7.2）：2 個 scalar（informRetries .2.1.1、
+  informTimeout .2.1.2，INT RW）＋ host table snmpTrap/host .602.7.2.1.3（maxItems 2）,
+  欄 1=index(INT,RO) 2=hostName(OCTET，是主機名字串非 IpAddress) 3=mode(INT)
+  4=v1v2cCommunity(OCTET) 5=rowStatus(INT)。無特殊型別 → 唯一難點是 rowStatus,
+  已由既有 in-master 引擎處理。
+Decision:
+  把 mxTrap **host table** 遷到 Plan E 範式（＝ trustAccess 做法）：
+  1. framework（snmp_subagent.rs）：host-table OID（.602.7.2.1.3）在通用 register_instance
+     迴圈中 **skip**；改以 `register_iter_table`（RONLY）註冊該表，index INT、cols 1–5
+     依上述型別，逐請求 live 讀 `snmpTrap/host` config；**移除 framework 的 rowStatus
+     SET 路徑**對此表的作用（table 變 RONLY，handle_rowstatus_set/default_trap_host
+     對 host table 失效）。
+  2. in-master（ies_auto_mibs_setup.c）：**還原 `MOX_SNMP_INIT_ENTRY(mxTrap_MibEntry)`**
+     → SET（active/notInService/createAndGo/createAndWait/destroy）走既有
+     `readCreate_v2_mxTrap_host.c`（原子建列/刪列）。
+  3. host table GET → framework iterator（快、live）；SET → in-master（C 引擎）。
+  4. 2 個 scalar（informRetries/Timeout）**維持 Plan D**（framework GET+SET）—— scalar
+     單節點無法拆 GET/SET（ADR-0005 email PoC 已證），且它們無 rowStatus、影響小。
+  本決定 **反轉 ADR-0001 的 Decision #3（framework/Rust rowStatus）與 #4（framework 獨佔/
+  避免 dual-reg）**，故 **supersede ADR-0001**。保留 ADR-0002 資料層決策。
+Alternatives Considered:
+  - 維持 ADR-0001（framework Rust 重實作 rowStatus）：維持一份平行、脆弱的 Rust 重實作
+    （ADR-0002 硬邊界）；既然 in-master C 引擎現成,重用更省維護 → 否決。
+  - mxTrap 全收回 in-master（GET 也 in-master）：SET 正確但 GET 回 REST 慢路徑 → 否決。
+  - 連 2 個 scalar 也要 GET-framework/SET-in-master：scalar 單節點不可拆（PoC 實測
+    SET notWritable）→ 不可行,scalar 維持 Plan D。
+Consequences:
+  - 移除 mxTrap 的 Rust rowStatus 重實作（handle_rowstatus_set/default_trap_host 對 host
+    table 成為死碼,可清）；改用既有 C readCreate_v2 → 少一份平行維護。
+  - host table：GET 快+live（config 改免 reboot 反映）、SET createAndGo 原子（C 引擎）。
+  - dual-registration（framework RONLY table + in-master RWRITE per-column）—— 靠粒度
+    分流（trustAccess 已證 table 可行；與 scalar 不同）。
+  - **實作尚未進行（下一個 session 做）**。DUT 驗證：snmpset rowStatus createAndGo/destroy
+    → config `snmpTrap/host[]` 變動（in-master 引擎）＋ snmpwalk host table（framework
+    live）；informRetries/Timeout 仍 framework。
+  - 動到 ADR-0001（Accepted）→ 依規則 0001 標 Superseded by ADR-0006,內文保留。
+Constraints / Assumptions:
+  - snmpTrap.host maxItems == 2（plugin_moxa_snmp schema）。
+  - net-snmp 5.9.3：framework RONLY table(.3 subtree) + in-master RWRITE per-column(.3.1.c)
+    的粒度分流（GET→table / SET→column）—— trustAccess 已實測成立。
+  - rowStatus 整數 1=active 2=notInService 4=createAndGo 5=createAndWait 6=destroy。
+  - config JSON 無 rowStatus key,生命週期對映 `valid`（同 in-master 既有語意）。
+Related Files / Modules:
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c (還原 INIT_ENTRY(mxTrap):357)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_handle_read_create_v2_mxTrap_host.c (既有 C createAndGo 引擎)
+  - buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/net_mx_trap_notification.h (表/欄定義)
+  - buildroot/dl/app_moxa_framework/src/snmp_subagent.rs (skip host-table OID + register_iter_table；移除 handle_rowstatus_set/default_trap_host 對 host table 作用)
+  - buildroot/dl/lib_moxa_snmp_agentx/src/agentx.c (MoxaAgentX_RegisterIterTable，trustAccess 已備)
+  - buildroot/dl/lib_moxa_ies_auto_mibs/src/mapping_reuse.c (g_reuse_srcs 含 mxTrap_MibEntry)
+Related ADRs:
+  - Supersedes: ADR-0001（mxTrap Plan-D framework-SET / Rust rowStatus / framework 獨佔）
+  - 機制範式來源（已驗證 table）: ADR-0004（native dual-reg + table_iterator）
+  - End-state: ADR-0005（全 iss0 GET-framework/SET-in-master;此為其 table 子集的一步）
+  - 保留: ADR-0002 資料層決策

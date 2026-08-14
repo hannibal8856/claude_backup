@@ -1,0 +1,41 @@
+---
+name: feedback_cross_session_handoff_discipline
+description: 多 session 協作的四條硬規則 — 用 from= 位址回覆、結論要帶作用域、動共用資源前先廣播、交還時要寫「這個狀態會導致什麼」
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: ee275acd-d869-43fd-ba9b-5fe897b8db7b
+  modified: 2026-08-11T06:04:00.949Z
+---
+
+規範寫在 **ADR-0027**(`~/mds4xgl3/.adr/`)。這則是執行版 —— ADR 要有人主動去讀,
+memory 每次 session 啟動自動載入。**四條都來自 2026-08-11 一天內實際發生的失效,
+沒有一條是 context 不足造成的。**
+
+**① 回 peer 一律複製 `from=` 的 `uds:` 位址,不要用名字重新定址。**
+`ListAgents` 的名字**不唯一** —— 有過兩個都叫 `snmp-plan-E-edsg4000` 的 session,
+我把技術更正發給了錯的那一個,對方回信說「你更正的那些不是我說的」。
+
+**② 任何結論都要帶作用域,跨樹外推前先實查。**
+我對外宣告「`lib_moxa_utility` 淨差異 0 行、不用搬」—— 那只在 **MDS 樹**成立。
+EDS 樹只有兩個「加 debug writer」的 commit,`exec_sh_cmd_time` 還在裡面。
+這個專案有兩棵 buildroot 樹(`~/mds4xgl3`、`~/edsg4000`)、兩顆 image(p1/p2)、
+同名但內容不同的分支。**跑三行 `git log` / `git diff` 的成本遠低於讓錯結論擴散。**
+
+**③ 動共用資源前先廣播,不要事後從 mtime 推論是誰在動。**
+共用可變資源:DUT `192.168.127.253`、`~/mds4xgl3/buildroot`、`~/edsg4000/buildroot`、
+各 repo 的 origin 分支。有 session 從 build tree 的時間戳推論「在建置的是你」,推錯人;
+也發生過兩個 session 在同一棵 EDS 樹用不同分支,當下 build 會混分支。
+
+**④ 交還共用資源時,要寫「這個狀態會讓下一個動作產生什麼後果」,不只是「現在是什麼」。**
+**這條最貴。** 我交還 DUT 時只寫「目前在 partition 1」,沒寫「**所以燒錄前必須先切到 p2**」——
+swupdate 寫的是當前執行分割區的**另一邊**,照那個狀態直接燒會覆蓋 p2 的 mainline
+`2026_0805_2335`,也就是簡報頭條唯一的 before 基準。**在燒錄前一刻才攔下。**
+
+**How to apply:** 交還範本 —— 狀態(partition / build / bind mount / 服務 / 暫存檔)
+**加上**「下一個動作的前置條件與後果」。例:「目前在 p1;swupdate 寫另一邊,所以燒錄前
+必須先切 p2,跑 stage 1 確認 `will WRITE: partition 1` 才加 `--flash`」。
+
+另:**交辦的單位是「有驗收條件的 artifact」,不是「一句主張」** —— 見
+[[project_getfwd_probe_must_be_wire_verified]] 與 `~/.claude/skills/measure-snmp-walk/`。
+相關:[[project_dut_dual_image_ab_pair]]、[[feedback_dut_operation_authorization]]

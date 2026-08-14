@@ -1,0 +1,217 @@
+//! AgentX subagent for app_moxa_framework (Plan D B).
+//!
+//! B1 (Design C): the framework, as an AgentX subagent, FULLY owns the config
+//! OIDs listed in `lib_moxa_ies_auto_mibs` (the dlmod is removed).
+//! - GET maps OID -> config-layer URI and reads the value in-process via
+//!   `config_operation::get_config_from_path` + `remove_password_from_config` —
+//!   the exact pair the REST `_setting_get` uses (byte-identical, fast).
+//! - SET reuses the framework's own REST PATCH via `ies_config_set` — the exact
+//!   loopback path the dlmod used (byte-identical; SET is rare, latency moot).
+
+use std::os::raw::{c_int, c_void};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use lib_moxa_rust_snmp_agentx as agentx;
+use plugins_moxa_framework::config::Plugins;
+use rust_moxa_common::config_configs::Configs;
+use rust_moxa_common::user_info::{UserInfo, UserInfoRole};
+use rust_moxa_config_layer::config_operation;
+
+/// Live handles into the running framework state, shared with the subagent
+/// thread (same `Arc<Mutex<…>>` the actix workers use).
+struct SubagentState {
+    plugins: Arc<Mutex<Plugins>>,
+    configs: Arc<Mutex<Configs>>,
+}
+
+static STATE: OnceLock<SubagentState> = OnceLock::new();
+
+/// Fixed read identity for SNMP GETs (Task 5): reads are identity-less — VACM
+/// authorizes at the master and per-OID config values are uniform. Matches the
+/// admin identity `LibUtil_CreateToken` bakes for today's SNMP reads.
+fn sys_read_userinfo() -> UserInfo {
+    UserInfo {
+        username: "snmp@moxa^service".to_string(),
+        role: UserInfoRole::admin,
+        nonce: String::new(),
+        from_ip: "127.0.0.1".to_string(),
+    }
+}
+
+/// Read-only GET handler shared by every registered config OID.
+fn handle_get(requests: *mut c_void) -> c_int {
+    let state = match STATE.get() {
+        Some(s) => s,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 1. the requested OID
+    let oid = match agentx::get_request_oid(requests) {
+        Some(o) => o,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 2. OID -> config-layer URI
+    let entry = match lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid) {
+        Some(e) => e,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+
+    // 3. read the value in-process — byte-identical to REST `_setting_get`.
+    //    Lock order (configs then plugins) matches config_layer::setting_read.
+    let ui = sys_read_userinfo();
+    let configs = state.configs.lock().unwrap();
+    let mut plugins = state.plugins.lock().unwrap();
+
+    let value = match config_operation::get_config_from_path(
+        &mut plugins,
+        &ui,
+        &entry.uri,
+        &configs.running_config,
+        None,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let value = if value.is_null() {
+        value
+    } else {
+        match config_operation::remove_password_from_config(&mut plugins, &entry.uri, value) {
+            Ok(v) => v,
+            Err(_) => {
+                agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+                return agentx::SNMP_ERR_NOERROR;
+            }
+        }
+    };
+
+    // 4. set the value per the mapped type (byte-identical to the old handler:
+    //    OCTET STRING via json_string, INTEGER via the numeric value).
+    match entry.val_type {
+        agentx::ASN_INTEGER => {
+            // Config leaf may be a JSON number or a numeric string; accept both.
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()));
+            match n {
+                Some(n) => {
+                    agentx::set_int(requests, n);
+                }
+                None => {
+                    agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+                }
+            }
+        }
+        _ => match value.as_str() {
+            Some(s) => {
+                agentx::set_octet_string(requests, s);
+            }
+            None => {
+                agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            }
+        },
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Look up the mapping entry for the OID a request targets.
+fn request_entry(requests: *mut c_void) -> Option<lib_moxa_rust_ies_auto_mibs::MapEntry> {
+    let oid = agentx::get_request_oid(requests)?;
+    lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid)
+}
+
+/// Write handler (Design C): SET reuses the framework's own REST PATCH via
+/// `ies_config_set`, byte-identical to the dlmod. Called in MODE_SET_ACTION.
+fn handle_set(requests: *mut c_void) -> c_int {
+    let entry = match request_entry(requests) {
+        Some(e) => e,
+        None => {
+            agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+            return agentx::SNMP_ERR_NOERROR;
+        }
+    };
+    let rc = match entry.val_type {
+        agentx::ASN_INTEGER => match agentx::get_set_int(requests) {
+            Some(n) => lib_moxa_rust_ies_auto_mibs::config_set_int(&entry.uri, n),
+            None => -1,
+        },
+        _ => match agentx::get_set_string(requests) {
+            Some(s) => lib_moxa_rust_ies_auto_mibs::config_set(&entry.uri, &s),
+            None => -1,
+        },
+    };
+    if rc != 0 {
+        agentx::set_error(requests, agentx::SNMP_ERR_COMMITFAILED);
+    }
+    agentx::SNMP_ERR_NOERROR
+}
+
+/// Dispatch by net-snmp mode: GET in-process, SET via loopback REST PATCH.
+fn dispatch(reqinfo: *mut c_void, requests: *mut c_void) -> c_int {
+    match agentx::get_mode(reqinfo) {
+        agentx::MODE_GET => handle_get(requests),
+        agentx::MODE_SET_RESERVE1 => {
+            // Reject a SET whose type doesn't match the mapped OID's type.
+            let expected = match request_entry(requests) {
+                Some(e) if e.val_type == agentx::ASN_INTEGER => agentx::ASN_INTEGER,
+                _ => agentx::ASN_OCTET_STR,
+            };
+            if agentx::get_var_type(requests) != expected {
+                agentx::set_error(requests, agentx::SNMP_ERR_WRONGTYPE);
+            }
+            agentx::SNMP_ERR_NOERROR
+        }
+        agentx::MODE_SET_ACTION => handle_set(requests),
+        // RESERVE2 / COMMIT / FREE / UNDO: nothing to do (action already applied).
+        _ => agentx::SNMP_ERR_NOERROR,
+    }
+}
+
+/// net-snmp `Netsnmp_Node_Handler`. Panics must never cross into C, so the body
+/// runs under catch_unwind and degrades to genErr.
+extern "C" fn moxa_config_handler(
+    _handler: *mut c_void,
+    _reginfo: *mut c_void,
+    reqinfo: *mut c_void,
+    requests: *mut c_void,
+) -> c_int {
+    let res =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(reqinfo, requests)));
+    match res {
+        Ok(code) => code,
+        Err(_) => {
+            agentx::set_error(requests, agentx::SNMP_ERR_GENERR);
+            agentx::SNMP_ERR_NOERROR
+        }
+    }
+}
+
+/// Start the AgentX subagent on its own thread (non-blocking). Registers every
+/// mapped config OID read-only and connects to the snmpd master.
+pub fn start_snmp_subagent(plugins: Arc<Mutex<Plugins>>, configs: Arc<Mutex<Configs>>) {
+    let _ = STATE.set(SubagentState { plugins, configs });
+
+    agentx::init("app_moxa_framework");
+    for oid in lib_moxa_rust_ies_auto_mibs::all_oids() {
+        agentx::register_instance(
+            "moxaIesConfig",
+            &oid,
+            agentx::HANDLER_CAN_RWRITE,
+            moxa_config_handler,
+        );
+    }
+    agentx::run_in_thread();
+}

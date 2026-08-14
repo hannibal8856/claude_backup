@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+# Set BR2_PACKAGE_<PKG>_REV="<REV>" for each enabled converted package in a defconfig.
+# - if the pkg is not enabled (no BR2_PACKAGE_<PKG>=y) -> skip
+# - if a _REV line already exists -> replace its value
+# - else insert the _REV line right after the =y line
+import sys, re
+
+REV = sys.argv[1]
+defconfig = sys.argv[2]
+mapfile = sys.argv[3]   # lines: repo|BR2_PACKAGE_<X>_REV|yes
+
+with open(mapfile) as f:
+    vars_ = [ln.split('|')[1].strip() for ln in f if ln.strip()]
+
+with open(defconfig, newline='') as f:
+    lines = f.readlines()
+eol = '\r\n' if any(l.endswith('\r\n') for l in lines) else '\n'
+
+def has_enable(base):
+    pat = re.compile(r'^' + re.escape(base) + r'=y\s*$')
+    return any(pat.match(l.rstrip('\r\n')) for l in lines)
+
+added = 0; replaced = 0; skipped = 0
+for var in vars_:
+    base = var[:-len('_REV')]            # BR2_PACKAGE_<X>
+    if not has_enable(base):
+        skipped += 1; continue
+    newline = f'{var}="{REV}"' + eol
+    # existing _REV line?
+    ridx = None
+    for i, l in enumerate(lines):
+        if re.match(r'^' + re.escape(var) + r'=', l.rstrip('\r\n')):
+            ridx = i; break
+    if ridx is not None:
+        if lines[ridx] != newline:
+            lines[ridx] = newline; replaced += 1
+    else:
+        # insert after the =y line
+        for i, l in enumerate(lines):
+            if re.match(r'^' + re.escape(base) + r'=y\s*$', l.rstrip('\r\n')):
+                lines.insert(i + 1, newline); added += 1; break
+
+with open(defconfig, 'w', newline='') as f:
+    f.writelines(lines)
+print(f'{defconfig.split("/")[-1]}: added={added} replaced={replaced} skipped(not-enabled)={skipped}')

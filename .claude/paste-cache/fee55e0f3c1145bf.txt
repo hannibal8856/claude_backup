@@ -1,0 +1,40 @@
+!
+vlan 1
+no ports ethernet 3/1
+no ports untagged ethernet 3/1
+!
+vlan 222
+vlan active
+ports add member ethernet 3/1
+ports add untagged ethernet 3/1
+!
+!
+!
+interface vlan 1
+no shutdown
+ip address 192.168.127.253 255.255.255.0
+no ip proxy-arp
+!
+interface vlan 222
+no shutdown
+ip address 192.168.222.253 255.255.255.0
+no ip proxy-arp
+!
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 10:45 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.605.1.1.1.1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.2.1 = INTEGER: 0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.2.2 = INTEGER: 0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.3.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.3.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.4.1 = INTEGER: 1500
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.4.2 = INTEGER: 1500
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.5.1 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.5.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.6.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.6.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.7.1 = IpAddress: 192.168.127.253
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.7.2 = IpAddress: 192.168.222.253
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.8.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.605.1.1.1.1.1.8.2 = IpAddress: 255.255.255.0

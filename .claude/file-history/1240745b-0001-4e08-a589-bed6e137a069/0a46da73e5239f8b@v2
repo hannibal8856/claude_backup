@@ -1,0 +1,145 @@
+#!/bin/bash
+# 在 create_clippy_{lib,app}_mrs.sh --go 之前跑,把「只能靠人眼發現」的失敗轉成硬性檢查。
+# 每一項都對應一次實際踩過的事故;FAIL 會讓本腳本 exit 1。
+#
+#   ./preflight.sh --mode app
+#   DL=... SRC_BR=... BASE=origin/develop TARGET=develop MR_SUFFIX=... \
+#     LIST_FILE=/abs/app_list.txt ./preflight.sh --mode app
+#
+# 唯讀:不改任何 git ref、不呼叫任何寫入型 API。
+
+set -u
+MODE=lib
+[ "${1:-}" = "--mode" ] && { MODE=${2:-lib}; }
+case "$MODE" in lib|app) ;; *) echo "usage: $0 [--mode lib|app]"; exit 2;; esac
+
+DL=${DL:-/home/moxa/sda2/home/moxa/NOS_v6.0_develop/buildroot/dl}
+SRC_BR=${SRC_BR:-clippy-scan-binary-packages-3}
+BASE=${BASE:-origin/NOS_v6.0_develop}
+TARGET=${TARGET:-NOS_v6.0_develop}
+TITLE=${TITLE:-"Clippy scan binaries only"}
+MR_SUFFIX=${MR_SUFFIX:-clippy-scan-binary-packages}
+LIST_FILE=${LIST_FILE:-/tmp/${MODE}_list.txt}
+TOKEN_FILE=${TOKEN_FILE:-$HOME/moxa_gitlab_scm_token}
+
+fail=0; warn=0
+FAIL(){ echo "  FAIL  $*"; fail=$((fail+1)); }
+WARN(){ echo "  WARN  $*"; warn=$((warn+1)); }
+
+echo "mode=$MODE  SRC_BR=$SRC_BR  TARGET=$TARGET  MR_SUFFIX=$MR_SUFFIX"
+echo "DL=$DL"
+echo "LIST_FILE=$LIST_FILE"
+echo
+
+### 1. LIST_FILE 必須是絕對路徑 —— 腳本內部會 cd "$DL",相對路徑會靜默空跑
+echo "[1] LIST_FILE 路徑"
+case "$LIST_FILE" in
+  /*) [ -s "$LIST_FILE" ] && echo "  OK    絕對路徑,$(wc -l < "$LIST_FILE") 筆" \
+                          || FAIL "檔案不存在或為空: $LIST_FILE" ;;
+  *)  FAIL "必須是絕對路徑(MR 腳本會先 cd \"\$DL\"),現在是: $LIST_FILE" ;;
+esac
+[ $fail -gt 0 ] && { echo; echo "無法繼續。"; exit 1; }
+
+### 2. 每個 repo 都要有「本地」的來源分支 ref
+# buildroot 的 fetch 會讓 repo 停在 detached HEAD,沒有本地分支的 repo 會被 MR 腳本
+# 以「SKIP(無源分支)」靜默略過 —— 上一次 186 個裡有 169 個中這招。
+echo "[2] 本地來源分支 ref"
+miss_local=""; miss_remote=""
+while read -r r; do
+  [ -n "$r" ] || continue
+  [ -d "$DL/$r/.git" ] || { FAIL "不是 git repo: $r"; continue; }
+  git -C "$DL/$r" rev-parse --verify -q "$SRC_BR" >/dev/null 2>&1 || miss_local="$miss_local $r"
+  git -C "$DL/$r" ls-remote --heads origin "$SRC_BR" 2>/dev/null | grep -q . || miss_remote="$miss_remote $r"
+done < "$LIST_FILE"
+[ -n "$miss_local" ]  && FAIL "缺本地 $SRC_BR:$miss_local
+        修法(唯建 ref,不動遠端): for p in <repos>; do git -C \$p branch -f $SRC_BR origin/$SRC_BR; done"
+[ -n "$miss_remote" ] && FAIL "遠端缺 $SRC_BR:$miss_remote"
+[ -z "$miss_local$miss_remote" ] && echo "  OK    全部 repo 本地與遠端都有 $SRC_BR"
+
+### 3. MR 分支後綴不可撞到舊 rollout
+# 舊產品線留下的 <iid>-<舊後綴> 分支若被冪等 glob 匹配,整批會回報 EXISTS 而全部跳過。
+echo "[3] MR 分支後綴衝突"
+collide=""
+while read -r r; do
+  [ -n "$r" ] && [ -d "$DL/$r/.git" ] || continue
+  b=$(git -C "$DL/$r" ls-remote --heads origin "refs/heads/*-${MR_SUFFIX}" 2>/dev/null | sed 's#.*refs/heads/##' | tr '\n' ',')
+  [ -n "$b" ] && collide="$collide\n        $r: $b"
+done < "$LIST_FILE"
+if [ -n "$collide" ]; then
+  WARN "已有符合 *-${MR_SUFFIX} 的遠端分支(這些 repo 會被跳過):$(printf "$collide")
+        重跑同一輪 → 正常;換新產品線 → 請改 MR_SUFFIX,否則整批空轉"
+else echo "  OK    無既有 *-${MR_SUFFIX} 分支"; fi
+
+### 4. issue 標題必須是本輪專屬
+# MR 腳本會沿用「同標題且仍 opened」的 issue。合併到非 default 分支的舊 rollout,
+# issue 不會自動關,新一輪就會默默掛到舊單子上。
+echo "[4] issue 標題唯一性"
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' "$TOKEN_FILE" 2>/dev/null | head -1)
+if [ -z "$TOKEN" ]; then WARN "找不到 token($TOKEN_FILE),略過此項"
+elif ! command -v jq >/dev/null; then WARN "缺 jq,略過此項"
+else
+  reuse=""
+  while read -r r; do
+    [ -n "$r" ] && [ -d "$DL/$r/.git" ] || continue
+    enc=$(git -C "$DL/$r" remote get-url origin | sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g')
+    n=$(curl -sS --max-time 30 --header "PRIVATE-TOKEN: $TOKEN" \
+         "https://gitlab.com/api/v4/projects/$enc/issues?state=opened&per_page=50" </dev/null \
+        | jq -r --arg t "$TITLE" '[.[]|select(.title==$t)]|length' 2>/dev/null)
+    [ "${n:-0}" != 0 ] && reuse="$reuse $r(#$n)"
+  done < "$LIST_FILE"
+  [ -n "$reuse" ] && WARN "已有同標題的 open issue,會被沿用而非新開:$reuse
+        要開新單請改 TITLE" \
+                  || echo "  OK    無同標題 open issue,每個 repo 都會拿到新 iid"
+fi
+
+### 5+6. 內容層面的三項(逐 repo)
+# 5a 靜默還原:app 模式用 `git checkout <br> -- Makefile`,那是「整份覆蓋」不是 merge。
+#    target 端自分岔後對 Makefile 的任何修改,都會被無聲還原進一個標題寫 clippy 的 commit。
+# 5b target 已含相同改動:該 repo 的 MR 只會夾帶雜訊,且多半會衝突。
+# 6  commit 衛生:必須單一 commit 且只動 Makefile(比對 target 的 tip,不是 merge-base,
+#    否則 target 端的新 commit 會被誤判成反向差異)。
+echo "[5] 內容檢查(靜默還原 / target 已含 / commit 衛生)"
+revert=""; already=""; dirty=""
+while read -r r; do
+  [ -n "$r" ] && [ -d "$DL/$r/.git" ] || continue
+  d="$DL/$r"
+  git -C "$d" fetch -q origin "${TARGET}" 2>/dev/null
+  tgt=$(git -C "$d" rev-parse -q --verify FETCH_HEAD 2>/dev/null) || tgt=""
+  [ -z "$tgt" ] && { WARN "$r: 取不到 origin/$TARGET,略過內容檢查"; continue; }
+  mb=$(git -C "$d" merge-base "$tgt" "$SRC_BR" 2>/dev/null)
+
+  if [ "$MODE" = app ] && [ -n "$mb" ]; then
+    chg=$(git -C "$d" diff --name-only "$mb" "$tgt" 2>/dev/null | grep -E '(^|/)Makefile$')
+    [ -n "$chg" ] && revert="$revert\n        $r: target 自分岔後改過 $(echo $chg | tr '\n' ' ')"
+  fi
+
+  # target 是否已經做過同樣的改動?用語意判斷,不用 byte 相等 —— 兩邊常只差無關的空白,
+  # 曾有一個 repo 的 develop 早就合過同樣的 clippy commit,只差一個尾端空行而沒被發現。
+  mkf=$(git -C "$d" show --format= --name-only "$SRC_BR" 2>/dev/null | grep -E '(^|/)Makefile$' | head -1)
+  if [ -n "$mkf" ]; then
+    tgt_mk=$(git -C "$d" show "$tgt:$mkf" 2>/dev/null)
+    if [ "$MODE" = lib ]; then
+      echo "$tgt_mk" | grep -q '^rust_clippy_scan:' || already="$already $r"
+    else
+      echo "$tgt_mk" | grep -q 'RUSTC_WRAPPER=clippy-driver' && already="$already $r"
+    fi
+  fi
+
+  nc=$(git -C "$d" rev-list --count "$tgt".."$SRC_BR" 2>/dev/null)
+  files=$(git -C "$d" show --format= --name-only "$SRC_BR" 2>/dev/null | grep -v '^$' | grep -vE '(^|/)Makefile$' | tr '\n' ' ')
+  { [ "$nc" != 1 ] || [ -n "$files" ]; } && dirty="$dirty\n        $r: commits=$nc 非-Makefile檔=[$files]"
+done < "$LIST_FILE"
+
+[ -n "$revert" ] && FAIL "會靜默還原 target 端的改動(app 模式的 checkout 是整份覆蓋):$(printf "$revert")
+        處理:這些 repo 從清單移除,改為從 origin/$TARGET 開分支、只套用 clippy 那一段"
+[ -n "$already" ] && WARN "target 已含相同改動,MR 只會帶雜訊:$already
+        處理:從清單移除"
+[ -n "$dirty" ]  && FAIL "commit 不是「單一且只動 Makefile」:$(printf "$dirty")"
+[ -z "$revert$already$dirty" ] && echo "  OK    無靜默還原風險、target 未先行、commit 衛生正常"
+
+echo
+echo "-----------------------------------------------------------------------"
+echo "FAIL=$fail  WARN=$warn"
+[ $fail -gt 0 ] && { echo "有 FAIL,請勿執行 --go。"; exit 1; }
+echo "可以執行 --go(WARN 請自行確認是否預期)。"
+exit 0

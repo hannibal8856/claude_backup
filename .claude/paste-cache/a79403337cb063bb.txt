@@ -1,0 +1,97 @@
+Welcome to minicom 2.7.1
+
+OPTIONS: I18n 
+Compiled on Dec 23 2019, 02:06:26.
+Port /dev/ttyS0, 17:47:52
+
+Press CTRL-A Z for help on special keys
+
+
+$ 
+$ 
+$ moxash
+Welcome to MOXA command shell
+Current time is Wednesday, May 03, 2023, 05:33 PM
+
+
+Please change the password in order to enhance security.
+
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-05-03 17:33:44
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0804_1331
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.127.209 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+!
+interface ethernet 1/2
+!
+interface ethernet 1/3
+no event-notification port-event port-link-up
+!
+interface ethernet 1/4
+!
+interface ethernet 2/1
+!
+interface ethernet 2/2
+!
+interface ethernet 2/3
+!
+interface ethernet 2/4
+!
+interface ethernet 3/1
+!
+interface ethernet 3/2
+!
+interface ethernet 3/3
+!
+interface ethernet 3/4
+!
+vlan 1
+!
+vlan 222
+vlan active
+!
+!
+!
+interface vlan 1
+no shutdown
+ip address 192.168.127.253 255.255.255.0
+ip proxy-arp
+!
+interface vlan 222
+no shutdown
+ip mtu 1515
+ip address 192.168.222.253 255.255.255.0
+no ip proxy-arp
+!
+!
+router ospf
+no compatible rfc1583
+area 0.0.0.0
+!
+!
+router pim
+!
+!
+router rip
+!
+!
+router vrrp
+!
+moxa# exit             
+$ 

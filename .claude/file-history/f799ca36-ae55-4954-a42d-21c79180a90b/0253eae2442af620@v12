@@ -1,0 +1,939 @@
+/*
+ * Copyright (C) MOXA Inc. All rights reserved.
+ *
+ * This software is distributed under the terms of the
+ * MOXA License.  See the file COPYING-MOXA for details.
+ */
+#ifndef _IES_AUTO_MIBS_SETUP_C_
+#define _IES_AUTO_MIBS_SETUP_C_
+
+/** Begin MIB : RFC1213 */
+#include "net_stdsnmdb.h"
+#include "net_ifmibdb.h"
+#include "ies_auto_mibs_setup_net_stdsnmdb.c"
+#include "ies_auto_mibs_setup_net_ifmibdb.c"
+#if defined(INCLUDE_MOXA_L3)
+#include "ies_auto_mibs_setup_net_mxArpdb.c"
+#endif
+/** End   MIB : RFC1213 */
+
+#include "net_stdllddb.h"
+#include "net_stdot1db.h"
+#include "net_stdot3db.h"
+#include "net_stdcipdb.h"
+#include "net_stdpnodb.h"
+#include "net_mx_lldp.h"
+
+#include "net_mx_portmirror.h"
+
+#include "net_stdethdb.h"
+#include "net_mxPortdb.h"
+
+#include "net_mxRSTPdb.h"
+#include "net_std1w1db.h"
+#include "net_std1d1db.h"
+
+#include "net_stdvladb.h"
+#include "net_stdbrgdb.h"
+#include "net_stdbridb.h"
+#include "net_mx_vlan.h"
+
+#include "net_mxStcldb.h"
+#include "net_mxQosdb.h"
+
+#include "net_stdladb.h"
+#include "net_mxLadb.h"
+
+#include "net_mxPsmsdb.h"
+#include "net_mxPsspdb.h"
+
+
+
+/** Begin MIB: mxSNMP       */
+#include "net_mx_snmp.h"
+#include "net_mx_snmp_setup.c"
+#include "net_mx_trap_notification.h"
+#include "ies_auto_mibs_setup_net_mx_trap_notification.c"
+/** End   MIB: mxSNMP       */
+
+#include "ies_auto_mibs_setup_net_mx_lldp.c"
+#include "ies_auto_mibs_setup_net_mxPortdb.c"
+#include "ies_auto_mibs_setup_net_mxRSTPdb.c"
+#include "ies_auto_mibs_setup_net_mx_portmirror.c"
+#include "ies_auto_mibs_setup_net_stdbrgdb.c"
+#include "ies_auto_mibs_setup_net_stdbridb.c"
+#include "ies_auto_mibs_setup_net_stdethdb.c"
+#include "ies_auto_mibs_setup_net_stdllddb.c"
+#include "ies_auto_mibs_setup_net_stdot1db.c"
+#include "ies_auto_mibs_setup_net_stdot3db.c"
+#include "ies_auto_mibs_setup_net_std1d1db.c"
+#include "ies_auto_mibs_setup_net_std1w1db.c"
+#include "ies_auto_mibs_setup_net_mxStcldb.c"
+#include "ies_auto_mibs_setup_net_mxQosdb.c"
+#include "ies_auto_mibs_setup_net_stdladb.c"
+#include "ies_auto_mibs_setup_net_mxladb.c"
+#include "ies_auto_mibs_setup_net_mxPsmsdb.c"
+#include "ies_auto_mibs_setup_net_mxPsspdb.c"
+
+/** Begin MIB : trustAccess */
+#include "net_mx_trustAccess.h"
+#include "ies_auto_mibs_setup_net_mx_trustAccess.c"
+/** End   MIB : trustAccess */
+
+#if !defined(INCLUDE_MOXA_L3)
+/** Begin MIB: mxDhcpSrv    */
+#include "net_mx_dhcpSrv.h"
+#include "ies_auto_mibs_setup_net_mx_dhcpSrv.c"
+/** End   MIB: mxDhcpSrv    */
+#endif
+
+/** Begin MIB: stdrmondb    */
+#include "net_stdrmodb.h"
+#include "net_mx_RMON.h"
+#include "ies_auto_mibs_setup_net_stdrmodb.c"
+#include "ies_auto_mibs_setup_net_mx_RMON.c"
+/** End   MIB: stdrmondb    */
+
+/** Begin MIB: IGMP    */
+#include "net_mxIgmpdb.h"
+#include "ies_auto_mibs_setup_mxIgmpdb.c"
+/** End   MIB: IGMP    */
+
+/** Begin MIB: mxTr2    */
+#include "net_mx_turboring_v2.h"
+#include "ies_auto_mibs_setup_net_mx_turboring_v2.c"
+/** End   MIB: mxTr2    */
+
+/** Begin MIB: pNAC    */
+
+#include "net_mxDot1xdb.h"
+#include "ies_auto_mibs_setup_net_mxDot1xdb.c"
+
+#include "net_mxRadiusdb.h"
+#include "ies_auto_mibs_setup_net_mxRadiusdb.c"
+
+#include "net_stdpnadb.h"
+#include "ies_auto_mibs_setup_net_stdpnadb.c"
+
+/** End   MIB: pNAC    */
+
+#if !defined(MOXA_TURBO_CHAIN_HIDE_UI)
+/** Begin MIB: turboChain    */
+#include "net_mxTcdb.h"
+#include "ies_auto_mibs_setup_net_mxTcdb.c"
+/** End   MIB: turboChain    */
+#endif
+
+/** Begin MIB: mxCounter    */
+#include "net_mxTcstdb.h"
+#include "ies_auto_mibs_setup_net_mxTcstdb.c"
+/** End   MIB: mxCounter    */
+
+
+/** Begin MIB: WarningNotification    */
+#include "net_mx_event_general.h"
+#include "ies_auto_mibs_setup_mx_event_general.c"
+#include "net_mx_event_switching.h"
+#include "ies_auto_mibs_setup_mx_event_switching.c"
+#include "net_mx_event_poe.h"
+#include "ies_auto_mibs_setup_mx_event_poe.c"
+#include "net_mx_event_port.h"
+#include "ies_auto_mibs_setup_mx_event_port.c"
+#if defined(MOXA_INTEL_TEMP_CTRL)
+#include "net_mx_event_hardware.h"
+#include "ies_auto_mibs_setup_mx_event_hardware.c"
+#endif
+#if defined(MOXA_TRACKING)
+#include "net_mx_event_tracking.h"
+#include "ies_auto_mibs_setup_mx_event_tracking.c"
+#endif
+#if defined(INCLUDE_MOXA_L3)
+#include "net_mx_event_routing.h"
+#include "ies_auto_mibs_setup_mx_event_routing.c"
+#endif
+
+/** End   MIB: WarningNotification    */
+
+#if !defined(MOXA_DUAL_HOMING_HIDE_UI)
+/** Begin MIB: dualHoming    */
+#include "net_mxDualdb.h"
+#include "ies_auto_mibs_setup_net_mxDualdb.c"
+/** End   MIB: dualHoming    */
+#endif
+
+/** Begin MIB: rateLimit(PortDisable)    */
+#include "net_mxRlpsdb.h"
+#include "ies_auto_mibs_setup_net_mxrlpsdb.c"
+/** End   MIB: rateLimit(PortDisable)    */
+
+/** Begin MIB: email    */
+#include "net_mx_email.h"
+#include "ies_auto_mibs_setup_net_mx_email.c"
+/** End   MIB: email    */
+
+/** Begin MIB: Syslog server  */
+#include "net_mx_syslogServer.h"
+#include "ies_auto_mibs_setup_net_mx_syslogServer.c"
+/** End   MIB: Syslog server  */
+
+/** Begin MIB: Event log  */
+#include "net_mx_eventLog.h"
+#include "ies_auto_mibs_setup_net_mx_eventLog.c"
+/** End   MIB: Event log  */
+
+/** Begin MIB: mxDeviceIO  */
+#include "net_mx_device_io.h"
+#include "ies_auto_mibs_setup_net_mx_device_io.c"
+/** End   MIB: mxDeviceIO  */
+
+/** Begin MIB : Login Policy */
+#include "net_mxLoginPolicy.h"
+#include "net_mxLoginPolicy_setup.c"
+/** End   MIB : Login Policy */
+
+/** Begin MIB : Password Policy */
+#include "net_mxPasswordPolicy.h"
+#include "net_mxPasswordPolicy_setup.c"
+/** End   MIB : Password Policy */
+
+/** Begin MIB : mxvlan */
+#include "net_mx_vlan.h"
+#include "net_mx_vlan_setup.c"
+/** End   MIB : mxvlan */
+
+/** Begin MIB : stdvlan */
+#include "net_stdvladb.h"
+#include "net_stdvladb_setup.c"
+/** End   MIB : stdvlan */
+
+/** Begin MIB : mxGeneralInfo */
+#include "net_mxGeneralInfo.h"
+#include "net_mxGeneralInfo_setup.c"
+/** End   MIB : mxGeneralInfo */
+
+/** Begin MIB : mxDhcpSnp */
+#include "net_mxDhcpSnpdb.h"
+/** End   MIB : mxDhcpSnp */
+
+#if defined(INCLUDE_MOXA_L3)
+/** Begin MIB : mxVrrp */
+#include "net_mxVrrpdb.h"
+#include "net_mxVrrpdb_setup.c"
+/** End   MIB : mxVrrp */
+
+/** Begin MIB : stdvrrp */
+#include "net_vrrpdb.h"
+#include "net_vrrpdb_setup.c"
+/** End   MIB : stdvrrp */
+
+/** Begin MIB : stdvrrp3 */
+#include "net_vrrp3db.h"
+#include "net_vrrp3db_setup.c"
+/** End   MIB : stdvrrp3 */
+
+#include "net_stdipdb.h"
+#include "net_mxArpdb.h"
+#include "net_mxIpIfdb.h"
+#include "ies_auto_mibs_setup_net_mxIpifdb.c"
+
+/** Begin MIB : mxStaticRoute */
+#include "net_mxStaticRoutedb.h"
+#include "net_mxstaticroutedb_setup.c"
+/** End   MIB : mxStaticRoute */
+
+/** Begin MIB : mxUnicastRoutingTable */
+#include "net_mxUnicastRoutingTabledb.h"
+/** End   MIB : mxUnicastRoutingTable */
+
+/** Begin MIB : OSPF */
+#include "net_stdospdb.h"
+#include "net_stdospfdb_setup.c"
+
+#include "net_mxOspfdb.h"
+#include "net_mxOspfdb_setup.c"
+/** End   MIB : OSPF */
+#endif
+
+/** Begin MIB : mxMabdb */
+#include "net_mxMabdb.h"
+#include "ies_auto_mibs_setup_net_mxMabdb.c"
+/** End   MIB : mxMabdb */
+
+#if defined(MOXA_MACSEC)
+/** Begin MIB : mxMacsec */
+#include "net_mxMacsecdb.h"
+/** End   MIB : mxMacsec */
+#endif
+
+#if defined(MOXA_TRACKING)
+/** Begin MIB : mxTracking */
+#include "net_mxTrackingdb.h"
+/** End   MIB : mxTracking */
+#endif
+
+/*-------------------------------------------------------------------+
+ * Function           : ies_auto_mibs_load_mibs
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+ies_auto_mibs_load_mibs(void)
+{
+
+    memset(buf_reginfo, 0, sizeof(buf_reginfo));
+    cnt_reginfo = 0;
+
+/** Begin MIB : RFC1213 */
+    MOX_SNMP_INIT_ENTRY(stdsnmdb_MibEntry);
+    /* Plan C: register ifmibdb normally; agentx_owned.list (read in
+       mox_snmp_init_entry) decides per-column — RO ifTable/ifXTable columns are
+       skipped (→ ISS subagent), RW (ifAdminStatus) stays local (→ framework SET). */
+    MOX_SNMP_INIT_ENTRY(ifmibdb_MibEntry);
+/** End   MIB : RFC1213 */
+
+/** Begin MIB : LLDP */
+    MOX_SNMP_INIT_ENTRY(stdllddb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdot1db_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdot3db_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdcipdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdpnodb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mx_lldp_MibEntry);
+/** End   MIB : LLDP */
+
+/** Begin MIB : Port Mirror */
+    //## mxPortMirror.mib
+
+    MOX_SNMP_INIT_ENTRY(mx_portMirror_MibEntry);
+/** End   MIB : Port Mirror */
+
+
+/** Begin MIB : EtherLike-MIB */
+    MOX_SNMP_INIT_ENTRY(stdethdb_MibEntry);
+/** End   MIB : EtherLike-MIB */
+
+/** Begin MIB : Port*/
+    MOX_SNMP_INIT_ENTRY(mxPortdb_MibEntry);
+/** End   MIB : Port */
+
+/** Begin MIB : vlan */
+    MOX_SNMP_INIT_ENTRY(stdvladb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdbrgdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdbridb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mx_vlan_MibEntry);
+/** End   MIB : vlan */
+
+/** Begin MIB : RSTP */
+    MOX_SNMP_INIT_ENTRY(mxRSTPdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(std1w1db_MibEntry);
+    MOX_SNMP_INIT_ENTRY(std1d1db_MibEntry);
+/** End   MIB : RSTP */
+
+/** Begin MIB : StormCtrl */
+    MOX_SNMP_INIT_ENTRY(mxStcldb_MibEntry);
+/** End   MIB : StormCtrl */
+
+/** Begin MIB : MOXA-QOS */
+    MOX_SNMP_INIT_ENTRY(mxQosdb_MibEntry);
+/** End   MIB : MOXA-QOS */
+
+/** Begin MIB : LA */
+    MOX_SNMP_INIT_ENTRY(stdladb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxLAdb_MibEntry);
+/** End   MIB : LA */
+
+/** Begin MIB : PortSecurity */
+    MOX_SNMP_INIT_ENTRY(mxPsmsdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxPsspdb_MibEntry);
+/** End   MIB : PortSecurity */
+
+/** Begin MIB : trustAccess */
+    MOX_SNMP_INIT_ENTRY(mxSysTrustAccess_MibEntry);
+/** End   MIB : trustAccess */
+
+/** Begin MIB: mxSNMP       */
+    MOX_SNMP_INIT_ENTRY(mxSnmp_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxTrap_MibEntry);
+/** End   MIB: mxSNMP       */
+
+#if !defined(INCLUDE_MOXA_L3)
+/** Begin MIB: mxDhcpSrv    */
+    MOX_SNMP_INIT_ENTRY(mx_dhcpSrvdb_MibEntry);
+/** End   MIB: mxDhcpSrv    */
+#endif
+
+/** Begin MIB: stdrmondb    */
+    MOX_SNMP_INIT_ENTRY(stdrmodb_MibEntry);
+    /* MOX_SNMP_INIT_ENTRY(mx_RMON_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+/** End   MIB: stdrmondb    */
+
+/** Begin MIB: IGMP         */
+    MOX_SNMP_INIT_ENTRY(mxIgmpdb_MibEntry);
+/** End   MIB: IGMP         */
+
+/** Begin MIB: mxTr2    */
+    /* Served by app_moxa_framework AgentX subagent (reuse mxTurboRingV2). */
+    /* MOX_SNMP_INIT_ENTRY(mxTurboRingV2_MibEntry); */
+/** End   MIB: mxTr2    */
+
+/** Begin MIB: pNAC    */
+    MOX_SNMP_INIT_ENTRY(mxDot1xdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxRadiusdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(stdpnadb_MibEntry);
+/** End   MIB: pNAC    */
+
+#if !defined(MOXA_TURBO_CHAIN_HIDE_UI)
+/** Begin MIB: turboChain    */
+    MOX_SNMP_INIT_ENTRY(mxTcdb_MibEntry);
+/** End   MIB: turboChain    */
+#endif
+
+/** Begin MIB: mxCounter    */
+    MOX_SNMP_INIT_ENTRY(mxTcstdb_MibEntry);
+/** End   MIB: mxCounter    */
+
+
+/** Begin MIB: WarningNotification    */
+    /* Served by app_moxa_framework AgentX subagent (reuse mx_event_general). */
+    /* MOX_SNMP_INIT_ENTRY(mx_event_general_MibEntry); */
+    /* MOX_SNMP_INIT_ENTRY(mx_event_switching_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+    /* MOX_SNMP_INIT_ENTRY(mx_event_poe_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+    /* Plan D (Design C PoC): portEvent config OIDs are now owned by the
+     * app_moxa_framework AgentX subagent (GET in-process + SET via loopback
+     * REST). Do not register them in-master here so the subagent is sole owner.
+     * NOTE PoC only migrates the portOn scalars; the rest of this array
+     * (portOff/rateLimit scalars + the portsPbmp table) are temporarily
+     * unserved until the full mapping lands. */
+    /* MOX_SNMP_INIT_ENTRY(mx_event_port_MibEntry); */
+#if defined(MOXA_INTEL_TEMP_CTRL)
+    MOX_SNMP_INIT_ENTRY(mx_event_hardware_MibEntry);
+#endif
+#if defined(MOXA_TRACKING)
+    /* MOX_SNMP_INIT_ENTRY(mx_event_tracking_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+#endif
+#if defined(INCLUDE_MOXA_L3)
+    /* MOX_SNMP_INIT_ENTRY(mx_event_routing_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+#endif
+/** End   MIB: WarningNotification    */
+
+#if !defined(MOXA_DUAL_HOMING_HIDE_UI)
+/** Begin MIB: dualHoming    */
+    MOX_SNMP_INIT_ENTRY(mxDualdb_MibEntry);
+/** End   MIB: dualHoming    */
+#endif
+
+/** Begin MIB: rateLimit(PortDisable)    */
+    MOX_SNMP_INIT_ENTRY(mxRlpsdb_MibEntry);
+/** End   MIB: rateLimit(PortDisable)    */
+
+/** Begin MIB: email    */
+    /* MOX_SNMP_INIT_ENTRY(mx_email_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+/** End   MIB: email    */
+
+/** Begin MIB : Syslog server */
+    /* MOX_SNMP_INIT_ENTRY(mx_syslogServer_MibEntry); */ /* -> app_moxa_framework subagent (reuse, index-table) */
+/** End   MIB : Syslog server */
+
+/** Begin MIB : Event log */
+    MOX_SNMP_INIT_ENTRY(mx_eventLog_MibEntry);
+/** End   MIB : Event log */
+
+/** Begin MIB: mxDeviceIO  */
+    /* MOX_SNMP_INIT_ENTRY(mx_deviceIO_MibEntry); */ /* -> app_moxa_framework subagent (reuse, status index-table) */
+/** End   MIB: mxDeviceIO  */
+
+/** Begin MIB : Login Policy */
+    /* MOX_SNMP_INIT_ENTRY(mx_LoginPolicy_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+/** End   MIB : Login Policy */
+
+/** Begin MIB : Password Policy */
+    /* MOX_SNMP_INIT_ENTRY(mx_PasswordPolicy_MibEntry); */ /* -> app_moxa_framework subagent (reuse) */
+/** End   MIB : Password Policy */
+
+/** Begin MIB : mxGeneralInfo */
+    MOX_SNMP_INIT_ENTRY(mx_generalInfomation_MibEntry);
+/** End   MIB : mxGeneralInfo */
+
+/** Begin MIB : mxDhcpSnp */
+    MOX_SNMP_INIT_ENTRY(mxDhcpSnpdb_MibEntry);
+/** End   MIB : mxDhcpSnp */
+
+#if defined(INCLUDE_MOXA_L3)
+/** Begin MIB : mxVrrp */
+    MOX_SNMP_INIT_ENTRY(mxVrrpdb_MibEntry);
+/** End   MIB : mxVrrp */
+
+/** Begin MIB : stdvrrp */
+    MOX_SNMP_INIT_ENTRY(vrrpdb_MibEntry);
+/** End   MIB : stdvrrp */
+
+/** Begin MIB : stdvrrp3 */    
+    MOX_SNMP_INIT_ENTRY(vrrp3db_MibEntry);
+/** End   MIB : stdvrrp3 */
+
+    MOX_SNMP_INIT_ENTRY(stdipdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxArpdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxIpIfdb_MibEntry);
+
+/** Begin MIB: static route    */
+    MOX_SNMP_INIT_ENTRY(mxStaticRoutedb_MibEntry);
+/** End   MIB: static route    */
+
+/** Begin MIB: unicast routing table    */
+    MOX_SNMP_INIT_ENTRY(mxUnicastRoutingTabledb_MibEntry);
+/** End   MIB: unicast routing table    */
+
+/** Begin MIB: OSPF    */
+    MOX_SNMP_INIT_ENTRY(stdospdb_MibEntry);
+    MOX_SNMP_INIT_ENTRY(mxOspfdb_MibEntry);
+/** End   MIB: OSPF    */
+#endif
+
+/** Begin MIB : MAB */
+    MOX_SNMP_INIT_ENTRY(mxMabdb_MibEntry);
+/** End   MIB : MAB */
+
+#if defined(MOXA_MACSEC)
+/** Begin MIB : mxMacsec */
+    MOX_SNMP_INIT_ENTRY(mxMacsecdb_MibEntry);
+/** End   MIB : mxMacsec */
+#endif
+
+#if defined(MOXA_TRACKING)
+/** Begin MIB: mxTracking    */
+    MOX_SNMP_INIT_ENTRY(mxTrackingdb_MibEntry);
+/** End   MIB: mxTracking    */
+#endif
+
+
+    return IES_NOERR;
+} 
+
+
+/*-------------------------------------------------------------------+
+ * Function           : ies_auto_mibs_setup_entry_flags
+ *
+ * Description        :
+        
+
++-------------------------------------------------------------------*/
+ies_handle_t 
+ies_auto_mibs_setup_entry_flags( struct ies_auto_mibs_entry *entry )
+{
+
+/** Begin MIB : RFC1213 */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdsnmdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_ifmibdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: RFC1213    */
+
+
+/** Begin MIB: mxSNMP       */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_trap_notification(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != mx_snmp_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: mxSNMP       */
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxlldp(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != mx_vlan_MibEntry_setup(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxPortdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxRSTPdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_portmirror(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdbrgdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdbridb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdethdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdllddb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdot1db(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdot3db(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+
+    }
+
+    if ( IES_NOERR != stdvladb_MibEntry_setup(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_std1d1db(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_std1w1db(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxStcldb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxQosdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdladb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxladb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxPsmsdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxPsspdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_trustAccess(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+#if !defined(INCLUDE_MOXA_L3)
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_dhcpSrv(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+#endif
+
+/** Begin MIB: stdrmondb    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdrmodb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_RMON(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: stdrmondb    */
+
+
+/** Begin MIB: IGMP         */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxIgmpdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: IGMP        */
+
+/** Begin MIB: mxTr2    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_turboring_v2(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: mxTr2    */
+
+/** Begin MIB: pNAC    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxDot1xdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxRadiusdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdpnadb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: pNAC    */
+
+#if !defined(MOXA_TURBO_CHAIN_HIDE_UI)
+/** Begin MIB: turboChain    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxTcdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: turboChain    */
+#endif
+
+/** Begin MIB: mxCounter    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxTcstdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: mxCounter    */
+
+
+/** Begin MIB: WarningNotification    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_general(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_switching(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_poe(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_port(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+#if defined(MOXA_INTEL_TEMP_CTRL)
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_hardware(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }    
+#endif
+#if defined(MOXA_TRACKING)
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_tracking(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+#endif
+#if defined(INCLUDE_MOXA_L3)
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mx_event_routing(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+#endif
+/** End   MIB: WarningNotification    */
+
+#if !defined(MOXA_DUAL_HOMING_HIDE_UI)
+/** Begin MIB: dualHoming    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_mxDualdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: dualHoming    */
+#endif
+
+/** Begin MIB: rateLimit(PortDisable)    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxRlpsdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: rateLimit(PortDisable)    */
+
+/** Begin MIB: email    */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_email(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: email    */
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_syslogServer(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_eventLog(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+/** Begin MIB: mxDeviceIO  */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mx_deviceIO(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB: mxDeviceIO  */
+
+/** Begin MIB : Login Policy */
+    if ( IES_NOERR != mx_LoginPolicy_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : Login Policy */
+
+/** Begin MIB : Password Policy */
+    if ( IES_NOERR != mx_PasswordPolicy_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : Password Policy */
+
+/** Begin MIB : mxGeneralInfo */
+    if ( IES_NOERR != mx_generalInfomation_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : mxGeneralInfo */
+
+#if defined(INCLUDE_MOXA_L3)
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxIpifdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+/** Begin MIB : stdvrrp */
+    if ( IES_NOERR != vrrpdb_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : stdvrrp */
+
+/** Begin MIB : stdvrrp3 */
+    if ( IES_NOERR != vrrp3db_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : stdvrrp3 */
+
+/** Begin MIB : mxVrrp */
+    if ( IES_NOERR != mxvrrpdb_MibEntry_setup(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : mxVrrp */
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxArpdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }   
+
+/** Begin MIB : mxStaticRoute */
+    if ( IES_NOERR != mxStaticRoutedb_MibEntry_setup(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+/** End   MIB : mxStaticRoute */
+
+/** Begin MIB : OSPF */
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxOspfdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }   
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_stdOspfdb(entry) ) 
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }  
+/** End   MIB : OSPF */
+
+#endif
+
+    if ( IES_NOERR != ies_auto_mibs_setup_entry_flags_net_mxMabdb(entry) )
+    {
+        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, "Error in %s line %d\n", __func__, __LINE__);
+        return IES_ERR;
+    }
+
+    return IES_NOERR;
+}
+
+
+#endif //_IES_AUTO_MIBS_SETUP_C_

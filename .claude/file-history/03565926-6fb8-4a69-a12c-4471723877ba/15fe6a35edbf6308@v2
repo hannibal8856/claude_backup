@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Usage: dutssh2.exp "<cmd1>" "<cmd2>" ...   (root shell via su)
+set cmds $argv
+set timeout 30
+log_user 1
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@192.168.127.253
+expect { -re "assword:" { send "moxa\r" } timeout { puts "\nMARK:no-pw-prompt"; exit 3 } }
+sleep 3
+send "\r"
+expect { -re {\$ } { puts "\nMARK:user-shell" } timeout { puts "\nMARK:no-user-shell"; exit 3 } }
+send "su\r"
+expect { -re "assword:" { send "moxa\r" } timeout { puts "\nMARK:no-su-pw"; exit 4 } }
+sleep 2
+send "\r"
+expect { -re {# } { puts "\nMARK:root-shell" } timeout { puts "\nMARK:no-root-shell"; exit 4 } }
+set n 0
+foreach c $cmds {
+    incr n
+    send "$c ; echo MRK$n\_EN\"\"D\r"
+    expect { -re "MRK$n\_END" { } timeout { puts "\nMARK:timeout-cmd-$n" } }
+}
+send "exit\r"
+sleep 1
+send "exit\r"
+expect eof

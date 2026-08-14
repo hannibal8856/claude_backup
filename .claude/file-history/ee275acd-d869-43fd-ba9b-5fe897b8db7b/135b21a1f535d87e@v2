@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Per-MibEntry-array RO/RW and iss_build split across the ies-auto-mibs maps."""
+import glob, re, os, collections
+
+D = "/home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/ies-auto-mibs"
+SETUP = os.path.join(D, "ies_auto_mibs_setup.c")
+
+blk = re.compile(
+    r'\.name\s*=\s*"([^"]*)"'
+    r'[\s\S]{0,400}?\.uri\s*=\s*"([^"]*)"'
+    r'[\s\S]{0,800}?\.mode\s*=\s*(\w+)'
+    r'(?:[\s\S]{0,200}?\.iss_build\s*=\s*(\d+))?')
+arr = re.compile(r"struct\s+ies_auto_mibs_entry\s+(\w+)\s*\[\s*\]")
+
+# which arrays are commented out in-master (=> served by framework subagent)
+setup = open(SETUP, errors="replace").read()
+commented, active = set(), set()
+for line in setup.splitlines():
+    m = re.search(r"MOX_SNMP_INIT_ENTRY\((\w+)\)", line)
+    if not m:
+        continue
+    (commented if line.lstrip().startswith(("/*", "//")) else active).add(m.group(1))
+
+rows = []
+for f in sorted(glob.glob(os.path.join(D, "*.h"))):
+    txt = open(f, errors="replace").read()
+    a = arr.search(txt)
+    if not a:
+        continue
+    sym = a.group(1)
+    c = collections.Counter()
+    for name, uri, mode, iss in blk.findall(txt):
+        c["RW" if "RWRITE" in mode else "RO"] += 1
+        c["iss" + (iss or "?")] += 1
+    tot = c["RO"] + c["RW"]
+    if tot == 0:
+        continue
+    where = "framework" if sym in commented else ("in-master" if sym in active else "-")
+    rows.append((where, sym, tot, c["RO"], c["RW"], c["iss1"], c["iss0"], os.path.basename(f)))
+
+for where in ("framework", "in-master", "-"):
+    sub = [r for r in rows if r[0] == where]
+    if not sub:
+        continue
+    print(f"######## {where}  ({len(sub)} arrays)")
+    print(f"{'array':38s} {'tot':>4s} {'RO':>4s} {'RW':>4s} {'iss1':>5s} {'iss0':>5s}  file")
+    for r in sorted(sub, key=lambda x: -x[2]):
+        print(f"{r[1]:38s} {r[2]:4d} {r[3]:4d} {r[4]:4d} {r[5]:5d} {r[6]:5d}  {r[7]}")
+    print()
+
+print("commented (framework) symbols not found in any header:",
+      sorted(commented - {r[1] for r in rows}))

@@ -1,0 +1,26 @@
+---
+name: clippy-gitlab-mr-workflow
+description: Tooling + gotchas for mass-creating GitLab issues/branches/MRs for the clippy-scan-binary-packages-3 work
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 06089eea-89b1-4ba6-91e6-624dca2bad18
+---
+
+To merge the clippy-scan-binary-packages-3 work, each dl repo needs: GitLab issue (title "Clippy scan binaries only") → local branch `<iid>-clippy-scan-binary-packages` (forked from clippy-scan-binary-packages-3, commit amended to "Issue #<iid>: Clippy scan binaries only") → push → MR to NOS_v6.0_develop with description "Closes #<iid>".
+
+Scripts (host `~/`): `create_clippy_lib_mrs.sh` (libraries), `create_clippy_app_mrs.sh` (apps), `create_clippy_mrs.sh` (older simple variant). All DRY-RUN by default, env LIST_FILE/SLEEP/TOKEN_FILE/--go. **BOTH PHASES DONE 2026-06-15: 156 lib + 19 app repos all have issue+branch+MR** (lists: ~/clippy_lib_mr_list.txt, ~/clippy_app_mr_list.txt).
+
+APP flow differs from lib: lib = fork clippy-scan-binary-packages-3 + amend its single commit. App = fork from origin/NOS_v6.0_develop, `git checkout <branch> -- Makefile` (only `(^|/)Makefile$`), single squash commit "Issue #<iid>: Clippy scan binaries only". This deliberately **excludes Cargo.lock** (separate MR pending for 9 apps), squashes firmware_update's stale `-p` commit, and drops cli_export's MSRV files. Use SLEEP=3 (no failures that way).
+
+**TN-4500B port DONE locally (2026-06-17, NOT pushed, no MR yet):** ~/TN-4500B_v2.0/buildroot, branches `clippy-scan-binary-packages-3` from `origin/TN-4500B_v2.0_develop`. dl: 150 rust repos = 16 apps (Makefile transformed to RUSTC_WRAPPER, NOT cherry-picked — NOS app history was dirty with -p) + 129 libs cherry-picked NOS's "clippy scan binaries only" commit + 5 TN-only fresh libs (auto_config/config_name/custom_default/dns_server/mdns). Special cases: app_moxa_framework/iss_config_loader have no own scan (branch points at base, 0 commits ahead); plugin_moxa_aide needed app-scan ADDED (base only had framework scan) like NOS; plugin_moxa_management_ip cherry-pick conflicted → did fresh transform. moxa repo: branch off TN base, 163 lib .mk cleaned (scan_result block + RUST_TARGET_DIR), 16 app .mk kept, post-build.sh clippy-gate section replaced with NOS new version (preserved TN-only unbound cleanup lines), commit "Issue: #4451: Remove Clippy scans for Rust library packages". TN has NO L3 packages (md_type_detect/mms/relay/rip/ospf etc absent). app_moxa_auto_config/lib_moxa_auto_config/lib_moxa_poe_tn_bseries/lib_moxa_poe_tps2388x are C (not rust). dl rollout DONE 2026-06-17: 148 **DRAFT** MRs created (`Draft:` title prefix), 2 skipped (framework/iss = 0 commit), 0 fail. List: ~/tn_clippy_mr_list.md. Branch `<iid>-clippy-scan-binary-packages` → TN-4500B_v2.0_develop. TN moxa MR DONE 2026-06-17: issue #4458 "Remove Clippy scans for Rust library packages", branch 4458-clippy-scan-binaries-only, DRAFT MR !2820 → TN-4500B_v2.0_develop (buildsystem/moxa; same project as NOS's #4451/!2817, just different target branch). TN MRs all still Draft + unmerged.
+
+**PENDING follow-up MRs (not yet done):** (1) Cargo.lock for the 9 apps that had Synchonize-lock commits; (2) cli_export's 3 MSRV files (app/.cargo/config.toml, app/Cargo.toml, framework/Cargo.toml) — excluded from its clippy MR per user choice (b).
+
+**Gotchas learned (all real, all hit):**
+- **Token**: `~/moxa_gitlab_scm_token` is `<label>glpat-<PAT>` (no usable colon) — extract with `grep -oE 'glpat-[A-Za-z0-9._-]+'`, use as `PRIVATE-TOKEN` header. It has API access (Developer/30 via group). **It LEAKED into session output once (curl -u prompt) — advise rotating.** (token2 file later disappeared.)
+- **`.git` suffix gotcha (the big one)**: ~34 dl repos' `git remote get-url origin` has NO `.git` suffix. A path regex requiring `\.git$` silently fails → leaves `git@gitlab.com:` prefix → malformed project path → API returns **404 "Project Not Found"** (looks like a permissions problem but isn't). Correct parse: `sed -E 's#^.*gitlab\.com[:/]##; s#\.git$##; s#/#%2F#g'`. Both scripts fixed.
+- **Issue-creation rate-limit is real** on gitlab.com: rapid sequential POSTs get intermittent failures even with access. Use `SLEEP=3` between repos for retries. Idempotent re-run is safe (existing branch → EXISTS skip; existing same-title open issue → reuse its iid, no duplicate).
+- Project access via API ≠ SSH push access (SSH key broader than PAT membership in general — but here the 404s were the regex bug, not real permission gaps).
+
+Related: [[clippy-by-application-scan]], [[git-no-ext-diff]].

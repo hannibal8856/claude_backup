@@ -1,0 +1,34 @@
+#!/bin/bash
+# 從既有 pcap 重算 SNMP GET 延遲統計,輸出簡報用的標準三數字:
+#   平均 / 最壞情況 / 超過 50ms 的次數佔比
+#
+# 為什麼不用中位數對外:中位數會掩蓋尾端問題。mx_device_io 即為實例——
+# 中位數 113.3 -> 112.9ms 看似持平,但平均 117.0 -> 417.7ms、
+# 最壞 153.5 -> 10134.5ms,實為退步。
+#
+# 配對方式與 mxportdb_latency.sh 一致:wire time,以 snmp.request_id 配對
+# request/response,不採用 client 端 wall clock。
+#
+# 方法已驗證:對 mxportdb-13oid-{mainline,planE} 兩份 pcap 重算出的
+# p50/p95/p100 與 snmpwalk/RESULT-phase2-task4.txt 記錄的數字完全一致。
+#
+# usage: tools/latency_stats.sh <pcap> [threshold_ms]
+set -u
+
+P="${1:?usage: latency_stats.sh <pcap> [threshold_ms]}"
+TH="${2:-50}"
+
+tshark -r "$P" -Y snmp -T fields \
+       -e frame.time_epoch -e snmp.request_id -e udp.srcport 2>/dev/null \
+| awk -F'\t' '
+{ t=$1; id=$2; sp=$3;
+  if (sp==161) { if (id in req) { print (t-req[id])*1000 } }
+  else         { req[id]=t }
+}' | sort -n | awk -v th="$TH" '
+{ v[NR]=$1; s+=$1; if ($1>th) over++ }
+END {
+  if (NR==0) { print "no request/response pairs found"; exit 1 }
+  printf "n=%d  avg=%.1fms  p50=%.1fms  p95=%.1fms  worst=%.1fms  >%sms=%d/%d (%.2f%%)\n", \
+    NR, s/NR, v[int(NR*0.50)+(NR%2?1:0)], v[int(NR*0.95)], v[NR], \
+    th, over+0, NR, (over+0)*100/NR
+}'

@@ -1,0 +1,112 @@
+/* Plan C (agentx_owned.list): one list, two consumers.
+ *
+ * The list holds mod_uri prefixes. At registration time an RO entry whose URI
+ * matches is not registered locally at all, so the snmpd master routes it to
+ * whichever AgentX subagent claimed the OID. RW entries are always registered
+ * locally, because SET has to stay on the framework path.
+ *
+ * A RW column's GET is a different question. Reading it through the local
+ * ies_uri_handle path costs ~600ms, and a walk bundles it with the RO columns
+ * of the same table into one multi-varbind GETNEXT, so one slow column drags
+ * the whole table down. For any RW column whose group is delegated we forward
+ * just the GET to the subagent and keep SET local.
+ *
+ * Forwarding needs a "probe": an OID the subagent owns, used to make
+ * netsnmp_subtree_find() resolve to the subagent's registration. Probing the
+ * column itself is useless -- the RW column IS registered locally, so the
+ * lookup finds us, and the request is then handed to a non-AgentX handler
+ * while still reporting success. That failure is silent and ugly: wrong value
+ * types (OCTET STRING came back as INTEGER 0), scalars turning into
+ * noSuchInstance, GETNEXT looping inside the column so a whole-tree walk
+ * collapsed from 193 varbinds to 13, and no AgentX traffic on the wire at all.
+ *
+ * So probes are not hand-listed. The registration loop already knows exactly
+ * which OIDs it handed over -- every entry it skips is one -- and records them
+ * as candidates. A candidate later shadowed by a synthesised index column is
+ * struck off: moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry() re-registers
+ * a table's column 1 in-master for tables that kept any column locally, which
+ * silently takes that OID back from the subagent.
+ *
+ * Selection prefers a candidate from the column's own table, then falls back to
+ * any candidate under the same prefix. Both halves are needed: one prefix can
+ * span several subagent registrations (ifmibdb/ covers ifTable and ifXTable
+ * separately, and they are distinct registrations), while a table may have no
+ * usable candidate of its own (mxportdb/portConfigTable's only RO column is its
+ * index, which gets synthesised back locally).
+ *
+ * A probe does not need an instance sub-id: a bare column OID, and even the
+ * table-entry OID one level up, resolve to the subagent's registration. */
+#define AGENTX_PROBE_MAX         (128)
+
+struct mox_agentx_probe
+{
+    char uri[IES_MAX_URI];      /* delegated entry's URI -- identifies its table */
+    int  prefix_idx;            /* which agentx_owned.list line matched          */
+    oid  oid_list[IES_MAX_OID];
+    int  oid_len;
+    int  shadowed;              /* taken back by a locally synthesised index     */
+};
+static struct mox_agentx_probe gAgentXProbe[AGENTX_PROBE_MAX];
+static int gAgentXProbeCount = 0;
+
+static int mox_snmp_entry_agentx_prefix_idx (struct ies_auto_mibs_entry *entry);
+
+/* Every entry the registration loop hands to a subagent becomes a candidate. */
+static void mox_snmp_probe_note_delegated (struct ies_auto_mibs_entry *entry,
+                                           int                         prefix_idx)
+{
+    struct mox_agentx_probe *p;
+
+    if ( gAgentXProbeCount >= AGENTX_PROBE_MAX ||
+         entry->oid_len <= 0 || entry->oid_len > IES_MAX_OID )
+    {
+        return;
+    }
+    p = &gAgentXProbe[gAgentXProbeCount++];
+    memset(p, 0, sizeof(*p));
+    snprintf(p->uri, sizeof(p->uri), "%s", entry->uri);
+    p->prefix_idx = prefix_idx;
+    p->oid_len    = entry->oid_len;
+    memcpy(p->oid_list, entry->oid_list, sizeof(oid) * (size_t) entry->oid_len);
+}
+
+/* A synthesised index column re-registered in-master disqualifies that OID. */
+static void mox_snmp_probe_note_shadowed (const oid *oid_list, int oid_len)
+{
+    int i;
+
+    for ( i = 0; i < gAgentXProbeCount; i++ )
+    {
+        if ( gAgentXProbe[i].oid_len == oid_len &&
+             memcmp(gAgentXProbe[i].oid_list, oid_list,
+                    sizeof(oid) * (size_t) oid_len) == 0 )
+        {
+            gAgentXProbe[i].shadowed = 1;
+        }
+    }
+}
+
+static const struct mox_agentx_probe *
+mox_snmp_probe_for_entry (struct ies_auto_mibs_entry *entry, int prefix_idx)
+{
+    const struct mox_agentx_probe *fallback = NULL;
+    int i;
+
+    for ( i = 0; i < gAgentXProbeCount; i++ )
+    {
+        if ( gAgentXProbe[i].shadowed ||
+             gAgentXProbe[i].prefix_idx != prefix_idx )
+        {
+            continue;
+        }
+        if ( strcmp(gAgentXProbe[i].uri, entry->uri) == 0 )
+        {
+            return &gAgentXProbe[i];            /* same table wins */
+        }
+        if ( fallback == NULL )
+        {
+            fallback = &gAgentXProbe[i];        /* same prefix, other table */
+        }
+    }
+    return fallback;
+}

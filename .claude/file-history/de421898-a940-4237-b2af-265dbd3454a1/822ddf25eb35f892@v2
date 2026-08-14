@@ -1,0 +1,58 @@
+SILENCE?=@
+PROJECT_NAME            =   lib_moxa_snmp_agentx
+LIB_NAME                =   libmoxa_snmp_agentx
+VERSION                 =   $(shell dpkg-parsechangelog --show-field Version)
+
+# Params define
+PWD                     =   $(shell pwd)
+BUILD_PATH              =   $(PWD)/build
+INCLUDE_DIR             =   $(PWD)/include
+SRC_DIR                 :=  $(PWD)/src
+SOURCES                 :=  $(wildcard $(SRC_DIR)/*.c)
+OBJECTS                 :=  $(SOURCES:$(SRC_DIR)/%.c=$(BUILD_PATH)/%.o)
+CFLAGS                  +=  -std=c99                                    \
+                            -Wall -Werror                               \
+                            -I$(INCLUDE_DIR)                            \
+                            -fpic                                       \
+                            -D_GNU_SOURCE
+
+# Back trace parameter define
+BT_FLAGS                = -funwind-tables
+
+# Deliberately NOT `net-snmp-config --agent-libs`. That adds -lnetsnmpmibs,
+# which drags all of ies-auto-mibs plus parson, lib_moxa_framework_uri and
+# lib_moxa_system into whatever links this library - and keeping libnetsnmpmibs
+# out of the framework process is the entire reason this library exists
+# (design doc D6 / section 5.2). The four AgentX objects section 5.2 wanted
+# extracted are already inside libnetsnmpagent, so two flags cover it; see
+# ~/WORK/SNMP_50ms/snmpwalk/RESULT-phase3-task1.txt for the symbol table.
+#
+# Known and accepted: libnetsnmpagent itself pulls in libmoxaframeworkuri,
+# libparson, libmoxa_system and libmoxa_util, because 3rdparty_net_snmp.mk
+# appends them to --with-ldflags globally. Anything linking it inherits them.
+# That is not the D15 violation - D15 forbids the subagent *using*
+# ies_uri_handle_client, not linking a library that happens to be present.
+COMMON_LIBS             = -lnetsnmpagent -lnetsnmp
+
+.PHONY: all
+all: $(BUILD_PATH) $(LIB_NAME).so
+
+$(BUILD_PATH):
+	$(SILENCE)mkdir -p $(BUILD_PATH)
+
+$(OBJECTS): $(BUILD_PATH)/%.o:$(SRC_DIR)/%.c
+	$(SILENCE)$(CC) -c $(CFLAGS) $(BT_FLAGS) -o $@ $<
+
+$(LIB_NAME).so: $(OBJECTS)
+	$(SILENCE)$(CC) -shared $(CFLAGS) $(BT_FLAGS) -o $(BUILD_PATH)/$@ $^ $(COMMON_LIBS)
+
+.PHONY: install
+install: $(LIB_NAME).so
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/lib/
+	$(SILENCE)mkdir -p $(DESTDIR)/usr/include/lib_moxa_snmp_agentx
+	$(SILENCE)install $(BUILD_PATH)/$(LIB_NAME).so $(DESTDIR)/usr/lib/
+	$(SILENCE)cp $(INCLUDE_DIR)/lib_moxa_snmp_agentx/*.h $(DESTDIR)/usr/include/lib_moxa_snmp_agentx
+
+.PHONY: clean
+clean:
+	$(SILENCE)rm -rf $(BUILD_PATH)

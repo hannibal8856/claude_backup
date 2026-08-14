@@ -1,0 +1,8 @@
+- [Build order](feedback_build_order.md) — plugin_moxa_snmp before rust_moxa_build, then final make
+- [Docs only on explicit request](feedback_docs_only_on_explicit_request.md) — during plan Q&A, treat as clarification; don't auto-offer docx/pptx updates
+- [ISS AgentX subagent vs snmpd 161 conflict](project_iss_agentx_subagent_161_conflict.md) — ISS standalone agent binds 161 & crashes snmpd; fix = disable snmpagent + enable snmpsubagent master 127.0.0.1:705
+- [Plan C AgentX SET path & framing bug](project_plan_c_agentx_set_path_and_framing.md) — ifAdminStatus SET→config via existing PortSetAdminStatus2MxCfgAsync; AgentX drops under load = TCP framing desync (single recv + partial send)
+- [Plan D two-subagent OID reachability](project_plan_d_two_subagent_oid_reachability.md) — verified only ISS + framework subagents needed; no daemon serves OIDs directly; new OIDs must go via config/status layer
+- [mod_uri correlates with ISS-owned](project_moduri_correlates_iss_owned.md) — mod_uri groups are almost all iss_build==1; ISS shadows GET, so they can't migrate to framework without an ISS-side change
+- [agentx_owned two-axis design](project_agentx_owned_two_axis_design.md) — list=WHICH OIDs go AgentX (index table); iss_build=WHO serves (1→ISS, 0→reserved)
+- [SNMP framework-subagent migration](project_snmp_framework_subagent_migration.md) — roadmap A→B→C→mxDot1xdb, table_col/index-table mechanics, current state (A+syslog pending build), gotchas (generalInfo=system-info reverted)

@@ -1,0 +1,15 @@
+- [SNMP 工作筆記 repo](snmp-work-notes-repo.md) — 設計文件與 snmpwalk 基線在 ~/WORK/SNMP_50ms，不在 buildroot 內；舊文件勿逕自引用
+- [低風險 review 發現自行裁決](self-adjudicate-minor-review-findings.md) — SDD 流程中別為工具健壯性這類小事打斷使用者，裁決理由記進 ledger
+- [fiber_check Plan A cross-process bug](fiber-check-plan-a-cross-process-bug.md) — .stat dumper 跑在 framework process 不是 daemon,靠 .so global 傳資料一定失敗
+- [原始碼註解用英文](source-comments-in-english.md) — 計畫的 code block 也要先寫英文註解，實作者會逐字抄進去
+- [每次列出改動的 package](report-changed-packages.md) — 交付變更時要講 buildroot package 名與受影響的執行檔，不只講檔案
+- [build 都在 mx_SNMP_PLAN_E 容器](build-is-users-job.md) — 開發一律在該容器；build 前用 /proc/<pid>/cwd 確認撞到的是不是同一個 tree，別的專案容器不算衝突
+- [commit 帶 task 編號](commit-message-carries-task-number.md) — `[Plan E Task N] ...`，dispatch 時就要寫進指示
+- [做完一段直接 commit & build & 測](commit-and-build-without-asking.md) — 不要停下來問要不要提交；push 仍要問
+- [git diff 會開 meld](git-diff-launches-meld.md) — 一律加 --no-ext-diff；派 subagent 讀 diff 時要在 prompt 裡交代
+- [walkdiff 受 DUT 設定污染](snmpwalk-diff-confounded-by-dut-config.md) — VLAN/IP interface/trust-access 會改變 OID 集合；設定不同的兩份 capture 不能直接比
+- [dut-console 只在 Plan E partition 可用](dut-console-is-linux-shell-not-moxa-cli.md) — mainline 進 moxash；moxash 需要 TTY，丟進 wrapper 會卡死，救援用 Ctrl-\\
+- [切 partition 可腳本化](dut-partition-switch-is-scriptable.md) — /moxa/firmware_change.sh Y Y；但 mainline 登入進 moxash，對它跑 dut-console 會卡死
+- [DUT 用 SSH+expect 比序列埠安全](dut-ssh-expect-beats-serial-console.md) — 有 pty 所以 moxash 也能跑，落點即 partition 判別式；但 sshd 連幾次就不再開新 session
+- [DUT 熱抽換 binary 免燒韌體](dut-hotswap-binary-without-firmware-update.md) — squashfs 唯讀但可 mount --bind /tmp 的新檔；dut_hotswap.sh，一分鐘內驗完
+- [DUT root 要 ssh admin 再 su](dut-root-login-via-su-not-ssh.md) — root SSH 被 prohibit-password 擋；root shell 是 zsh，prompt 不是 # ，expect 用 marker 同步

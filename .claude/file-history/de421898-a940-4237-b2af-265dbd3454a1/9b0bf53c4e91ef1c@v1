@@ -1,0 +1,81 @@
+RESULT-phase3-task1.txt — build agentx/subagent into net-snmp
+==============================================================
+Date: 2026-08-05
+
+CHANGE
+
+  moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:185
+
+    - --with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy agentx/master"
+    + --with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy agentx/master agentx/subagent"
+
+  Line 158 is a second, shorter configure invocation in the same file (the host
+  build branch) and was left alone. Values are space-separated.
+
+STEP 3 — objects appear                                          PASS
+
+  make 3rdparty_net_snmp-reconfigure, exit 0, configure re-ran (888 checks),
+  no build errors.
+
+    agentx/agentx_config.lo   agentx/master.lo        agentx/protocol.lo
+    agentx/client.lo    <NEW> agentx/master_admin.lo  agentx/subagent.lo  <NEW>
+
+  Compiled on disk as mibgroup/agentx/.libs/{subagent,client}.o (ARM EABI5
+  relocatable, 31.7K), and snmpd relinked at 12:33.
+
+  NOTE ON METHOD: -reconfigure, not -rebuild. The change is a configure
+  argument; -rebuild re-runs only the build step, so the generated agent
+  Makefile would keep its old module list and the edit would appear to succeed
+  while producing nothing. The plan said -rebuild and has been corrected.
+
+FINDING THAT SIMPLIFIES TASK 2
+
+  Design doc 5.2 says lib_moxa_snmp_agentx should link "libnetsnmpagent +
+  libnetsnmp + those four agentx objects", the concern being that
+  net-snmp-config --agent-libs would drag in libnetsnmpmibs and with it all of
+  ies-auto-mibs, parson, framework-uri and lib_moxa_system.
+
+  Measured on this build, all four agentx pieces are already inside
+  libnetsnmpagent, and none are in libnetsnmpmibs:
+
+    symbol                    libnetsnmpagent   libnetsnmpmibs
+    subagent_init                    yes              no
+    agentx_open_session              yes              no
+    agentx_register_index            yes              no
+    agentx_parse                     yes              no
+
+  libnetsnmpagent's own NEEDED list confirms it does not depend on
+  libnetsnmpmibs:
+
+    libnetsnmp, libm, libssl, libcrypto, libpcre, libmoxaframeworkuri,
+    libparson, libmoxa_system, libmoxa_util, libpthread, libc
+
+  So Task 2 does not need to extract or separately link four object files -
+  linking libnetsnmpagent + libnetsnmp is sufficient and already excludes
+  libnetsnmpmibs. The acceptance test in Task 2 Step 5 (readelf -d, assert no
+  libnetsnmpmibs) stays: it is what keeps this true if the build changes.
+
+  CAVEAT worth carrying into Task 2: libnetsnmpagent does pull in
+  libmoxaframeworkuri, libparson, libmoxa_system and libmoxa_util, because the
+  .mk adds "-lmoxaframeworkuri -lparson -lmoxa_system -lmoxa_util" to
+  --with-ldflags globally. Anything linking libnetsnmpagent inherits them. This
+  is not the D15 violation - D15 forbids the subagent *using*
+  ies_uri_handle_client, not linking a library that happens to be present - but
+  it should be a conscious fact rather than a surprise.
+
+  A tooling note, because it produced a wrong answer first: the host has no
+  arm-linux-gnueabihf-nm (the toolchain lives only inside the docker
+  container), and nm silently reported zero symbols everywhere. readelf -sWD
+  works and was used for the table above. Zero symbol counts from a
+  cross-toolchain binary on this host should be assumed to be a broken tool
+  until proven otherwise.
+
+STEP 4 — snmpd unharmed                                          PENDING
+
+  Needs the image flashed. To run once it is:
+
+    cd ~/WORK/SNMP_50ms && sudo -v && tools/mxportdb_latency.sh phase3-task1
+
+  Expected: p50 near 13.4ms, matching RESULT-phase2-task4.txt's Plan E figure -
+  same tool, same 13 OIDs, so directly comparable. Plus a boot log clean of the
+  namelen watchdog.

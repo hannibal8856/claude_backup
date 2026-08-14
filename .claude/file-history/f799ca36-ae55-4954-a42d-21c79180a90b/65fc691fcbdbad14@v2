@@ -1,0 +1,238 @@
+################################################################################
+#
+# 3rdparty_net_snmp
+#
+################################################################################
+
+3RDPARTY_NET_SNMP_SITE = "$(TOPDIR)/dl/3rdparty_net_snmp"
+3RDPARTY_NET_SNMP_DEPENDENCIES = 3rdparty_parson lib_moxa_framework_uri lib_moxa_rust_pam lib_moxa_system lib_moxa_utility openssl \
+    app_moxa_iss_10_1_0 \
+    lib_moxa_rust_iss \
+    lib_moxa_rust_system
+
+3RDPARTY_NET_SNMP_INSTALL_STAGING = YES
+
+ifeq ($(BR2_ENDIAN),"BIG")
+3RDPARTY_NET_SNMP_ENDIAN = big
+else
+3RDPARTY_NET_SNMP_ENDIAN = little
+endif
+
+MOXA_L3_BASE=no
+ifeq ($(BR2_MOXA_PRODUCT_NAME),"65M-5000M")
+MOXA_PRODUCT_NAME := $(subst -,_,M$(BR2_MOXA_PRODUCT_NAME))
+else
+MOXA_PRODUCT_NAME := $(subst -,_,$(BR2_MOXA_PRODUCT_NAME))
+endif
+ifeq ($(BR2_MOXA_PRODUCT_NAME),"MDS-G4000-L3")
+MOXA_L3_BASE=yes
+else ifeq ($(BR2_MOXA_PRODUCT_NAME),"MRX-Q4000-L3")
+MOXA_L3_BASE=yes
+endif
+
+ifeq ($(BR2_MOXA_SW_PACKAGE), "L3_BASE")
+MOXA_L3_BASE=yes
+endif
+
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS=
+ifneq ($(BR2_MOXA_HW_MAC), "")
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS+=-D$(BR2_MOXA_HW_MAC)
+endif
+ifneq ($(BR2_MOXA_PRODUCT_LINE), "")
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -D$(BR2_MOXA_PRODUCT_LINE)
+endif
+
+3RDPARTY_NET_SNMP_CFLAGS = \
+    -I$(@D)/snmp_tools/inc -I$(@D)/snmp_tools/src -I$(STAGING_DIR)/usr/openssl/include/ \
+    -I$(STAGING_DIR)/usr/include/libies_uri_handle_hook
+
+3RDPARTY_NET_SNMP_CFLAGS += -D$(subst ",,$(MOXA_PRODUCT_NAME))
+
+ifneq ($(BR2_MOXA_MAC_SDK), "")
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -D$(BR2_MOXA_MAC_SDK)
+3RDPARTY_NET_SNMP_CFLAGS += -D$(BR2_MOXA_MAC_SDK)
+endif
+
+ifeq ($(MOXA_L3_BASE), yes)
+3RDPARTY_NET_SNMP_CFLAGS += -DINCLUDE_MOXA_L3
+endif
+3RDPARTY_NET_SNMP_CFLAGS += -D$(BR2_MOXA_PRODUCT_MODEL)
+
+ifeq (${BR2_MOXA_DHCP_CLIENT_OPTION_66_67}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DHCP_CLIENT_OPTION_66_67
+endif
+
+ifeq (${BR2_MOXA_DHCP_SERVER_OPTION_66_67}, y)
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -DMOXA_DHCP_SERVER_OPTION_66_67
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DHCP_SERVER_OPTION_66_67
+endif
+
+ifeq (${BR2_MOXA_DHCP_SERVER_OPTION_121}, y)
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -DMOXA_DHCP_SERVER_OPTION_121
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DHCP_SERVER_OPTION_121
+endif
+
+ifeq (${BR2_MOXA_MULTICOUPLING}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_MULTICOUPLING
+endif
+
+ifeq (${BR2_MOXA_PHR}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_PHR
+endif
+
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_INTEL_TEMP_CTRL}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_INTEL_TEMP_CTRL
+endif
+
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_TRACKING}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_TRACKING
+endif
+
+ifeq (${BR2_MOXA_DI}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DI
+endif
+
+ifeq (${BR2_MOXA_DO_RELAY}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DO_RELAY
+endif
+
+ifeq (${BR2_MOXA_MACSEC}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_MACSEC
+endif
+
+ifeq (${BR2_MOXA_DUAL_HOMING_HIDE_UI}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DUAL_HOMING_HIDE_UI
+endif
+
+ifeq (${BR2_MOXA_TURBO_CHAIN_HIDE_UI}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_TURBO_CHAIN_HIDE_UI
+endif
+
+ifeq (${BR2_PACKAGE_PLUGIN_MOXA_GOOSE_CHECK}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_GOOSE_CHECK
+endif
+
+ifeq (${BR2_MOXA_DRC}, y)
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -DMOXA_DRC
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_DRC
+endif
+
+ifeq (${BR2_MOXA_RSTP_SWIFT}, y)
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_RSTP_SWIFT
+endif
+
+ifeq (${BR2_MOXA_MIRROR_VLAN_MIRROR}, y)
+3RDPARTY_NET_SNMP_MOXA_CMTFLAGS += -DMOXA_MIRROR_VLAN_MIRROR
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_MIRROR_VLAN_MIRROR
+endif
+
+3RDPARTY_NET_SNMP_CFLAGS += -DMOXA_CUST
+
+ifeq ($(filter NONE,$(BR2_MOXA_ISS_TARGET_OS)), NONE)
+MOXA_IES_AUTO_MIB=no
+else ifeq ($(strip $(BR2_MOXA_ISS_TARGET_OS)),)
+MOXA_IES_AUTO_MIB=no
+else
+MOXA_IES_AUTO_MIB=yes
+endif
+
+ifeq ($(MOXA_IES_AUTO_MIB), no)
+NET_SNMP_DIR=net-snmp-5.9.3
+3RDPARTY_NET_SNMP_CONF_OPTS += \
+    --with-defaults \
+    --with-ldflags="-rdynamic" \
+    --build=x86 \
+    --host=$(GNU_HOST_NAME) \
+    --target=$(GNU_TARGET_NAME) \
+    --with-cc=$(TARGET_CC) \
+    --with-linkcc=$(TARGET_CC) \
+    --disable-manuals \
+    --disable-scripts \
+    --disable-mibs \
+    --disable-mib-loading \
+    --without-kmem-usage \
+    --without-perl-modules \
+    --disable-embedded-perl \
+    --disable-perl-cc-checks \
+    --with-openssl=$(STAGING_DIR)/usr/openssl \
+    --with-logfile="/moxa/permanent/moxalog/snmp.log" \
+    --with-persistent-directory="/moxa/permanent/snmp" \
+    --with-mib-modules="ucd-snmp/dlmod"
+else
+NET_SNMP_DIR=net-snmp-5.9.3
+3RDPARTY_NET_SNMP_CONF_OPTS += \
+    --build=$(GNU_HOST_NAME) \
+    --disable-manuals \
+    --disable-mib-loading \
+    --disable-mibs \
+    --disable-scripts \
+    --disable-embedded-perl \
+    --enable-ipv6 \
+    --enable-static=no \
+    --prefix="/usr/" \
+    --sbindir="/bin/" \
+    --host=$(GNU_TARGET_NAME) \
+    --target=$(GNU_TARGET_NAME) \
+    --with-ar=$(TARGET_CROSS)ar \
+    --with-cc=$(TARGET_CROSS)gcc \
+    --with-cflags="$(3RDPARTY_NET_SNMP_CFLAGS)" \
+    --with-copy-persistent-files="no" \
+    --with-default-snmp-version="1" \
+    --with-defaults \
+    --with-endianness=$(3RDPARTY_NET_SNMP_ENDIAN) \
+    --with-ldflags="-rdynamic -L$(STAGING_DIR)/usr/openssl/lib -lmoxaframeworkuri -lparson -L$(STAGING_DIR)/lib -L$(STAGING_DIR)/usr/lib -lmoxa_system -lmoxa_util -lies_uri_handle_hook" \
+    --with-logfile="" \
+    --without-perl-modules \
+    --enable-mini-agent \
+    --with-mib-modules="ies-auto-mibs/ies_auto_mibs ucd-snmp/dlmod ucd-snmp/proxy" \
+    --with-openssl=$(STAGING_DIR)/usr/openssl/ \
+    --with-persistent-directory="" \
+    --with-sys-contact="" \
+    --with-sys-location="" \
+    --with-libs=-lpthread \
+    --with-systemd
+endif
+
+define 3RDPARTY_NET_SNMP_CONFIGURE_CMDS
+	ln -sf $(@D)/ies-auto-mibs $(@D)/$(NET_SNMP_DIR)/agent/mibgroup
+	(cd $(@D)/$(NET_SNMP_DIR); rm -f config.cache; autoconf && $(TARGET_MAKE_ENV) ./configure $(3RDPARTY_NET_SNMP_CONF_OPTS))
+endef
+
+ifeq ($(MOXA_IES_AUTO_MIB), no)
+define 3RDPARTY_NET_SNMP_BUILD_CMDS
+# net-snmp
+        $(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/$(NET_SNMP_DIR) all CC=$(TARGET_CC) LD=${TARGET_LD}
+endef
+else
+define 3RDPARTY_NET_SNMP_BUILD_CMDS
+# snmp_script_rust
+	$(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/snmp_script_rust all CC=$(TARGET_CC) TARGET=$(RUSTC_TARGET_NAME) RUST_TARGET_DIR=$(BR2_MOXA_RUST_TARGET_DIR) MOXA_CMTFLAGS="$(3RDPARTY_NET_SNMP_MOXA_CMTFLAGS)" MOXA_PRODUCT_MODEL=${BR2_MOXA_PRODUCT_MODEL}
+# snmp_tools
+	$(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/snmp_tools all CC=$(TARGET_CC)
+# net-snmp
+	$(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/$(NET_SNMP_DIR) all CC=$(TARGET_CC) LD=${TARGET_LD}
+endef
+endif
+
+define 3RDPARTY_NET_SNMP_INSTALL_STAGING_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(STAGING_DIR) install TARGET=$(RUSTC_TARGET_NAME) MOXA_CMTFLAGS="$(3RDPARTY_NET_SNMP_MOXA_CMTFLAGS)"
+	$(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/$(NET_SNMP_DIR) DESTDIR=$(STAGING_DIR) install
+endef
+
+define 3RDPARTY_NET_SNMP_INSTALL_TARGET_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install TARGET=$(RUSTC_TARGET_NAME) MOXA_CMTFLAGS="$(3RDPARTY_NET_SNMP_MOXA_CMTFLAGS)"
+	$(TARGET_MAKE_ENV) $(MAKE1) -C $(@D)/$(NET_SNMP_DIR) DESTDIR=$(TARGET_DIR) installprogs installlibs
+
+	# backup Cargo.toml
+	mkdir -p $(BINARIES_DIR)/cargo/3rdparty_net_snmp/snmp_script_rust/generate_uri_snmp_table
+	cp -f $(@D)/snmp_script_rust/generate_uri_snmp_table/Cargo.lock $(BINARIES_DIR)/cargo/3rdparty_net_snmp/snmp_script_rust/generate_uri_snmp_table
+
+	mkdir -p $(BINARIES_DIR)/cargo/3rdparty_net_snmp/snmp_script_rust/generate_iss_snmp_merge_table
+	cp -f $(@D)/snmp_script_rust/generate_iss_snmp_merge_table/Cargo.lock $(BINARIES_DIR)/cargo/3rdparty_net_snmp/snmp_script_rust/generate_iss_snmp_merge_table
+
+	@if [ "${RUST_CLIPPY_SCAN_CONFIG}" = "true" ]; then \
+		cp -rf $(@D)/snmp_script_rust/rust_clippy_scan_result $(BINARIES_DIR)/cargo/3rdparty_net_snmp; \
+	fi
+endef
+
+$(eval $(generic-package))

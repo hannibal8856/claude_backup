@@ -1,0 +1,31 @@
+[package]
+name = "fw_update"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+MOXA_AES_ENCRYPTION_KEY_MIGRATION = [
+    "lib_moxa_rust_firmware_header/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+    "rust_moxa_common/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+]
+MOXA_CUSTOM_DEFAULT = [
+    "rust_moxa_common/MOXA_CUSTOM_DEFAULT",
+]
+MOXA_PASSWORD_POLICY_CHECK = [
+    "lib_moxa_rust_firmware_header/MOXA_PASSWORD_POLICY_CHECK",
+    "rust_moxa_common/MOXA_PASSWORD_POLICY_CHECK",
+]
+TN = [
+    "lib_moxa_rust_firmware_header/TN",
+]
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary
+opt-level = "s"  # Optimize for size
+lto = true  # Enable link time optimization
+codegen-units = 1  # Maximize size reduction optimizations
+
+[dependencies]
+lib_moxa_rust_firmware_header = { path = "../../lib_moxa_rust_firmware_header-custom" }
+lib_moxa_rust_system = { path = "../../lib_moxa_rust_system-custom" }
+rust_moxa_common = { path = "../../rust_moxa_common-custom" }

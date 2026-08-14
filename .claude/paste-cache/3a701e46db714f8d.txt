@@ -1,0 +1,45 @@
+>>> HSM Sign is enabled
+++ '[' -f /tmp/.moxabuild_hsm ']'
+++ echo 'In order to HSM Sign, please fill your PC login account.'
+In order to HSM Sign, please fill your PC login account.
+++ read -r -p 'Username: ' HSM_USERNAME
+++ echo -n 'Password: '
+Password: ++ read -s HSM_PASSWORD
+++ echo
+++ echo
+++ echo
+++ echo -e '\e[30;1;47mYou DO NOT Need To Fill again UNTIL /tmp/.moxabuild_hsm is removed.\e[0m'
+You DO NOT Need To Fill again UNTIL /tmp/.moxabuild_hsm is removed.
+++ read -r -p 'Press any key to continue.'
++ '[' '' == y ']'
++ '[' -f /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service ']'
++ sed -i -z 's/KillMode=process\nRestart=on-failure\nRestartPreventExitStatus=255\nType=notify\n//g' /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service
++ sed -i '9iKillMode=process\nRestart=on-failure\nRestartPreventExitStatus=255\nType=notify' /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service
++ '[' -f /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service ']'
++ sed -i 's/ system_ready.service//g' /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service
++ sed -i 's/After=syslog.target network.target auditd.service/After=syslog.target network.target auditd.service system_ready.service/g' /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/target/lib/systemd/system/sshd.service
++ '[' '' == y ']'
++ python3 /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/moxa/check_rust_pkg_br_dependency.py /builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot
+Error: Rust Cargo.toml dependencies mismatch with buildroot pkg.mk dependencies.
+       The list below provides the dependencies that are only in Cargo.toml.
+-----------------------------------------------------
+- plugin_moxa_syslog: lib_moxa_rust_debug_log_ng
++ exit_code=255
++ '[' 255 -ne 0 ']'
++ echo 255
+255
++ exit 1
+make: *** [Makefile:752: target-finalize] Error 1
+$ rm -rf $FWR_IMG_DIR/hsm_download_files
+$ rm -rf $FWR_IMG_DIR/hsm_upload_files
+$ rm -rf $FWR_IMG_DIR/signed
+Uploading artifacts for failed job
+00:02
+Uploading artifacts...
+/builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/build.log: found 1 matching artifact files and directories 
+/builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/CHANGELOG.txt: found 1 matching artifact files and directories 
+/builds/moxa/sw/switch/general/infra/ci/projects/mds-g4000-l3-4xgs/moxabuild/buildroot/output/images/*.config: found 2 matching artifact files and directories 
+Uploading artifacts as "archive" to coordinator... 201 Created  id=15729271398 responseStatus=201 Created token=glcbt-72
+Cleaning up project directory and file based variables
+00:01
+ERROR: Job failed: exit code 1

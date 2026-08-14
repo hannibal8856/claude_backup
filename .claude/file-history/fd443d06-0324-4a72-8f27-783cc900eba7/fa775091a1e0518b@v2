@@ -1,0 +1,183 @@
+# Handoff — 2026-08-05，Phase 3 Task 1 做到 3/4
+
+給接手的 session。**先讀這份**，再讀 `plan-e-phase3-PLAN-2026-08-05.md`。
+設計文件是 `plan-e-agentx-get-offload-design-2026-08-03.md`，§10.2 定義 Phase 3。
+
+---
+
+## 1. 現在在哪
+
+**Phase 0/1 完成、Phase 2 完成、Phase 3 Task 1 做到 Step 3。**
+
+| Phase | 狀態 | 決策日誌 |
+|---|---|---|
+| 0 / 1 | 完成（Tasks 1–5） | D17 |
+| 2（mxPortdb 試點） | **完成，四個軸線全過** | D18 |
+| 3（framework subagent） | Task 1 的 Step 1–3 完成，Step 4 待驗 | 待寫 D19 |
+
+Phase 2 的頭條數字：**同樣 13 個 OID，mainline p50 264.4ms → Plan E 13.4ms，20 倍**。
+證據在 `snmpwalk/RESULT-phase2-task*.txt`，ledger 在
+`.superpowers/sdd/plan-e-phase2-PLAN-2026-08-04/progress.md`（被 gitignore，只在磁碟上）。
+
+---
+
+## 2. Task 1 卡在哪，怎麼解
+
+**已完成**：`moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:185` 加了
+`agentx/subagent`，重新 configure + build，`subagent.lo` 與 `client.lo` 都出現了，
+snmpd 重連結、零錯誤。commit `98c42835b`（`moxa` repo，branch `snmp-plan-E2`）。
+
+image 已建好並驗證過 subagent 符號真的在裡面：
+
+```
+output/images/FWR_MDS-G4000-L3-4XGS_v7.0_2026_0805_1237.swu
+BUILD_TIME = 2026_0805_1237
+```
+
+**Step 4 待做**——需要 DUT 在 **Plan E partition** 上（使用者最後把機器燒成了
+mainline `Build 2026_0805_1224`）：
+
+```bash
+cd ~/WORK/SNMP_50ms
+sudo -v && tools/mxportdb_latency.sh phase3-task1
+```
+
+期望 **p50 ≈ 13.4ms**（同工具、同 13 個 OID，與 `RESULT-phase2-task4.txt` 直接可比）。
+外加開機 log 要乾淨：`grep -i "moxa: AgentX" /var/log/messages /moxa/permanent/moxalog/*`
+
+**這一步在確認什麼**：多連結 `subagent.o` / `client.o` 進 `libnetsnmpagent` 之後，
+snmpd 走 master 模式的行為有沒有變。理論上不會（subagent 模式要執行期 `-X` 才啟用），
+但那是推論。數字若明顯偏離 13.4ms，**必須查清楚才能進 Task 2**——後面四個 task
+全建立在這個 base 上。
+
+`RESULT-phase3-task1.txt` 已經寫好，Step 4 那段標著 PENDING，補上數字即可。
+
+---
+
+## 3. Task 1 執行中發現的三件事（都已寫進 plan / RESULT）
+
+### (a) Plan 原本寫錯：configure 改動要用 `-reconfigure`
+
+`-rebuild` 只重跑 build step，agent Makefile 會保留舊 module 清單，
+**編輯看起來套用了、build 回傳 0、`subagent.lo` 根本沒產生，而且沒有任何錯誤訊息**。
+已修正（commit `3e18218`）。
+
+### (b) Task 2 比設計文件 §5.2 假設的簡單
+
+§5.2 要求 `lib_moxa_snmp_agentx` 連「`libnetsnmpagent` + `libnetsnmp` + **那四個 agentx 物件**」。
+實測：四個 agentx 檔**已經都在 `libnetsnmpagent` 裡**，一個都不在 `libnetsnmpmibs`，
+而且 `libnetsnmpagent` 的 `NEEDED` 也沒有 `libnetsnmpmibs`：
+
+| 符號 | libnetsnmpagent | libnetsnmpmibs |
+|---|---|---|
+| `subagent_init` | ✅ | ✗ |
+| `agentx_open_session` | ✅ | ✗ |
+| `agentx_register_index` | ✅ | ✗ |
+| `agentx_parse` | ✅ | ✗ |
+
+**所以 `-lnetsnmpagent -lnetsnmp` 兩個旗標就夠，不需要抽物件。**
+Task 2 Step 5 的 `readelf -d` 斷言保留——它是確保這件事在 build 變動後仍成立的東西。
+
+**但書**：`libnetsnmpagent` 會拉進 `libmoxaframeworkuri`、`libparson`、`libmoxa_system`、
+`libmoxa_util`，因為 `.mk` 把它們全域塞進 `--with-ldflags`。這不是 D15 違規
+（D15 禁的是 subagent *使用* `ies_uri_handle_client`），但要當成已知事實。
+
+### (c) 工具陷阱：主機上沒有 `arm-linux-gnueabihf-nm`
+
+toolchain 只在容器內。`nm` **不會報錯，會靜靜地回報 0 個符號**。
+我第一次查就被騙了。用 `readelf -sWD` 才對。
+**跨編譯產物在主機上查出 0 個符號，先假設工具壞了。**
+
+---
+
+## 4. 兩個 partition 的登入行為不同 ← 會害你卡死 console
+
+| partition | 登入後停在 | `dut-console` skill |
+|---|---|---|
+| Plan E（含 `admin_sh_develop`） | Linux shell | 可用 |
+| mainline（`Build 2026_0805_1224`） | **`moxash`**（`moxa#`） | **不可用，會卡死** |
+
+差異來自 `plugin_moxa_user_account` 的 `admin_sh_develop` 分支**只在 Plan E build 裡**。
+
+**切到 mainline 之後絕對不要對它跑 `dut-console`**——wrapper 會撞上 `moxash` 的 prompt，
+重演 2026-08-04 那次卡死。救援：expect 開 picocom 送 `\034`（Ctrl-\ = SIGQUIT），
+`\003` 與 `exit` 都無效。
+
+在 mainline 上要拿 Linux root：從 `moxash` 進 Linux（使用者用 `~/mmtech`），再 `su`。
+
+**切 partition**：DUT 上 `/moxa/firmware_change.sh Y Y`，重開後生效。
+腳本在執行期的 `/moxa/` 下，不在 build tree 裡（找不到是正常的）。
+因為只有 Plan E 側有可驅動的 Linux shell，**自動化只能單向**——
+從 Plan E 切出去可以，切回來要人工。半自動的腳本不要寫，容易被誤當全自動。
+
+---
+
+## 5. Phase 3 接下來的形狀
+
+Plan 有 8 個 task，**Task 5 之後是刻意留的接縫**：
+
+- **Tasks 1–5 是基礎建設**，不改變任何 OID 的值或存在。Task 5 結束時 framework 是
+  「已連線但服務零個 OID」的 subagent——可驗證、可出貨、可回退。
+- **Tasks 6–8 是試點**，會改變行為，需要 DUT。
+
+**建議跑完 1–5 先 review 再開 6。**
+
+| Task | 內容 | 備註 |
+|---|---|---|
+| 2 | `lib_moxa_snmp_agentx`（C shim） | 見上面 (b)，比 §5.2 簡單 |
+| 3 | `lib_moxa_ies_auto_mibs`（OID→URI） | 必須用與 snmpd **完全相同**的 macro set，否則 entry 集合不一致且無聲 |
+| 4 | 兩個 Rust FFI | 照 `dl/lib_moxa_rust_system/` 的樣板 |
+| 5 | framework subagent 骨架 | **D17 在這裡到期**——namelen 不變式從沒被考驗過，因為一直只有 ISS 一個 subagent |
+| 6 | `mx_device_io` 試點（8 筆全 RO） | 全唯讀，SET 不可能被牽連，所以當第一個試點 |
+| 7 | `mx_portmirror` 試點（18 筆，RO2/RW16） | **真正的難點**，見下 |
+| 8 | D19 + ledger | |
+
+### Task 7 為什麼是難點
+
+`mx_portmirror` 帶 `REPLACE_TRUTH_VALUE` ×4。Phase 2 的 mxPortdb 也有這個旗標，
+但那是 `iss_build==1`，**ISS GET path 根本不看它**，所以是惰性的。
+
+`mx_portmirror` 是 `iss_build==0`，**framework path 會真的消費它**——
+MIB `enable(1)/disable(2)` 對 JSON `true/false`。這是 §7 的轉換第一次要在
+`entry_handle_generate_uri_value_file()` 之外重新實作，而**寫反了會產生看起來很合理的錯值，
+不是錯誤訊息**，`missing`/`surplus` 計數也抓不到。
+
+所以 Task 7 Step 1 要求：**在動任何程式碼之前先把 oracle 抓下來**——
+趁 in-master 還在服務這 4 筆時記下它們的值。之後舊路徑就不在了，沒東西可比。
+
+---
+
+## 6. 量測與比對的既有教訓（照做，別重新發明）
+
+- **延遲用 pcap**，依 `snmp.request_id` 配對。`tools/mxportdb_latency.sh` 是樣板，
+  它會從 capture 驗證 varbind 數而不是相信命令列。
+- **每 varbind 的成本因表而異**：mxPortdb 在 Plan E 是 ~1.03ms、mainline ~20.3ms、
+  ifTable 又不同。**一張表的速率不能推廣到另一張。**（我犯過三次）
+- **client wall clock 只虛胖約 3.2ms**（實測 `snmpget` 純啟動），不是先前文件寫的 40ms。
+  那個 40ms 是拿兩次不同執行相減得來的，不成立。做量級判斷 client 數字仍可用。
+- **兩個 partition 設定可能不同步**，會污染 walkdiff。Phase 2 那次剛好逐字相同是運氣。
+  比對前存 `running-config.txt`（人工，`su` → `moxash` → `sh ru`），或做同 partition 前後對比。
+  詳見 `dut-config-affecting-snmp.md`。
+- `capture_baseline.sh` 會在每個 capture 目錄期待 `running-config.txt`，缺了只警告不失敗。
+
+---
+
+## 7. 留著沒解決的
+
+- **`portConfigTid`**（`…603.1.1.1.1.1.7`）可被 walk 到但不在出貨 MIB 裡。
+  產品層級決定，不是 Plan E 缺陷。**Phase 5 每個 `iss_build==1` 的 MIB 都會遇到同一問題**——
+  這是一個類別的第一例。
+- **設計文件 §2.5 的「26 個 mandatory objects」從來沒真的數過**，引用前要自己數。
+- **Phase 4 的 benchmark** 需要兩組前後對比：Phase 2 的已有
+  （`RESULT-phase2-task4.txt`），Phase 3 的要等 Task 6。
+
+---
+
+## 8. 新 session 建議開場
+
+1. 讀本檔 → `plan-e-phase3-PLAN-2026-08-05.md`
+2. 確認 DUT 在哪個 partition：`cat /etc/moxa/version/BUILD_TIME`
+3. 若在 Plan E（`2026_0805_1237`）→ 跑 Step 4，補完 `RESULT-phase3-task1.txt`，收掉 Task 1
+4. 然後開 Task 2
+
+沒有未回覆的問題。

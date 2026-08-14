@@ -1,0 +1,43 @@
+---
+name: project_getfwd_noop_on_mxportdb_stdethdb
+description: "已知缺陷 — agentx_owned.list 的 +getfwd 對 mxportdb/ 與 stdethdb/ 靜默無效,加了不會轉發;只有 ifmibdb/ 與 mxrstpdb/ 真的生效"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: ee275acd-d869-43fd-ba9b-5fe897b8db7b
+  modified: 2026-08-10T10:14:34.149Z
+---
+
+2026-08-10 實測(ADR-0025)。**在當前 code base 上,`agentx_owned.list` 的 `+getfwd`
+對 `mxportdb/` 與 `stdethdb/` 完全不生效** —— 加了旗標也不會把 RW 欄的 GET 轉發給 ISS。
+
+**證據**(只計 ISS 自己那條 AgentX TCP stream,每項 150 次 GET):
+
+| 動作 | Δ 封包 |
+|---|---|
+| 空窗 15s | +42(背景 ≈ 5.9 pkt/s) |
+| mxPort config RW 表欄 / scalar RW / LinkUpDelay RW | +30 / +30 / +39 → **背景級,未轉發** |
+| dot3 唯一 RW `Dot3PauseAdminMode` | +30 → **未轉發** |
+| mxPort status RO(正對照) | +333 |
+| **mxRstp config RW(同一顆 snmpd instance)** | **+327 → 機制本身是好的** |
+
+**不是 2026-08-07 那個失效模式。** 那個(build `2026_0807_1842`)是 probe 指到本地
+registration → 錯誤型別、`OID not increasing`、walk 從 193 崩到 12 vb。這次**值與型別全對、
+walk 193 vb / 16 欄正常、時間也沒變**,走的是乾淨的 fall-through 回本地。剩兩個候選路徑:
+`mox_snmp_probe_for_entry()` 回 NULL,或 `mox_snmp_forward_get_to_iss()` 回 -1。
+**兩條都是靜默的,黑箱分不出來**,要加 trace 編 debug image 才能釘死。**根因未定位。**
+
+**連帶影響**:ADR-0014 記的「mxPort 加 `+getfwd` 慢 13.5%」**在當前 code base 上無法重現**
+(因為根本不轉發),不可再引用為「轉發成本」的證據。可用的正確數字來自 08-08 三顆 image
+的 pcap:opt-in 後 0.691s → 推導全轉發 0.779s = **+12.7%**。
+
+**不急著修的理由**:就算修好,mxPort 開 `+getfwd` 是 0.779s,比 RO-only 的 0.691s 慢,
+**也比 NOS 7 mainline 的 0.768s 慢** —— 對 mxPort 是負值。只有在篩到第三個值得開的 group
+時才需要處理這個推導缺陷;目前唯一划算的 mxRstp 本來就能用。
+
+**目前 `+getfwd` 真正生效的只有兩條**:`ifmibdb/`(出貨既有,手工 probe 年代留下的)與
+`mxrstpdb/`(ADR-0024)。
+
+**How to apply:** 任何時候在 `agentx_owned.list` 加 `+getfwd`,**一定要用 pcap 驗轉發真的發生**
+(方法見 [[project_getfwd_probe_must_be_wire_verified]]),不能只看 walk 時間有沒有變 ——
+「沒變慢」可能只代表「根本沒轉發」。相關:[[project_registration_count_hypothesis_refuted]]

@@ -1,0 +1,171 @@
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.99.99 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+!
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:39 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4
+iso.3.6.1.4.1.8691.602.1.4.1.1.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.99.99
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.1 = INTEGER: 1
+
+
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.99.99 255.255.255.0
+trusted-access ip-source 192.168.22.22 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+
+
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:39 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4
+iso.3.6.1.4.1.8691.602.1.4.1.1.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.99.99
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.2 = IpAddress: 192.168.22.22
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.2 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.2 = INTEGER: 1
+
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:39 $ /usr/bin/snmpset -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 a 192.168.99.9
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.99.9
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:41 $ 
+
+
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.99.9 255.255.255.0
+trusted-access ip-source 192.168.22.22 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+!
+moxa# 
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:41 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4
+iso.3.6.1.4.1.8691.602.1.4.1.1.0 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.99.9
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.2 = IpAddress: 192.168.22.22
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.2 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.2 = INTEGER: 1
+
+
+
+
+
+
+
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:42 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.3 = INTEGER: 3
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.99.9
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.2 = IpAddress: 192.168.22.22
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.3 = IpAddress: 192.168.55.55
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.2 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.3 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.3 = INTEGER: 1
+
+
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.99.9 255.255.255.0
+trusted-access ip-source 192.168.22.22 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+!
+moxa# con t
+moxa(config)# trusted-access ip-source 192.168.55.55 255.255.255.0
+moxa(config)# end
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-04-25 09:23:42
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0727_0927
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.99.9 255.255.255.0
+trusted-access ip-source 192.168.22.22 255.255.255.0
+trusted-access ip-source 192.168.55.55 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1
+moxa# 
+
+
+
+
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:43 $ /usr/bin/snmpset  -v2c -c private 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 a 192.168.77.77
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.77.77
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:44 $ /usr/bin/snmpwalk -v2c -c public  192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2.1.2.1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.77.77
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:44 $ /usr/bin/snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.2 = INTEGER: 2
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.1.3 = INTEGER: 3
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.1 = IpAddress: 192.168.77.77
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.2 = IpAddress: 192.168.22.22
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.2.3 = IpAddress: 192.168.55.55
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.1 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.2 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.3.3 = IpAddress: 255.255.255.0
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.1 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.2 = INTEGER: 1
+iso.3.6.1.4.1.8691.602.1.4.1.2.1.4.3 = INTEGER: 1
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 09:44 $ 
+
+! ----------------------------------------
+! Time: 2023-04-25 09:24:52
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0727_0927
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+trusted-access ip-source 192.168.77.77 255.255.255.0
+trusted-access ip-source 192.168.22.22 255.255.255.0
+trusted-access ip-source 192.168.55.55 255.255.255.0
+snmp-server access enable
+interface ethernet 1/1

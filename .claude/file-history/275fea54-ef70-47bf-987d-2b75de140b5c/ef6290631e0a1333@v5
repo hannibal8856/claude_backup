@@ -1,0 +1,199 @@
+include:
+  - local: utility/util_text_color.yml
+  - local: pipeline_main/build.yml
+  - local: pipeline_main/upload_artifact.yml
+  - local: pipeline_main/bvt.yml
+  - local: pipeline_main/actt.yml
+  - local: pipeline_main/trigger_sqa_ci_pipeline.yml
+
+variables:
+  BR_DIR: $CI_PROJECT_DIR/moxabuild/buildroot
+  BR_OUTPUT_DIR: $BR_DIR/output
+  FWR_IMG_DIR: $BR_OUTPUT_DIR/images
+  FWR_BUILD_DIR: $BR_OUTPUT_DIR/build
+  FWR_BUILD_LOG_FILE: $BR_DIR/build.log
+  FWR_CHANGE_LOG_FILE: $BR_DIR/CHANGELOG.txt
+  # Baseline config from last successful pipeline on the same branch.
+  # This file will be fetched early to generate revision-based CHANGELOG.txt.
+  BASELINE_CONFIG_FILE: $CI_PROJECT_DIR/baseline/FWR_baseline.config
+  FWR_PIPELINE_INFO_FILE: $FWR_IMG_DIR/PIPELINE_INFO.txt
+  BD_PKG_DIR: $BR_DIR/classifications
+  COVERITY_SW_PKGS: $CI_PROJECT_DIR/moxabuild/coverity/software-packages.yml
+  # Force build firmware to ignore source code change checking.
+  # Set to 'true' to initiate force build.
+  FWR_FORCE_BUILD: "false"
+
+workflow:
+  rules:
+    - if: $COVERITY_COMPLIANCE_REPORT_CONFIG == "true" && $COVERITY_SCAN_CONFIG == "false"
+      when: never
+    # Only run pipeline when manual trigger (web) or schedule
+    - if: $CI_PIPELINE_SOURCE == "web"
+      variables:
+        FWR_FORCE_BUILD: "true"
+    - if: $CI_PIPELINE_SOURCE == "api"
+      variables:
+        FWR_FORCE_BUILD: "true"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+default:
+  tags:
+    - autoscale
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+  cache: &global_cache
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - $FWR_IMG_DIR/*
+      - $FWR_BUILD_DIR/*.log
+      - $FWR_BUILD_DIR/*.txt
+
+stages:
+  - build
+  - upload
+  - bvt
+  - actt
+  - trigger
+
+build-code:
+  extends: .build
+  stage: build
+  allow_failure:
+    exit_codes:
+      - 3
+  artifacts:
+    paths:
+    # The size of build log exceeds the limit if gitlab runner,
+    # the alternative is to preserve as artifact along with the job.
+    - $FWR_BUILD_LOG_FILE
+    - $FWR_CHANGE_LOG_FILE
+    - $FWR_IMG_DIR/*.config
+    when: always
+    expire_in: 30 days
+  cache:
+    - <<: *global_cache
+      policy: push
+    - key: ${CI_COMMIT_REF_SLUG}-bd-packages
+      policy: push
+      paths:
+        - $BD_PKG_DIR
+
+build-code:cov-build:
+  extends: .cov-build
+  stage: build
+  allow_failure:
+    exit_codes:
+      - 3
+  artifacts:
+    paths:
+      - $FWR_BUILD_LOG_FILE
+      - $FWR_CHANGE_LOG_FILE
+      - $COVERITY_SW_PKGS
+    when: always
+    expire_in: 30 days
+  rules:
+    - if: $COVERITY_SCAN_CONFIG !=  "false"
+  cache: []
+
+build-code:upload: # When changing job name, please also update the job name in build.yml:func_fetch_baseline_config
+  extends: .upload_artifacts
+  stage: upload
+  allow_failure:
+    exit_codes:
+      - 3
+  artifacts:
+    paths:
+      - $FWR_PIPELINE_INFO_FILE
+      - baseline/FWR_baseline.config
+    when: always
+    expire_in: 30 days
+  cache:
+    <<: *global_cache
+    policy: pull-push
+
+bvt:
+  extends: .bvt
+  stage: bvt
+  allow_failure:
+    exit_codes:
+      - 3
+  cache:
+    <<: *global_cache
+    policy: pull
+  # A gitlab project wise resource group to prevent concurrent BVT jobs
+  # on the same testbed. Scoped by BVT_RUNNER_TAG so different product models
+  # (wired to different runners/testbeds) can run BVT in parallel, while jobs
+  # targeting the same runner are still serialized.
+  resource_group: testbed_bvt_${BVT_RUNNER_TAG}
+  rules:
+    - if: $BVT ==  "true"
+
+auto-test:actt:
+  extends: .actt
+  stage: actt
+  allow_failure:
+    exit_codes:
+      - 3
+  cache:
+    <<: *global_cache
+    policy: pull
+  # Project-wide resource group: only one ACTT job at a time (same ACTT Windows host / Docker testbed).
+  # One product repo per model is expected to map to one testbed; adjust name if multiple ACTT hosts are introduced.
+  resource_group: testbed_actt
+  rules:
+    - if: $ACTT == "true"
+    # - if: '$ACTT == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+
+auto-test:actt_upload_report:
+  extends: .actt_upload_report
+  stage: actt
+  allow_failure:
+    exit_codes:
+      - 3
+  cache:
+    <<: *global_cache
+    policy: pull
+  needs:
+    - job: auto-test:actt
+      artifacts: true
+  # No resource_group: does not SSH to ACTT testbed; uploads artifacts from actt via scm runner.
+  rules:
+    - if: $ACTT == "true"
+    # - if: '$ACTT == "true" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+
+trigger_bd_scan:
+  stage: trigger
+  trigger:
+    include:
+      - project: 'moxa/sw/switch/general/infra/ci/management/ci-pipeline'
+        ref: main
+        file: 'pipeline_bd_scan/bd_scan_pipeline.yml'
+  rules:
+    - if: $BLACKDUCK_SCAN_CONFIG !=  "N/A"
+
+trigger_rust_clippy_report:
+  stage: trigger
+  # 4C: forward the scanned moxa branch for trigger_ai_clippy_analysis. The key MUST differ from
+  # GIT_MOXA_REV — `KEY: "$KEY"` is a self-reference (job-level shadows top-level) and GitLab
+  # forwards the literal, not the value (issue #45).
+  variables:
+    AICLIPPY_SCAN_BRANCH: "$GIT_MOXA_REV"
+  trigger:
+    include:
+      - project: 'moxa/sw/switch/general/infra/ci/management/ci-pipeline'
+        ref: main
+        file: 'pipeline_rust_clippy_report/rust_clippy_report_pipeline.yml'
+  rules:
+    - if: $RUST_CLIPPY_SCAN_CONFIG ==  "true"
+
+trigger_sqa_ci_pipeline:
+  extends: .trigger_sqa_ci_autotest
+  stage: trigger
+  cache:
+    - <<: *global_cache
+      policy: pull
+  rules:
+    - if: $SQA_CI_TEST_LEVEL !=  "N/A"

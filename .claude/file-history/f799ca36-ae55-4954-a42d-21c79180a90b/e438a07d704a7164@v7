@@ -1,0 +1,470 @@
+# Plan D — Sub-project B: Framework AgentX Subagent (+ dlmod convergence) — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal (Design 2 — pure GET acceleration):** Accelerate SNMP config **reads** — an AgentX subagent in `app_moxa_framework` answers config GET in-process, and the existing snmpd-side handlers **forward GET to it** (removing the snmpd→nginx→actix HTTP hop for reads). **SET is untouched** and the dlmod plugins stay in place.
+
+**Architecture:** Four new libs — `lib_moxa_snmp_agentx` (C, FRR-style net-snmp subagent wrapper) + `lib_moxa_rust_snmp_agentx` (Rust FFI); `lib_moxa_ies_auto_mibs` (C, OID↔URI mapping seed) + `lib_moxa_rust_ies_auto_mibs` (Rust FFI). A **read-only** subagent thread in `app_moxa_framework` registers config OIDs and answers GET in-process: map OID→URI via the mapping lib → `config_operation::get_config_from_path` with a fixed `SYS_READ_USERINFO` + `remove_password_from_config` (byte-identical to today's read). The existing master-side handler (`mox_snmp_handle_entry` / dlmod GET handler) **keeps owning each OID**, serves **SET unchanged** (LibFrameworkUri + `security_token`), and **forwards GET** to the subagent (generalized Plan C `netsnmp_call_handlers` trick). No dlmod removal, no SET change. ISS stays a separate subagent, unchanged.
+
+**Tech Stack:** net-snmp 5.9.3 (AgentX subagent API), C, Rust (actix-web / tokio), buildroot, RFC 2741 AgentX.
+
+## Global Constraints
+
+- Codebase root: `/home/moxa/mds4xgl3/buildroot/dl` (= `${moxa}/dl`).
+- Build order (repo convention): `plugin_moxa_snmp` → rust → final `make`. New C libs build before their Rust FFI consumers.
+- AgentX master socket: `tcp:127.0.0.1:705` (snmpd master, already configured by `plugin_moxa_snmp`).
+- No unit-test framework for the C/embedded parts: each task's "test" = **(a) build passes + (b) structural/`nm`/grep check + (c) on-DUT `snmpget`/`snmpwalk`/`journalctl`**. Rust libs use `cargo test` where a pure-logic unit exists.
+- Ownership (Design 2, spec §5): the existing master-side handler (`mox_snmp_handle_entry` / dlmod GET handler) **keeps the OID**, serves **SET unchanged**, and **forwards GET** to the subagent. NOT remove-`.conf`, NOT priority-shadow. (Read/write split for one OID is proven in Plan C.)
+- Subagent is **read-only**. Config read `config_operation::get_config_from_path` is `pub fn` (synchronous) → the net-snmp thread calls it directly, no async bridge. **Never touch the SET path** (`security_token`, `update_config`, dlmod `.conf`) — out of scope for B.
+- GET output must be **byte-identical to today** (reuse `remove_password_from_config`); `snmpset` behaviour must be unchanged.
+- Coexistence: ISS subagent + all un-converged dlmod/ies-auto-mibs must keep working throughout.
+- FRR `lib/agentx.c` is design reference only (GPLv2) — `lib_moxa_snmp_agentx` is clean-room.
+- Spec: `~/plan-d-B-framework-agentx-subagent-design-2026-07-09.md`.
+
+---
+
+## File Structure
+
+New packages (buildroot `dl/`):
+- `lib_moxa_snmp_agentx/` — C lib. `include/lib_moxa_snmp_agentx.h`, `src/agentx.c` (init/register/run-thread/shutdown; **no trap** — traps are out-of-band via MQTT→trap_notification→/bin/snmptrap), `Makefile`.
+- `lib_moxa_rust_snmp_agentx/` — Rust crate. `src/lib.rs` (FFI + safe wrappers), `build.rs` (link C lib), `Cargo.toml`.
+- `lib_moxa_ies_auto_mibs/` — C lib. `include/lib_moxa_ies_auto_mibs.h`, `src/mapping_data.c` (seed entries), `src/lookup.c`, `Makefile`.
+- `lib_moxa_rust_ies_auto_mibs/` — Rust crate. `src/lib.rs` (FFI + safe wrappers), `build.rs`, `Cargo.toml`.
+
+Modified:
+- `app_moxa_framework/` — add **read-only** subagent module `src/snmp_subagent.rs` (registers config OIDs, answers GET) + wire into startup; `Cargo.toml` deps on the two Rust FFI crates.
+- **GET-forward wiring in the owning master-side handler(s)** — `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c` (`mox_snmp_handle_entry` GET branch) for ies-auto-mibs OIDs, and/or `lib_moxa_snmp_plugin/src/handler/*.c` GET path for dlmod OIDs. Forwards GET to the subagent; **SET branch untouched**.
+- **Not modified in B:** dlmod `.conf` files (stay), `agentx_owned.list` (no change), any SET path. (Those are a later Plan-D phase.)
+
+---
+
+## Phase B0 — Infrastructure spike
+
+Goal: prove `app_moxa_framework` can be an AgentX subagent answering one trivial OID in-process, and resolve the two open unknowns.
+
+### Task 1: `lib_moxa_snmp_agentx` C wrapper — package skeleton + build
+
+**Files:**
+- Create: `lib_moxa_snmp_agentx/include/lib_moxa_snmp_agentx.h`
+- Create: `lib_moxa_snmp_agentx/src/agentx.c`
+- Create: `lib_moxa_snmp_agentx/Makefile`
+
+**Interfaces:**
+- Produces: `MoxaAgentX_Init(const char*)`, `MoxaAgentX_RegisterScalar(const char*, const oid*, size_t, int mode, Netsnmp_Node_Handler*)`, `MoxaAgentX_RunInThread(void)`, `MoxaAgentX_Shutdown(void)` — consumed by Task 2 (Rust FFI) and Task 6 (framework).
+
+- [ ] **Step 1: Header**
+
+Create `include/lib_moxa_snmp_agentx.h`:
+```c
+#ifndef LIB_MOXA_SNMP_AGENTX_H
+#define LIB_MOXA_SNMP_AGENTX_H
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+int  MoxaAgentX_Init(const char *daemon_name);
+int  MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                               int mode, Netsnmp_Node_Handler *handler);
+int  MoxaAgentX_RunInThread(void);
+void MoxaAgentX_Shutdown(void);
+#endif
+```
+
+- [ ] **Step 2: Implementation (init/run-thread/shutdown)**
+
+Create `src/agentx.c`:
+```c
+#include "lib_moxa_snmp_agentx.h"
+#include <pthread.h>
+
+static volatile int  g_running = 0;
+static pthread_t     g_thr;
+
+int MoxaAgentX_Init(const char *daemon_name)
+{
+    netsnmp_ds_set_boolean(NETSNMP_DS_APPLICATION_ID, NETSNMP_DS_AGENT_ROLE, 1);
+    netsnmp_ds_set_string(NETSNMP_DS_APPLICATION_ID, NETSNMP_DS_AGENT_X_SOCKET,
+                          "tcp:127.0.0.1:705");
+    init_agent(daemon_name);
+    init_snmp(daemon_name);   /* sends AgentX Open once a handler is registered */
+    return 0;
+}
+
+int MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                              int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+    return netsnmp_register_scalar(reg);   /* scalar helper; table uses a separate fn later */
+}
+
+static void *loop(void *arg)
+{
+    (void) arg;
+    while (g_running) {
+        agent_check_and_process(1);   /* blocks up to select timeout, processes AgentX fds */
+    }
+    return NULL;
+}
+
+int MoxaAgentX_RunInThread(void)
+{
+    g_running = 1;
+    return pthread_create(&g_thr, NULL, loop, NULL);
+}
+
+void MoxaAgentX_Shutdown(void)
+{
+    g_running = 0;
+    snmp_shutdown("lib_moxa_snmp_agentx");
+}
+```
+
+- [ ] **Step 3: Makefile**
+
+Create `Makefile` following a sibling C lib (e.g. copy structure from `lib_moxa_snmp_plugin/Makefile`), linking `-lnetsnmpagent -lnetsnmpmibs -lnetsnmp -lpthread`, producing `libmoxa_snmp_agentx.so`, installing header to staging.
+
+Run to confirm the sibling pattern:
+```bash
+sed -n '1,60p' /home/moxa/mds4xgl3/buildroot/dl/lib_moxa_snmp_plugin/Makefile
+```
+
+- [ ] **Step 4: Build**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot && make lib_moxa_snmp_agentx 2>&1 | tail -15
+nm -D output/build/lib_moxa_snmp_agentx-*/libmoxa_snmp_agentx.so | grep -E "MoxaAgentX_(Init|RegisterScalar|RunInThread)"
+```
+Expected: build passes; the three symbols exported.
+
+- [ ] **Step 5: Commit**
+```bash
+git add lib_moxa_snmp_agentx && git commit -m "Plan D B0: lib_moxa_snmp_agentx C wrapper skeleton (init/register/run-thread)"
+```
+
+### Task 2: `lib_moxa_rust_snmp_agentx` — Rust FFI over Task 1
+
+**Files:**
+- Create: `lib_moxa_rust_snmp_agentx/Cargo.toml`, `build.rs`, `src/lib.rs`
+
+**Interfaces:**
+- Consumes: Task 1 symbols.
+- Produces: `pub fn init(name:&str)`, `pub fn register_scalar(descr:&str, oid:&[u32], mode:i32, handler: MoxaHandler)`, `pub fn run_in_thread()`, where `type MoxaHandler = extern "C" fn(...) -> i32` (net-snmp `Netsnmp_Node_Handler` signature) — consumed by Task 6.
+
+- [ ] **Step 1: build.rs links the C lib**
+```rust
+fn main() {
+    println!("cargo:rustc-link-lib=dylib=moxa_snmp_agentx");
+    println!("cargo:rustc-link-lib=dylib=netsnmpagent");
+    println!("cargo:rustc-link-lib=dylib=netsnmpmibs");
+    println!("cargo:rustc-link-lib=dylib=netsnmp");
+}
+```
+
+- [ ] **Step 2: FFI decls + safe wrappers**
+
+`src/lib.rs`:
+```rust
+use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::CString;
+
+pub type Oid = u32;                       // net-snmp `oid` is unsigned long; validate width in Step 4
+pub type MoxaHandler = extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> c_int;
+
+extern "C" {
+    fn MoxaAgentX_Init(name: *const c_char) -> c_int;
+    fn MoxaAgentX_RegisterScalar(descr: *const c_char, o: *const Oid, olen: usize,
+                                 mode: c_int, h: MoxaHandler) -> c_int;
+    fn MoxaAgentX_RunInThread() -> c_int;
+}
+
+pub fn init(name: &str) -> i32 {
+    let c = CString::new(name).unwrap();
+    unsafe { MoxaAgentX_Init(c.as_ptr()) }
+}
+pub fn register_scalar(descr: &str, oid: &[Oid], mode: i32, h: MoxaHandler) -> i32 {
+    let c = CString::new(descr).unwrap();
+    unsafe { MoxaAgentX_RegisterScalar(c.as_ptr(), oid.as_ptr(), oid.len(), mode, h) }
+}
+pub fn run_in_thread() -> i32 { unsafe { MoxaAgentX_RunInThread() } }
+```
+
+- [ ] **Step 3: cargo test (compile smoke)**
+
+Add a `#[test] fn links() {}` that just ensures the crate compiles + links.
+Run: `cd /home/moxa/mds4xgl3/buildroot/dl/lib_moxa_rust_snmp_agentx && cargo build 2>&1 | tail`
+Expected: builds (net-snmp libs present in sysroot).
+
+- [ ] **Step 4: Confirm `oid` width**
+
+Run:
+```bash
+grep -rn "typedef.*oid;" /home/moxa/mds4xgl3/buildroot/dl/3rdparty_net_snmp/net-snmp-5.9.3/include/net-snmp/library/oid.h
+```
+If `oid` is `u_long` (8 bytes on 64-bit target) not `u32`, change `pub type Oid` to `u64`/`c_ulong` accordingly. Record the finding.
+
+- [ ] **Step 5: Commit**
+```bash
+git add lib_moxa_rust_snmp_agentx && git commit -m "Plan D B0: lib_moxa_rust_snmp_agentx FFI over C wrapper"
+```
+
+### Task 3: `lib_moxa_ies_auto_mibs` (C) + `lib_moxa_rust_ies_auto_mibs` (Rust) — mapping seed
+
+**Files:**
+- Create: `lib_moxa_ies_auto_mibs/include/lib_moxa_ies_auto_mibs.h`, `src/{mapping_data.c,lookup.c}`, `Makefile`
+- Create: `lib_moxa_rust_ies_auto_mibs/{Cargo.toml,build.rs,src/lib.rs}`
+
+**Interfaces:**
+- Produces (C): `struct ies_map_entry { const oid *oid; size_t oid_len; const char *uri; const char *uri_index; int val_type; int mode; };`
+  `const struct ies_map_entry *ies_map_lookup_by_oid(const oid*, size_t);`
+- Produces (Rust): `pub fn lookup_by_oid(oid:&[Oid]) -> Option<MapEntry>` where `MapEntry { uri:String, uri_index:String, val_type:i32, mode:i32 }` — consumed by Task 6/B1.
+
+- [ ] **Step 1: C header + one seed entry**
+
+`include/lib_moxa_ies_auto_mibs.h` defines `struct ies_map_entry` + the lookup decl. `src/mapping_data.c` starts with ONE trivial seed entry (the B0 trivial OID, e.g. a spare scalar under `1.3.6.1.4.1.8691.<test>`), so B0 has something to look up. Real B1 entries added in Task 8.
+
+- [ ] **Step 2: `lookup.c`** — linear scan over the seed array comparing `oid`/`oid_len` (small N; hash later in C-project).
+
+- [ ] **Step 3: Rust FFI crate** — mirror Task 2's structure; `lookup_by_oid` calls the C fn, converts the returned `*const c_char` uri/uri_index into owned `String`s.
+
+- [ ] **Step 4: Build both**
+```bash
+cd /home/moxa/mds4xgl3/buildroot && make lib_moxa_ies_auto_mibs 2>&1 | tail
+cd dl/lib_moxa_rust_ies_auto_mibs && cargo build 2>&1 | tail
+```
+Expected: both build; `nm -D` shows `ies_map_lookup_by_oid`.
+
+- [ ] **Step 5: Commit**
+```bash
+git add lib_moxa_ies_auto_mibs lib_moxa_rust_ies_auto_mibs && git commit -m "Plan D B0: lib_moxa_ies_auto_mibs mapping seed + Rust FFI"
+```
+
+### Task 4 (SPIKE): how the subagent thread reaches shared `config_layer_state` + `plugins`
+
+**Files:** Read-only investigation → produces a decision recorded in the plan/spec.
+
+**Interfaces:**
+- Produces: the exact handle type + acquisition path the Task 6 handler will use to call `config_operation::get_config_from_path(plugins, userinfo, path, full_config, query, false)` from the net-snmp thread.
+
+- [ ] **Step 1: Find how AppState holds config + plugins**
+
+Run:
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -rn "struct AppState\|pub struct AppState\|plugins\|full_config\|config_layer_state" app_moxa_framework/src/app_state.rs rust_moxa_config_layer/src/config_layer_state.rs 2>/dev/null | head -40
+grep -rn "Arc<\|RwLock<\|Mutex<\|Data::new" app_moxa_framework/src/uri_service.rs | head
+```
+
+- [ ] **Step 2: Decide the sharing mechanism**
+
+Document one of:
+- (a) `config_layer_state` is already behind `Arc<RwLock<…>>`/arc-swap in AppState → clone the `Arc`, hand it to the subagent thread, sync-read in the handler.
+- (b) it is owned by a tokio task only → introduce an `Arc` shared handle (or arc-swap snapshot updated on config change) that both the actix side and the subagent thread read.
+
+- [ ] **Step 3: Record** the chosen mechanism + exact types into spec §4 and this task. (No code yet; consumed by Task 6.)
+
+- [ ] **Step 4: Commit** the spec/plan note.
+```bash
+git -C /home/moxa && git add ~/plan-d-B-framework-agentx-subagent-design-2026-07-09.md 2>/dev/null; echo "note recorded"
+```
+
+### Task 5 (SPIKE): fixed `SYS_READ_USERINFO` for the subagent's GET (Design 2)
+
+**Files:** Read-only investigation → decision.
+
+**Interfaces:**
+- Produces: a `fn sys_read_userinfo() -> UserInfo` (one fixed read identity) that Task 6/9 pass to `get_config_from_path`.
+
+**Context (Design 2, spec §3/§3.1).** The subagent handles **GET only** — SET stays on the
+untouched master-side path where `securityName` and the per-v3-user `security_token` machinery
+work exactly as today (per-user permission *preserved*, not lost). So there is **no SET
+identity problem** in the subagent. The subagent's GET is **identity-less**: VACM at the master
+already authorized the read, and per-OID values are uniform (SRS: no per-user read filtering —
+`authority` is binary RO/RW only). `get_config_from_path` still needs a `userinfo` arg, so this
+task just fixes **one read-capable `SYS_READ_USERINFO`** and makes the read output byte-identical
+to today (including unconditional `remove_password_from_config`).
+
+- [ ] **Step 1: Read the read path + UserInfo shape**
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl
+grep -nA20 "fn get_config_from_path\|fn remove_password_from_config" rust_moxa_config_layer/src/config_operation.rs | head -60
+grep -nA20 "pub struct UserInfo\|impl UserInfo\|fn.*UserInfo" rust_moxa_config_layer/src/user_info.rs 2>/dev/null | head -40
+sed -n '255,270p' rust_moxa_config_layer/src/lib.rs   # the actix GET thin-shell (lib.rs:262/268)
+```
+
+- [ ] **Step 2: Define `SYS_READ_USERINFO`**
+
+Construct one fixed read-capable `user_info::UserInfo` (no HTTP session) — the minimum that
+lets `get_config_from_path` return the same content the actix GET returns. NOT per-requester.
+Do NOT touch anything on the SET side (`security_token`/`rwuser_list`/`update_config` are out
+of scope for B). Document the exact `UserInfo` fields chosen.
+
+- [ ] **Step 3: Record** `sys_read_userinfo()` shape into spec §3.1 + this task. Consumed by Task 6/9.
+
+- [ ] **Step 4: Commit** the note.
+
+### Task 6: framework subagent module — trivial OID end-to-end
+
+**Files:**
+- Create: `app_moxa_framework/src/snmp_subagent.rs`
+- Modify: `app_moxa_framework/src/main.rs` (or startup) — call subagent init after AppState is built
+- Modify: `app_moxa_framework/Cargo.toml` — deps `lib_moxa_rust_snmp_agentx`, `lib_moxa_rust_ies_auto_mibs`
+
+**Interfaces:**
+- Consumes: Task 2 (`init`/`register_scalar`/`run_in_thread`), Task 3 (`lookup_by_oid`), Task 4 (read handle). (Task 5's `sys_read_userinfo` is not needed here — the trivial OID returns a constant, no config read yet.)
+- Produces: `pub fn start_snmp_subagent(state: <read handle from Task 4>)` called at framework startup.
+
+This task proves the subagent answers an OID **it owns directly** (no forward). The GET-forward
+from a master-side handler is proven in Task 10 (B1) on a real config OID.
+
+- [ ] **Step 1: Read-only handler for the trivial OID**
+
+`snmp_subagent.rs`: an `extern "C" fn moxa_get_handler(...)` matching `MoxaHandler`; for B0 it returns a constant integer via net-snmp `snmp_set_var_typed_value` (FFI). Register it **read-only** (`HANDLER_CAN_RONLY`) for the seed OID from Task 3.
+
+- [ ] **Step 2: `start_snmp_subagent`**
+```rust
+pub fn start_snmp_subagent(/* state handle from Task 4 */) {
+    lib_moxa_rust_snmp_agentx::init("app_moxa_framework");
+    // register the trivial seed OID (looked up via lib_moxa_rust_ies_auto_mibs)
+    lib_moxa_rust_snmp_agentx::register_scalar("moxaTest", &SEED_OID, HANDLER_CAN_RONLY,
+                                               moxa_get_handler);
+    lib_moxa_rust_snmp_agentx::run_in_thread();
+}
+```
+
+- [ ] **Step 3: Wire into startup** — call `start_snmp_subagent(...)` after AppState is constructed in `start_framework_uri_service`/main, on the shared handle from Task 4.
+
+- [ ] **Step 4: Build image**
+```bash
+cd /home/moxa/mds4xgl3/buildroot && make app_moxa_framework-rebuild 2>&1 | tail && make 2>&1 | tail
+```
+
+- [ ] **Step 5: DUT verify (the B0 deliverable)**
+
+On DUT, ensure snmpd `master agentx` is on. Then:
+```bash
+snmpget -v2c -c public <dut> <SEED_OID>            # returns the constant
+journalctl -u app_moxa_snmp_server | grep agentx | tail   # "agentx master handler starting"
+```
+Expected: value returns via AgentX (framework subagent connected to master:705). **B0 done: framework proven as a subagent.**
+
+- [ ] **Step 6: Commit**
+```bash
+git add app_moxa_framework && git commit -m "Plan D B0: framework AgentX subagent answers a trivial OID in-process"
+```
+
+---
+
+## Phase B1 — First end-to-end config plugin slice (GO/NO-GO)
+
+Target plugin: `plugin_moxa_system_information` (config part) — simplest config dlmod.
+
+### Task 7: enumerate the target plugin's OIDs + URIs
+
+**Files:** investigation → produces the mapping rows for Task 8.
+
+- [ ] **Step 1: List the plugin's OIDs + the URIs it GETs**
+```bash
+cd /home/moxa/mds4xgl3/buildroot/dl/plugin_moxa_system_information
+grep -rnhoE "1,3,6,1[0-9,]+|LibFrameworkUri_GetUri\([^)]*|\"/[a-z0-9/_-]+\"" snmp_config/ | head -40
+cat snmp_config/document/snmpd_system_information.conf
+```
+- [ ] **Step 2: Record** each (OID, uri, uri_index, val_type, mode) row. These become Task 8 seed entries.
+
+### Task 8: add the plugin's entries to `lib_moxa_ies_auto_mibs`
+
+**Files:** Modify `lib_moxa_ies_auto_mibs/src/mapping_data.c`
+
+- [ ] **Step 1:** Add one `struct ies_map_entry` per Task-7 row (real OID arrays + uri/uri_index/val_type/mode).
+- [ ] **Step 2: Build** `make lib_moxa_ies_auto_mibs`; unit-check `ies_map_lookup_by_oid` returns each entry (add a small C test `test/lookup_test.c` asserting one lookup).
+- [ ] **Step 3: Commit.**
+
+### Task 9: subagent read-only GET handler (identity-less)
+
+**Files:** Modify `app_moxa_framework/src/snmp_subagent.rs`
+
+**Interfaces:**
+- Consumes: Task 4 read handle, Task 5 `sys_read_userinfo`, Task 3 `lookup_by_oid`, `rust_moxa_config_layer::config_operation::{get_config_from_path, remove_password_from_config}`.
+
+- [ ] **Step 1: Read-only GET handler (identity-less)**
+```rust
+extern "C" fn moxa_config_get(/* net-snmp handler args */) -> c_int {
+    // 1. extract requested OID from requestvb (FFI helper)
+    // 2. let m  = lib_moxa_rust_ies_auto_mibs::lookup_by_oid(&oid)?;
+    // 3. let ui = sys_read_userinfo();          // Task 5 — FIXED, never per-requester
+    // 4. let mut v = config_operation::get_config_from_path(plugins, ui, &m.uri, full_config, query, false)?;
+    //    v = config_operation::remove_password_from_config(plugins, &m.uri, v);  // == lib.rs:262/268, byte-identical
+    // 5. set requestvb typed value from v (per m.val_type) -> SNMP_ERR_NOERROR
+}
+```
+- [ ] **Step 2: NO SET handler.** The subagent is read-only. SET stays entirely on the master-side path (Task 10 does not touch it). Register everything `HANDLER_CAN_RONLY`.
+- [ ] **Step 3: Register the converged config OIDs so the subagent's *session* can serve them when forwarded.** Register a **shallow config region** (RO) covering the Task-8 OIDs, plus a **dedicated probe OID** the subagent owns exclusively (so Task 10 can locate the subagent session via `netsnmp_subtree_find`). Both share one AgentX session (spec §5.1). The shallow region is shadowed for normal dispatch by the master-side handler — that is intended.
+- [ ] **Step 4: Build image.**
+- [ ] **Step 5: Commit.**
+
+### Task 10: GET-forward wiring in the owning master-side handler (Design 2 — the key task)
+
+**Files:**
+- Modify: `lib_moxa_snmp_plugin/src/handler/{scalar,table}.c` — the **GET path** of the dlmod handler that currently serves `system_information` (B1 target is a dlmod plugin). (For ies-auto-mibs-owned OIDs later, the same wiring goes in `3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c::mox_snmp_handle_entry` GET branch.)
+- **Do NOT** modify the `.conf`, `agentx_owned.list`, or any SET path.
+
+**Interfaces:**
+- Reuses the Plan C forward primitive already in `ies_auto_mibs.c`: `netsnmp_subtree_find(probe) → netsnmp_call_handlers(subagent_reg, reqinfo, request)` (see `mox_snmp_forward_get_to_iss`, and `entry_handle_exception` ~line 1867 for GETNEXT boundaries).
+
+- [ ] **Step 1: Add a forward-rules check in the GET path** (mirror Plan C's `mox_iss_get_forward_rules` table, but target = the framework subagent). For an OID in the converged set:
+  1. `netsnmp_subtree_find(FRAMEWORK_PROBE_OID)` → the framework subagent's reg/session (Task 9 Step 3 registered the probe);
+  2. `netsnmp_call_handlers(fw_reg, reqinfo, request)` → forwards the GET over AgentX to the subagent → `return` (do not also call `LibFrameworkUri`).
+  The **SET path is left exactly as-is.**
+- [ ] **Step 2: Graceful fall-through** — if `netsnmp_subtree_find` returns nothing (framework subagent down), fall through to the existing `LibFrameworkUri` GET (so reads still work, just slow). Rollback = disable the forward check.
+- [ ] **Step 3: GETNEXT boundaries** — reuse the `entry_handle_exception` precedent so a walk crossing the converged region behaves.
+- [ ] **Step 4: Build image.**
+- [ ] **Step 5: Commit.**
+
+### Task 11: DUT verification + latency benchmark (GO/NO-GO gate)
+
+- [ ] **Step 0 (before wiring the forward): capture the pre-B baseline** — run `snmpwalk <subtree>` and 100× `snmpget <OID>` on the CURRENT build, save the values (`/tmp/pre_walk.txt`) and P50/P99. This is the byte-identical + latency reference.
+- [ ] **Step 1: Correctness — GET byte-identical, SET unchanged**
+```bash
+snmpwalk -v2c -c public <dut> <system_information subtree> > /tmp/post_walk.txt
+diff /tmp/pre_walk.txt /tmp/post_walk.txt        # expect: NO differences (byte-identical)
+snmpget  -v2c -c public <dut> <system_information OID>     # correct value
+snmpset  -v2c -c <rw>   <dut> <writable OID> <val>         # SET still works via the untouched path; show running consistent
+```
+- [ ] **Step 2: Confirm the GET is actually served by the framework subagent (via the forward)**
+
+Under Design 2 the dlmod handler still runs (it forwards), so DON'T check for "NOT dlmod_handler". Instead confirm the read reached `app_moxa_framework`:
+```bash
+# a transient debug print in the subagent GET handler (like Plan C's OOXX traces), OR:
+tcpdump -i lo -n tcp port 705 &        # see the AgentX GET forwarded to the framework subagent's session
+snmpget -v2c -c public <dut> <system_information OID>
+```
+Expected: the AgentX GET for that OID reaches the framework subagent session (not a `LibFrameworkUri`/nginx:9759 request).
+- [ ] **Step 3: Latency (the go/no-go number)**
+```bash
+for i in $(seq 1 100); do /usr/bin/time -f %e snmpget -v2c -c public <dut> <OID> \
+  >/dev/null 2>>/tmp/agx.txt; done
+sort -n /tmp/agx.txt | awk '{a[NR]=$1} END{print "P50",a[int(NR*.5)]; print "P99",a[int(NR*.99)]}'
+```
+Compare to the Step-0 baseline. Expect P50 drop consistent with spec §11 (transport ~2–10 ms removed).
+- [ ] **Step 4: Coexistence** — `snmpwalk` ifTable (ISS) + one un-converged dlmod plugin (and its SET) still work.
+- [ ] **Step 5: Record** results to `~/plan-d-B1-results-2026-07-09.md`. **GO/NO-GO decision on continuing to B2.**
+
+---
+
+## Phase B2 — Batch convergence (outline)
+
+Repeat Task 7–11 (extend the **GET-forward** to more config OID groups; **no SET change, no `.conf` removal**):
+- ptp (5 dlmods), profinet, dhcp_relay, common_system_event, ui_service_management, iec62439_2, arp_table, dai, config_encryption, utilization, trusted_access, relay, locator, email — plus ies-auto-mibs config OIDs (forward wired in `mox_snmp_handle_entry` for those).
+- **Exclude `fiber_check`** (earmarked for A / strict subagent).
+- Each group is an independent slice: add mapping rows → register in the subagent (RO) → wire the GET-forward in that group's owning handler → DUT verify (byte-identical GET + SET unchanged + latency) → commit.
+- When C (shared `lib_moxa_ies_auto_mibs` full data + Layer-2/3) lands, the B-seed mapping is extended, not rewritten. dlmod removal / SET convergence remain a later Plan-D phase (not B2).
+
+---
+
+## Self-Review
+
+- **Spec coverage (Design 2):** §2 components → Tasks 1–3, 6, 9; §3 GET-forward/identity-less read → Tasks 9+10; §3.1 fixed read identity → Task 5; §4 read-only concurrency/state → Task 4; §5 GET-forward ownership → Task 10; §6 B0/B1/B2 → Phases; §7 verify (byte-identical GET + SET unchanged) → Tasks 6/11; §8 SET/dlmod deferred → not in tasks (correct); §11 latency → Task 11. Covered.
+- **Placeholder scan:** spike tasks (4, 5, 7) are investigation-with-a-recorded-decision, not "TBD". Task 9's GET handler references only earlier-defined functions (`lookup_by_oid`, `config_operation::{get_config_from_path,remove_password_from_config}`, `sys_read_userinfo`). Task 10 reuses the Plan C forward primitive (`netsnmp_subtree_find`/`netsnmp_call_handlers`, `mox_snmp_forward_get_to_iss`) — real, in-tree.
+- **Type consistency:** `MoxaHandler` (Task 2) = handler type in Tasks 6/9 (all `HANDLER_CAN_RONLY`); `ies_map_entry`/`MapEntry` (Task 3) = fields read in Task 9; `sys_read_userinfo` (Task 5) = used in Task 9; `Oid` width flagged in Task 2 Step 4. **No SET handler / no `update_config` anywhere (Design 2).**
+- Known soft spots (honest): the exact forward wiring (how the master-side handler locates the subagent session via the probe OID; GETNEXT boundaries) is the §5.3 spike, done against the real Plan C code (`entry_handle_exception`); Rust AppState read handle (Task 4) and net-snmp requestvb FFI helpers resolved at implementation time against the named files.

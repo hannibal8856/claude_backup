@@ -1,0 +1,79 @@
+#!/bin/bash
+# 為 dl 底下所有「在 clippy-scan-binary-packages-3 且已推到 origin」的 repo
+# 在各自 GitLab project 建立 merge request。
+#
+# 預設 DRY-RUN(只印不發)。確認無誤後加 --go 真的建立。
+#
+# 用法:
+#   ./create_clippy_mrs.sh              # dry-run,列出會對哪些 repo、target 是什麼
+#   ./create_clippy_mrs.sh --go         # 真的建立 MR
+#
+# 需求:curl、jq;GitLab Personal Access Token(api scope)。
+
+set -u
+DL=/home/moxa/sda2/home/moxa/NOS_v6.0_develop/buildroot/dl
+BR=clippy-scan-binary-packages-3
+TITLE="clippy scan binaries only"
+TOKEN_FILE=${TOKEN_FILE:-$HOME/moxa_gitlab_scm_token}
+# MR target:預設優先用 NOS_v6.0_develop(若該 project 有此分支),否則退回 project 預設分支。
+# 可用環境變數覆寫:TARGET=develop ./create_clippy_mrs.sh
+TARGET_PREF=${TARGET:-NOS_v6.0_develop}
+GO=0; [ "${1:-}" = "--go" ] && GO=1
+
+# token 檔格式為 <標籤>glpat-<token>,抽出 glpat- 那段當 PRIVATE-TOKEN
+TOKEN=$(grep -oE 'glpat-[A-Za-z0-9._-]+' "$TOKEN_FILE" | head -1)
+[ -n "$TOKEN" ] || { echo "找不到 glpat- token: $TOKEN_FILE"; exit 1; }
+
+api() { curl -sS --header "PRIVATE-TOKEN: $TOKEN" "$@"; }
+
+created=0; skipped=0; failed=""
+cd "$DL" || exit 1
+for r in */; do r=${r%/}
+  [ -d "$r/.git" ] || continue
+  # 處理「本地有 clippy-scan-binary-packages-3 branch」的 repo
+  # (不要求目前 checkout 在它上面 —— 16 個 canary repo 現在停在 clippy-scan-test,
+  #  但它們的 clippy-scan-binary-packages-3 branch 一樣已推、一樣要發 MR)
+  git -C "$r" rev-parse --verify -q "$BR" >/dev/null 2>&1 || continue
+  # 且該 branch 已推到 origin
+  remote=$(git -C "$r" ls-remote origin "refs/heads/$BR" 2>/dev/null | cut -f1)
+  [ -n "$remote" ] || { echo "SKIP(未推) $r"; skipped=$((skipped+1)); continue; }
+
+  url=$(git -C "$r" remote get-url origin)
+  path=$(echo "$url" | sed -E 's#^.*gitlab\.com[:/](.*)\.git$#\1#')
+  enc=$(echo "$path" | sed 's#/#%2F#g')
+
+  # target:優先 TARGET_PREF(若 project 有該分支),否則退回 default_branch
+  if api "https://gitlab.com/api/v4/projects/$enc/repository/branches/$TARGET_PREF" \
+       | jq -e '.name' >/dev/null 2>&1; then
+    target=$TARGET_PREF
+  else
+    target=$(api "https://gitlab.com/api/v4/projects/$enc" | jq -r '.default_branch // empty')
+  fi
+  [ -n "$target" ] || { echo "FAIL(取不到 target) $r"; failed="$failed $r"; continue; }
+
+  # 已存在同 source 的 opened MR → 跳過(idempotent)
+  exist=$(api "https://gitlab.com/api/v4/projects/$enc/merge_requests?source_branch=$BR&state=opened" | jq 'length')
+  if [ "${exist:-0}" -gt 0 ]; then
+    echo "EXISTS $r  (→ $target)"; skipped=$((skipped+1)); continue
+  fi
+
+  if [ "$GO" = 0 ]; then
+    echo "DRY  $r  $BR → $target"
+    continue
+  fi
+
+  resp=$(api --request POST "https://gitlab.com/api/v4/projects/$enc/merge_requests" \
+    --data-urlencode "source_branch=$BR" \
+    --data-urlencode "target_branch=$target" \
+    --data-urlencode "title=$TITLE" \
+    --data "remove_source_branch=true")
+  mrurl=$(echo "$resp" | jq -r '.web_url // empty')
+  if [ -n "$mrurl" ]; then
+    echo "OK   $r  → $mrurl"; created=$((created+1))
+  else
+    echo "FAIL $r : $(echo "$resp" | jq -rc '.message // .error // .')"; failed="$failed $r"
+  fi
+done
+echo "---------------------------------------------"
+echo "建立=$created  跳過=$skipped  失敗:${failed:- 無}"
+[ "$GO" = 0 ] && echo "(這是 DRY-RUN;確認後加 --go 真的建立)"

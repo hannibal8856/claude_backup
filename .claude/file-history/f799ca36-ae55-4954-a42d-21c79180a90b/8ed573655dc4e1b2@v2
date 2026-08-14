@@ -1,0 +1,22 @@
+################################################################################
+#
+# lib_moxa_ies_auto_mibs
+#
+################################################################################
+
+LIB_MOXA_IES_AUTO_MIBS_SITE="$(TOPDIR)/dl/lib_moxa_ies_auto_mibs"
+LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING=YES
+
+define LIB_MOXA_IES_AUTO_MIBS_BUILD_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) CC=$(TARGET_CC)
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_STAGING_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(STAGING_DIR) install CC=$(TARGET_CC)
+endef
+
+define LIB_MOXA_IES_AUTO_MIBS_INSTALL_TARGET_CMDS
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install CC=$(TARGET_CC)
+endef
+
+$(eval $(generic-package))

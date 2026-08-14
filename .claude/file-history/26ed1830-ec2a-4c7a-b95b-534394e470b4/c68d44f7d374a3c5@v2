@@ -1,0 +1,53 @@
+#!/usr/bin/expect -f
+# Drive the DUT over SSH. Logs in as admin/moxa, su's to root if a Linux
+# shell is reached, runs each argv command, then exits.
+# Usage: dut_ssh.exp "<cmd1>" ["<cmd2>" ...]
+
+set timeout 30
+set host "192.168.127.253"
+set user "admin"
+set pass "moxa"
+
+log_user 1
+
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAuthentication=no \
+          $user@$host
+
+expect {
+    -re {[Pp]assword:} { send "$pass\r" }
+    timeout { puts "\nTIMEOUT waiting for password prompt"; exit 5 }
+    eof     { puts "\nEOF before password prompt"; exit 2 }
+}
+
+# Identify what we landed in.
+expect {
+    -re {\$ $}              { set mode "sh"    }
+    -re {# $}               { set mode "root"  }
+    -re {(?n)^.*[Ss]witch.*> $} { set mode "cli" }
+    -re {> $}               { set mode "cli"   }
+    timeout { puts "\nTIMEOUT waiting for shell prompt"; exit 3 }
+}
+
+puts "\n### LANDED IN MODE: $mode ###"
+
+if {$mode eq "sh"} {
+    send "su\r"
+    expect -re {[Pp]assword:} { send "$pass\r" }
+    expect {
+        -re {# $} { puts "\n### su OK ###" }
+        timeout   { puts "\nsu FAILED"; exit 4 }
+    }
+    set mode "root"
+}
+
+foreach cmd $argv {
+    send "$cmd\r"
+    expect {
+        -re {[#>\$] $} {}
+        timeout { puts "\nTIMEOUT on: $cmd" }
+    }
+}
+
+send "exit\r"
+expect eof

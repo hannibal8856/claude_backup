@@ -1,0 +1,330 @@
+# AgentX vs. net-snmp `proxy` — 實際行為 (5.9.3 source 對照版 + 北京案例)
+
+> v1: 2026-05-29 初稿,基於 net-snmp 5.9.3 source 修正先前對「AgentX GetBulk-PDU」的錯誤推論
+> v2: 同日,加入北京地鐵 10 號線案例,修正「proxy 整體不適合」的過早結論
+
+---
+
+## TL;DR
+
+1. net-snmp 5.9.3 的 **agentx master 收到 MODE_GETBULK 後,wire 上送出去的是
+   `AGENTX_MSG_GETNEXT`,不是 GETBULK**。source 自註 `/* WWWXXX */`(TODO)。
+2. **proxy 跟 agentx master 的 master→backend round-trip 數一樣**:
+   都是 `max-repetitions` 次。GETBULK 沒被真正轉發。
+3. AgentX 比 proxy 快的真正原因是 **transport(AF_UNIX/TCP 比 UDP loopback
+   快 2–3x)+ wire 簡單**,不是 round-trip 變少。
+4. **workload 決定一切**(2026-05-29 補充):
+   - `snmpwalk` 全樹掃描:proxy 慢 2x(Vincent 2022 PoC)
+   - 單 OID `snmpget` 頻繁監控:proxy 快 100x+(北京地鐵案例,production-deployed)
+
+---
+
+## Source code 對照(net-snmp-5.9.3)
+
+路徑相對於 `agent/`。
+
+### `mibgroup/agentx/master.c` — agentx master forward 邏輯
+
+| 行 | function / 段 | 內容 |
+|---|---|---|
+| 443 | `agentx_master_handler()` 定義 | master 註冊給 net-snmp 的 handler |
+| 466–479 | switch (reqinfo->mode) | 把 net-snmp handler mode → AgentX wire PDU type |
+| 467 | `case MODE_GET: pdu = snmp_pdu_create(AGENTX_MSG_GET);` | OK |
+| 471 | `case MODE_GETNEXT: pdu = snmp_pdu_create(AGENTX_MSG_GETNEXT);` | OK |
+| **475–477** | `case MODE_GETBULK: pdu = snmp_pdu_create(AGENTX_MSG_GETNEXT); break; /* WWWXXX */` | **未實作:bulk 退化成 next** |
+| 481–500 | MODE_SET_* → AGENTX_MSG_TESTSET / COMMITSET / UNDOSET / CLEANUPSET | 4-phase 完整 |
+| 541 | `if (mode == MODE_GETNEXT \|\| MODE_GETBULK)` 共用區段 | inclusive / range 處理 |
+| 366–417 | `agentx_got_response()` | 從 subagent 收回覆 |
+| 413–414 | `if (mode == MODE_GETBULK) netsnmp_bulk_to_next_fix_requests(requests);` | 把 next 結果重新組成 bulk response 結構 |
+
+### `mibgroup/agentx/master_admin.c`
+
+| 行 | 內容 |
+|---|---|
+| 223 | `netsnmp_create_handler_registration(..., HANDLER_CAN_RWRITE \| HANDLER_CAN_GETBULK); /* fake it */` |
+| 562 | `case AGENTX_MSG_GETBULK:` 在 admin path 的 trace 處理 |
+
+`HANDLER_CAN_GETBULK` 是 master「聲稱」自己會 GETBULK,讓 net-snmp dispatcher
+**不要 inject bulk_to_next helper**,才能讓 agentx_master_handler 直接收 MODE_GETBULK。
+但收到後又退回 GETNEXT 出去 ──「fake it」就是這意思。
+
+### `mibgroup/agentx/subagent.c` — subagent 端
+
+| 行 | 內容 |
+|---|---|
+| 350 | `if (pdu->command == AGENTX_MSG_GET \|\| AGENTX_MSG_GETNEXT \|\| AGENTX_MSG_GETBULK)` |
+| 386–410 | `case AGENTX_MSG_GETBULK: pdu->command = SNMP_MSG_GETBULK; /* WWWXXX */` |
+
+subagent **有實作收 GETBULK**,但 master 不送 → 整條鏈不走這條 path。
+
+### `mibgroup/agentx/protocol.c` — wire format
+
+| 行 | 內容 |
+|---|---|
+| 66 / 846 / 1744 | `case AGENTX_MSG_GETBULK:` 在 encode / decode 處理 |
+
+AgentX wire 協定本身支援 GETBULK(RFC 2741 §6.2.7),只是 master 沒用。
+
+### `helpers/bulk_to_next.c` — 關鍵 helper
+
+| 行 | function | 內容 |
+|---|---|---|
+| 32–43 | `netsnmp_get_bulk_to_next_handler()` | 建一個 bulk→next 轉換 handler 用於 auto-inject |
+| 84–135 | `netsnmp_bulk_to_next_helper()` | 主邏輯:**只對沒 claim `HANDLER_CAN_GETBULK` 的 handler 才 inject** |
+| 104–106 | `reqinfo->mode = MODE_GETNEXT; netsnmp_call_next_handler(...); reqinfo->mode = MODE_GETBULK;` | 改 mode → 呼下游 → 還原 mode |
+| 46–100 | `netsnmp_bulk_to_next_fix_requests()` | 把 varbind list 往下推一格,準備下一輪 iteration |
+
+### `mibgroup/ucd-snmp/proxy.c` — 對照組
+
+| 行 | 內容 |
+|---|---|
+| 241 | `netsnmp_create_handler_registration(..., HANDLER_CAN_RWRITE);` — **沒** `CAN_GETBULK` |
+| 396–398 | `case MODE_GETBULK: pdu = snmp_pdu_create(reqinfo->mode); break; /* WWWXXX */` | **dead code**(被 bulk_to_next intercept) |
+| 731–732 | `if (mode == MODE_GETBULK) netsnmp_bulk_to_next_fix_requests(requests);` | 同 master.c |
+
+---
+
+## 實際 dispatch 流程對照
+
+```
+[Client] snmpbulkwalk → master snmpd 收到 GETBULK PDU
+                            │
+                            ↓ 走 net-snmp dispatch tree
+                            ↓ longest-prefix-match 找 handler
+                            ↓
+              ┌─────────────┴─────────────┐
+              ↓                           ↓
+    handler 是 AgentX master?      handler 是 proxy?
+              │                           │
+              ↓                           ↓
+    CAN_GETBULK = YES (fake)     CAN_GETBULK = NO
+              │                           │
+              ↓                           ↓
+    bulk_to_next helper          bulk_to_next helper
+    **不 inject**                 **被 inject**
+              │                           │
+              ↓                           ↓
+    agentx_master_handler        bulk_to_next 把 mode
+    收到 MODE_GETBULK            改成 MODE_GETNEXT
+              │                           │
+              ↓                           ↓
+    master.c:475 case            proxy_handler
+    MODE_GETBULK → pdu =         收到 MODE_GETNEXT
+    snmp_pdu_create(             │
+    AGENTX_MSG_GETNEXT)          ↓
+    /* WWWXXX */                 proxy.c:397 case
+              │                  MODE_GETNEXT → pdu =
+              ↓                  snmp_pdu_create(
+    Wire: AgentX                 SNMP_MSG_GETNEXT)
+    GETNEXT-PDU,                 │
+    內含本輪所有 varbinds         ↓
+              │                  Wire: SNMP
+              ↓                  GETNEXT-PDU,
+    AF_UNIX/TCP 送 subagent       內含本輪所有 varbinds
+              │                           │
+              ↓                           ↓
+                          UDP loopback 送 backend
+              │                           │
+              ↓                           ↓
+          collect response,等下一輪
+              │                           │
+              ↓                           ↓
+    netsnmp_bulk_to_next_fix_requests()
+    更新 varbind 給下一輪 iteration
+              │                           │
+              ↓                           ↓
+    重複 max_repetitions 次
+              │                           │
+              └─────────────┬─────────────┘
+                            ↓
+                  master 整合所有 iteration result
+                            ↓
+                  回 client GETBULK Response
+```
+
+關鍵:**兩條路徑 round-trip 次數一樣**,都是 `max_repetitions`。
+
+---
+
+## 延遲推估
+
+### 每 round-trip latency 量級(Linux loopback)
+
+| Transport | RTT |
+|---|---|
+| AF_UNIX stream | 10–50 µs |
+| TCP loopback | 30–100 µs |
+| UDP loopback | 50–150 µs |
+
+### Walk 場景估算
+
+#### Case A:`snmpwalk -v2c`(預設不開 GETBULK,純 GETNEXT)
+
+ifTable 1583 row × 22 col = ~35000 OID,每 OID 一個 round-trip。
+
+| Backend | RTT/OID | 總通訊時間 |
+|---|---|---|
+| proxy(UDP) | ~100 µs | ~3.5 s |
+| AgentX/UNIX | ~30 µs | ~1.0 s |
+
+→ 差 ~3x,transport 差。
+
+#### Case B:`snmpbulkwalk -v2c` (`max-rep=10`)
+
+35000 / 10 = ~3500 iteration,每 iteration 一個 round-trip。
+
+| Backend | RTT/iter | 總通訊時間 |
+|---|---|---|
+| proxy(UDP) | ~100 µs | ~350 ms |
+| AgentX/UNIX | ~30 µs | ~105 ms |
+
+→ 差 ~3x,transport 差。
+
+#### Case C:若未來 master.c:475 補完(真 AgentX GetBulk-PDU forward)
+
+理論上 master 把整段 bulk 一次 GetBulk-PDU 送出去,subagent 回 N varbind。
+N 取決於 PDU 大小限制(~1400 bytes 一個 packet,~30 varbind/PDU 常見)。
+
+| Backend | RTT/iter | 總通訊時間 |
+|---|---|---|
+| proxy(unchanged) | ~100 µs × 3500 iter | ~350 ms |
+| AgentX/UNIX(假設補完) | ~30 µs × ~1200 PDU(35000/30) | ~36 ms |
+
+→ 差 ~10x,transport + batching。**這是要等 net-snmp 補完才有的差距**。
+
+---
+
+## **Workload 決定一切(關鍵章節)**
+
+### 兩個極端案例
+
+| | Vincent 2022 PoC | 北京地鐵 10 號線 |
+|---|---|---|
+| 測量方法 | `snmpwalk` 整顆樹(1.3.6.1.2 / 1.3.6.1.4)| 單 OID `snmpget` 帶 port index |
+| 同條 walk 跨越 proxy/local 邊界 | ✅(觸發 longest-prefix gap)| ❌(每個 GET 只命中 proxy)|
+| 每次操作 OID 數 | 1000+ | 1–3 |
+| 結果 | walk **慢 2x** | GET **快 100–200x** |
+| Decision | Not Yet | **採用,production-deployed v5.x** |
+
+### 為何同樣的 proxy 在兩個案例表現天差地遠
+
+**Vincent 全樹 walk 的痛點**:
+- ies-auto-mibs 仍保留 R/W column(`ifAdminStatus`、`ifAlias` 等)
+- proxy 處理 RO column
+- 同次 walk GETNEXT 路徑會反覆切換 local / proxy
+- net-snmp longest-prefix-match 在 walk 邊界(從 proxy 區走到 local 區或反之)產生 gap / 重試
+- backend(ISS SNMP daemon)為 walk 每個 OID 都從頭查 → 慢
+- 每個 OID 一次 UDP round-trip 累積 overhead
+
+**北京單 OID GET 的甜蜜點**:
+- 一次只命中 proxy 路徑,不跨邊界
+- ies-auto-mibs cold-cache 路徑(fork + exec generate_uri_snmp_table + JSON 寫檔 + /bin/mv + 讀檔)總共 ~600–1200 ms
+- proxy 路徑只多一個 UDP round-trip(~4–8 ms)
+- ISS SNMP daemon 對單 OID 查詢回應快
+- 結果:**150–200x 加速**
+
+### Reference
+
+- Vincent 2022 PoC 詳細:`~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx` + branch `289-read-oid-enhancement@3rdparty_net_snmp`
+- 北京案例 deep dive:**`~/beijing_proxy_case_study.md`**(同日另檔)
+- 北京 PPT 原始:`~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx`
+
+---
+
+## 對 ies-auto-mibs 替換方向的修正建議
+
+| 目標 | 用什麼 | 為什麼 |
+|---|---|---|
+| 大量 walk 的延遲改善 | **AgentX over AF_UNIX**(Plan C 已上)| longest-prefix match 在註冊樹層統一,無 gap;transport 比 UDP 快 |
+| 已知 OID 集合的高頻監控(NMS 模式)| **proxy 直接配 directive**(Beijing 模式)| 不用改 C code,純 conf 開關,延遲最低 |
+| 同時要 walk + 監控 | **hybrid**:常用 OID 走 proxy,其他走 AgentX 或 local | 配置複雜但延遲最佳 |
+| 解 walk gap(Vincent 遇到的)| AgentX subagent register 整段 prefix | proxy 不知 backend OID 集合 → gap;AgentX 把擁有權登在 registration tree → 無 gap |
+| 解 R/W 不能 forward | AgentX 4-phase TestSet/Commit/Undo/Cleanup | proxy 4-phase 不完整 |
+| 走 < 1 ms / GET | Vincent 2026 PDF 提的 **in-process cache** | 直接讀 process 記憶體,連 framework REST 都不打 |
+
+→ Plan C(AgentX)、Beijing proxy、Vincent 2026 cache **三者並不互斥**,可以疊加:
+   常用單 OID 走 proxy(< 5 ms);walk 走 AgentX(避免 gap);冷門 OID 仍走 ies-auto-mibs。
+
+---
+
+## Benchmark plan(實證)
+
+### 1. 確認 wire 真的是 GETNEXT(不是 GETBULK)
+
+```bash
+strace -e sendmsg,recvmsg -p $(pidof iss_subagent) 2>&1 | \
+    grep -A2 'sendmsg\|recvmsg' > /tmp/agentx_trace.log
+snmpbulkwalk -v2c -c public localhost 1.3.6.1.2.1.2.2
+# AgentX PDU 第 2 byte = PDU type;預期看 type=6 (GETNEXT) 而非 type=7 (GETBULK)
+```
+
+### 2. 確認 round-trip 數量級
+
+```bash
+sudo tcpdump -i lo -w /tmp/proxy.pcap udp port 6161
+snmpbulkwalk -v2c -c public -Cr 10 localhost 1.3.6.1.2.1.2.2
+# wireshark 數 GETNEXT-Request,應等於 (entries_walked / 10) 數量級
+```
+
+### 3. P50 / P99 對照
+
+```bash
+for backend in proxy agentx; do
+    for tool in snmpwalk snmpbulkwalk; do
+        for i in $(seq 1 100); do
+            /usr/bin/time -f "%e" $tool -v2c -c public localhost 1.3.6.1.2.1.2.2 \
+                >/dev/null 2>>/tmp/$backend.$tool.times
+        done
+    done
+done
+# 排序看 P50/P99
+```
+
+預期:proxy vs AgentX 在純 transport 上差 ~3x。
+
+### 4. 北京案例情境驗證(單 OID GET)
+
+```bash
+# 模擬 NMS 監控,28 port × 4 OID,輪詢 100 次
+for oid in 1.3.6.1.2.1.2.2.1.{8,10,14} 1.3.6.1.2.1.31.1.1.1.15; do
+    for p in $(seq 1 28); do
+        for i in $(seq 1 100); do
+            /usr/bin/time -f "%e" snmpget -v 1 -c public localhost $oid.$p \
+                >/dev/null 2>>/tmp/beijing.times
+        done
+    done
+done
+sort -n /tmp/beijing.times | awk '
+    {a[NR]=$1}
+    END {
+      print "P50:", a[int(NR*0.5)]
+      print "P99:", a[int(NR*0.99)]
+      print ">50ms ratio:", count/NR; for (i in a) if (a[i] > 0.05) count++
+    }'
+# 預期(以 Beijing 數據外推):P50 ~3ms,>50ms < 0.1%
+```
+
+---
+
+## Reference
+
+- net-snmp 5.9.3 source:
+  `/home/moxa/mds4xg/buildroot/output/build/3rdparty_net_snmp-custom/net-snmp-5.9.3/`
+- Vincent 2022 PoC:
+  branch `289-read-oid-enhancement@3rdparty_net_snmp` (commit `cade061`)
+- Vincent 2022 簡報:
+  `~/WORK/SNMP_50ms/snmp_oid_read_enhancement_2.pptx`
+- Vincent 2026 重構計畫:
+  `~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung (董建隆) - Moxa Confluence.pdf`
+- 北京案例 PPT:
+  `~/WORK/SNMP_50ms/Beijing_subway_10_snmp.pptx`
+- 北京案例 deep dive:
+  `~/beijing_proxy_case_study.md`
+- 我們的 Plan C(實際 deploy):
+  branch `snmp-trace-time_diff@3rdparty_net_snmp` (commit `4f9ead5`)
+  branch `snmp-trace-time_diff@plugin_moxa_snmp` (commit `4951001`)
+
+## Changelog
+
+- 2026-05-29 v1:初稿。修正先前對「AgentX GetBulk-PDU 1-RTT batching」的錯誤推論。
+- 2026-05-29 v2:加入「Workload 決定一切」章節 + 北京案例參照,修正「proxy 整體不適合」過早結論。

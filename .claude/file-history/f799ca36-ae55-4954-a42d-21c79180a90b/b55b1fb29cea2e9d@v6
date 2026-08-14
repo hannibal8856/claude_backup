@@ -1,0 +1,121 @@
+/*
+ * lib_moxa_ies_auto_mibs — reuse the canonical ies-auto-mibs entry arrays.
+ *
+ * Single source of truth: instead of hand-copying OID<->URI rows, #include the
+ * same net_*.h that 3rdparty_net_snmp/ies-auto-mibs compiles, and convert each
+ * `struct ies_auto_mibs_entry` to our `struct ies_map_entry` at first use. The
+ * framework subagent then serves whatever groups are listed in g_reuse_srcs[]
+ * (and whose MOX_SNMP_INIT_ENTRY is commented out on the snmpd side).
+ *
+ * This file is the ONLY one that pulls in the ies-auto-mibs headers + net-snmp;
+ * lookup.c / mapping_data.c stay dependency-free. Build must pass the same
+ * product -D flags as 3rdparty_net_snmp so the #if entry set matches.
+ *
+ * PoC scope: scalars only (uri_index == "0"); tables (uri_index != "0") are
+ * skipped until table handling lands.
+ */
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>   /* HANDLER_CAN_* */
+
+#include "ies_auto_mibs_handle.h"   /* struct ies_auto_mibs_entry, SNMP_DATA_TYPE_* */
+#include "net_mx_event_port.h"      /* mx_event_port_MibEntry[] */
+
+#include "lib_moxa_ies_auto_mibs.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* Groups migrated to the framework subagent. Add { <array>, ARRAY_LEN } here as
+ * each group's MOX_SNMP_INIT_ENTRY is commented out in ies_auto_mibs_setup.c. */
+struct reuse_src {
+    struct ies_auto_mibs_entry *arr;
+    size_t                      count;
+};
+
+static struct reuse_src g_reuse_srcs[] = {
+    { mx_event_port_MibEntry,
+      sizeof(mx_event_port_MibEntry) / sizeof(mx_event_port_MibEntry[0]) },
+};
+
+static struct ies_map_entry *s_table = NULL;
+static size_t                s_len   = 0;
+
+static void
+build_reuse_table(void)
+{
+    size_t nsrc = sizeof(g_reuse_srcs) / sizeof(g_reuse_srcs[0]);
+    size_t s, i, n, k;
+
+    if (s_table != NULL)
+    {
+        return;
+    }
+
+    /* Count scalar entries (uri_index == "0"). */
+    n = 0;
+    for (s = 0; s < nsrc; s++)
+    {
+        for (i = 0; i < g_reuse_srcs[s].count; i++)
+        {
+            if (strcmp(g_reuse_srcs[s].arr[i].uri_index, "0") == 0)
+            {
+                n++;
+            }
+        }
+    }
+
+    s_table = (struct ies_map_entry *) calloc(n, sizeof(*s_table));
+    if (s_table == NULL)
+    {
+        return;
+    }
+
+    k = 0;
+    for (s = 0; s < nsrc; s++)
+    {
+        for (i = 0; i < g_reuse_srcs[s].count; i++)
+        {
+            struct ies_auto_mibs_entry *e = &g_reuse_srcs[s].arr[i];
+            moxa_oid *o;
+            int j;
+
+            if (strcmp(e->uri_index, "0") != 0)
+            {
+                continue;   /* skip tables for now */
+            }
+
+            /* Instance OID = oid_list + .0 (scalar). */
+            o = (moxa_oid *) malloc((e->oid_len + 1) * sizeof(moxa_oid));
+            if (o == NULL)
+            {
+                continue;
+            }
+            for (j = 0; j < e->oid_len; j++)
+            {
+                o[j] = (moxa_oid) e->oid_list[j];
+            }
+            o[e->oid_len] = 0;
+
+            s_table[k].oid       = o;
+            s_table[k].oid_len   = (size_t) (e->oid_len + 1);
+            s_table[k].uri       = e->uri;   /* static storage; lives for program */
+            s_table[k].uri_index = "";
+            s_table[k].val_type  = e->val_type;   /* SNMP_DATA_TYPE_* == ASN tag */
+            s_table[k].mode      = e->mode;
+            k++;
+        }
+    }
+    s_len = k;
+}
+
+const struct ies_map_entry *
+ies_map_reuse_table(size_t *len)
+{
+    build_reuse_table();
+    if (len != NULL)
+    {
+        *len = s_len;
+    }
+    return s_table;
+}

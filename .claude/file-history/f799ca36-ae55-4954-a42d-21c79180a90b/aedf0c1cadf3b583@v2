@@ -1,0 +1,33 @@
+/*
+ * lib_moxa_ies_auto_mibs — lookup.
+ *
+ * Linear scan over the seed table (small N). A hash index can replace this in
+ * the C project (Plan D C) once the full table lands.
+ */
+#include "lib_moxa_ies_auto_mibs.h"
+
+#include <string.h>
+
+extern const struct ies_map_entry g_ies_map_table[];
+extern const size_t               g_ies_map_table_len;
+
+const struct ies_map_entry *
+ies_map_lookup_by_oid(const moxa_oid *o, size_t olen)
+{
+    size_t i;
+
+    if (o == NULL)
+    {
+        return NULL;
+    }
+
+    for (i = 0; i < g_ies_map_table_len; i++)
+    {
+        if (g_ies_map_table[i].oid_len == olen &&
+            memcmp(g_ies_map_table[i].oid, o, olen * sizeof(moxa_oid)) == 0)
+        {
+            return &g_ies_map_table[i];
+        }
+    }
+    return NULL;
+}

@@ -1,0 +1,589 @@
+[package]
+name = "app_moxa_framework"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+hello = []
+
+XCAT3 = [
+    "plugins_moxa_framework/XCAT3",
+]
+
+BCM_ROBO2_XSDK = [
+    "plugins_moxa_framework/BCM_ROBO2_XSDK",
+]
+
+MARVELL_EARCH = [
+    "plugins_moxa_framework/MARVELL_EARCH",
+]
+
+L3_BASE = [
+    "plugins_moxa_framework/L3_BASE",
+    "rust_moxa_new_moxa_command_operation/L3_BASE",
+]
+
+MOXA_LCM = [
+    "plugins_moxa_framework/MOXA_LCM",
+]
+
+
+
+MDS = [
+    "plugins_moxa_framework/MDS",
+]
+
+MDSXG = [
+    "plugins_moxa_framework/MDSXG",
+]
+
+EDS = [
+    "plugins_moxa_framework/EDS",
+    "lib_moxa_rust_led_service/EDS",
+]
+
+M65M = [
+    "plugins_moxa_framework/M65M",
+    "lib_moxa_rust_led_service/M65M",
+]
+
+RKS = [
+    "plugins_moxa_framework/RKS",
+]
+
+TN = [
+    "plugins_moxa_framework/TN",
+    "lib_moxa_rust_firmware_header/TN",
+    "lib_moxa_rust_io/TN",
+    "lib_moxa_rust_led_service/TN",
+    "rust_moxa_new_moxa_command_operation/TN",
+]
+
+RKSPL = [
+    "plugins_moxa_framework/RKSPL",
+    "lib_moxa_rust_firmware_header/RKSPL",
+]
+
+MRX = [
+    "plugins_moxa_framework/MRX",
+]
+
+# Moxa features (plugins)
+MOXA_ACCOUNT_PASSWORD_POLICY = [
+    "plugins_moxa_framework/MOXA_ACCOUNT_PASSWORD_POLICY",
+]
+MOXA_ACL = [
+    "plugins_moxa_framework/MOXA_ACL",
+]
+MOXA_AES_ENCRYPTION_KEY_MIGRATION = [
+    "lib_moxa_rust_firmware_header/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+    "plugins_moxa_framework/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+    "rust_moxa_common/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+    "rust_moxa_config_layer/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+    "rust_moxa_new_moxa_command_operation/MOXA_AES_ENCRYPTION_KEY_MIGRATION",
+]
+MOXA_AIDE = [
+    "plugins_moxa_framework/MOXA_AIDE",
+]
+MOXA_ALL_USER_STATUS = [
+    "plugins_moxa_framework/MOXA_ALL_USER_STATUS",
+]
+MOXA_API_KEY = [
+    "plugins_moxa_framework/MOXA_API_KEY",
+]
+MOXA_ARP_TABLE = [
+    "plugins_moxa_framework/MOXA_ARP_TABLE",
+]
+MOXA_AUTO_CONFIG = [
+    "plugins_moxa_framework/MOXA_AUTO_CONFIG",
+    "rust_moxa_file_operation/MOXA_AUTO_CONFIG",
+]
+MOXA_COMMON_SYSTEM_EVENT = [
+    "plugins_moxa_framework/MOXA_COMMON_SYSTEM_EVENT",
+]
+MOXA_CONFIG_ENCRYPTION = [
+    "plugins_moxa_framework/MOXA_CONFIG_ENCRYPTION",
+]
+MOXA_CLI_EXPORT = [
+    "plugins_moxa_framework/MOXA_CLI_EXPORT",
+]
+MOXA_CONFIG_LAYER = [
+    "plugins_moxa_framework/MOXA_CONFIG_LAYER",
+]
+MOXA_CONFIG_NAME = [
+    "plugins_moxa_framework/MOXA_CONFIG_NAME",
+]
+MOXA_CUSTOM_DEFAULT = [
+    "plugins_moxa_framework/MOXA_CUSTOM_DEFAULT",
+    "rust_moxa_common/MOXA_CUSTOM_DEFAULT",
+    "rust_moxa_new_moxa_command_operation/MOXA_CUSTOM_DEFAULT",
+]
+MOXA_CUSTOM_ENCRYPTION_KEY = [
+    "plugins_moxa_framework/MOXA_CUSTOM_ENCRYPTION_KEY",
+]
+MOXA_CUSTOMER_KEY_MANAGEMENT = [
+    "plugins_moxa_framework/MOXA_CUSTOMER_KEY_MANAGEMENT",
+]
+MOXA_DAI = [
+    "plugins_moxa_framework/MOXA_DAI",
+]
+MOXA_DASHBOARD = [
+    "plugins_moxa_framework/MOXA_DASHBOARD",
+]
+MOXA_DEBUG_LOG = [
+    "plugins_moxa_framework/MOXA_DEBUG_LOG",
+]
+MOXA_DEBUG_LOG_NG = [
+    "plugins_moxa_framework/MOXA_DEBUG_LOG_NG",
+]
+MOXA_DEBUG_STACKDUMP = [
+    "plugins_moxa_framework/MOXA_DEBUG_STACKDUMP",
+]
+MOXA_DEBUG_TRACE = [
+    "plugins_moxa_framework/MOXA_DEBUG_TRACE",
+]
+MOXA_DEBUG_TRACE_SYSTEM = [
+    "plugins_moxa_framework/MOXA_DEBUG_TRACE_SYSTEM",
+]
+MOXA_DEBUG_TRACE_TC = [
+    "plugins_moxa_framework/MOXA_DEBUG_TRACE_TC",
+]
+MOXA_DEBUG_TRACE_TRV2 = [
+    "plugins_moxa_framework/MOXA_DEBUG_TRACE_TRV2",
+]
+MOXA_DHCP_CLIENT_OPTION_61 = [
+    "plugins_moxa_framework/MOXA_DHCP_CLIENT_OPTION_61",
+]
+MOXA_DHCP_CLIENT_OPTION_66_67 = [
+    "plugins_moxa_framework/MOXA_DHCP_CLIENT_OPTION_66_67",
+]
+MOXA_DHCP_CLIENT_OPTION_66_67_SFTP = [
+    "plugins_moxa_framework/MOXA_DHCP_CLIENT_OPTION_66_67_SFTP",
+]
+MOXA_DHCP_RELAY = [
+    "plugins_moxa_framework/MOXA_DHCP_RELAY",
+]
+MOXA_DHCP_SERVER = [
+    "plugins_moxa_framework/MOXA_DHCP_SERVER",
+]
+MOXA_DHCP_SERVER_OPTION_66_67 = [
+    "plugins_moxa_framework/MOXA_DHCP_SERVER_OPTION_66_67",
+]
+MOXA_DHCP_SERVER_OPTION_121 = [
+    "plugins_moxa_framework/MOXA_DHCP_SERVER_OPTION_121",
+]
+MOXA_DHCP_SERVER_PORT_BASED_LA = [
+    "plugins_moxa_framework/MOXA_DHCP_SERVER_PORT_BASED_LA",
+]
+MOXA_DHCPSNP = [
+    "plugins_moxa_framework/MOXA_DHCPSNP",
+]
+MOXA_DNS_SERVER = [
+    "plugins_moxa_framework/MOXA_DNS_SERVER",
+]
+MOXA_DI = [
+    "plugins_moxa_framework/MOXA_DI",
+]
+MOXA_DOT1X = [
+    "plugins_moxa_framework/MOXA_DOT1X",
+]
+MOXA_DRC = [
+    "plugins_moxa_framework/MOXA_DRC",
+]
+MOXA_DUAL_HOMING = [
+    "plugins_moxa_framework/MOXA_DUAL_HOMING",
+]
+MOXA_DUAL_HOMING_HIDE_UI = [
+    "plugins_moxa_framework/MOXA_DUAL_HOMING_HIDE_UI",
+]
+MOXA_EEE = [
+    "plugins_moxa_framework/MOXA_EEE",
+]
+MOXA_EIP = [
+    "plugins_moxa_framework/MOXA_EIP",
+]
+MOXA_EMAIL = [
+    "plugins_moxa_framework/MOXA_EMAIL",
+]
+MOXA_ERPS_V2 = [
+    "plugins_moxa_framework/MOXA_ERPS_V2",
+]
+MOXA_EXTERNAL_STORAGE = [
+    "plugins_moxa_framework/MOXA_EXTERNAL_STORAGE",
+]
+MOXA_FACTORY_DEFAULT = [
+    "plugins_moxa_framework/MOXA_FACTORY_DEFAULT",
+]
+MOXA_FAN_MODULE = [
+    "plugins_moxa_framework/MOXA_FAN_MODULE",
+]
+MOXA_FIBER_CHECK = [
+    "plugins_moxa_framework/MOXA_FIBER_CHECK",
+]
+MOXA_FILE_LAYER = [
+    "plugins_moxa_framework/MOXA_FILE_LAYER",
+]
+MOXA_FIRMWARE_UPDATE = [
+    "plugins_moxa_framework/MOXA_FIRMWARE_UPDATE",
+]
+MOXA_GOOSE_CHECK = [
+    "plugins_moxa_framework/MOXA_GOOSE_CHECK",
+]
+MOXA_HARDWARE_INTERFACE = [
+    "plugins_moxa_framework/MOXA_HARDWARE_INTERFACE",
+]
+MOXA_HAST = [
+    "plugins_moxa_framework/MOXA_HAST",
+]
+MOXA_IEC62439_2 = [
+    "plugins_moxa_framework/MOXA_IEC62439_2",
+]
+MOXA_IGMP_SNOOPING = [
+    "plugins_moxa_framework/MOXA_IGMP_SNOOPING",
+]
+MOXA_INTEL_TEMP_CTRL = [
+    "plugins_moxa_framework/MOXA_INTEL_TEMP_CTRL",
+]
+MOXA_IO = [
+    "plugins_moxa_framework/MOXA_IO",
+]
+MOXA_IPSG = [
+    "plugins_moxa_framework/MOXA_IPSG",
+]
+MOXA_ITXPT = [
+    "plugins_moxa_framework/MOXA_ITXPT",
+]
+MOXA_L2_REDUNDANCY = [
+    "plugins_moxa_framework/MOXA_L2_REDUNDANCY",
+]
+MOXA_LA = [
+    "plugins_moxa_framework/MOXA_LA",
+]
+MOXA_LED = [
+    "plugins_moxa_framework/MOXA_LED",
+]
+MOXA_LHC_EVENT = [
+    "plugins_moxa_framework/MOXA_LHC_EVENT",
+]
+MOXA_LLDP = [
+    "plugins_moxa_framework/MOXA_LLDP",
+]
+MOXA_LOCATOR = [
+    "plugins_moxa_framework/MOXA_LOCATOR",
+]
+MOXA_LOGIN_AUTHENTICATION = [
+    "plugins_moxa_framework/MOXA_LOGIN_AUTHENTICATION",
+]
+MOXA_LOGIN_POLICY = [
+    "plugins_moxa_framework/MOXA_LOGIN_POLICY",
+]
+MOXA_LP = [
+    "plugins_moxa_framework/MOXA_LP",
+]
+MOXA_MAB = [
+    "plugins_moxa_framework/MOXA_MAB",
+]
+MOXA_MACSEC = [
+    "plugins_moxa_framework/MOXA_MACSEC",
+]
+MOXA_MANAGEMENT_IP = [
+    "plugins_moxa_framework/MOXA_MANAGEMENT_IP",
+]
+MOXA_MDNS = [
+    "plugins_moxa_framework/MOXA_MDNS",
+]
+MOXA_MMS = [
+    "plugins_moxa_framework/MOXA_MMS",
+]
+MOXA_MODBUS_TCP = [
+    "plugins_moxa_framework/MOXA_MODBUS_TCP",
+]
+MOXA_MSTP = [
+    "plugins_moxa_framework/MOXA_MSTP",
+]
+MOXA_MULTICOUPLING = [
+    "plugins_moxa_framework/MOXA_MULTICOUPLING",
+]
+MOXA_NTP_AES_AUTH = [
+    "plugins_moxa_framework/MOXA_NTP_AES_AUTH",
+]
+MOXA_PERMISSIONS = [
+    "plugins_moxa_framework/MOXA_PERMISSIONS",
+]
+MOXA_PASSWORD_POLICY_CHECK = [
+    "plugins_moxa_framework/MOXA_PASSWORD_POLICY_CHECK",
+    "lib_moxa_rust_firmware_header/MOXA_PASSWORD_POLICY_CHECK",
+    "rust_moxa_common/MOXA_PASSWORD_POLICY_CHECK",
+    "rust_moxa_new_moxa_command_operation/MOXA_PASSWORD_POLICY_CHECK",
+]
+MOXA_PHR = [
+    "plugins_moxa_framework/MOXA_PHR",
+]
+MOXA_PING = [
+    "plugins_moxa_framework/MOXA_PING",
+]
+MOXA_PLATFORM_SYSTEM_EVENT = [
+    "plugins_moxa_framework/MOXA_PLATFORM_SYSTEM_EVENT",
+]
+MOXA_PNAC_EVENT = [
+    "plugins_moxa_framework/MOXA_PNAC_EVENT",
+]
+MOXA_POE = [
+    "plugins_moxa_framework/MOXA_POE",
+]
+MOXA_POE_AGENT = [
+    "plugins_moxa_framework/MOXA_POE_AGENT",
+]
+MOXA_POE_BT = [
+    "plugins_moxa_framework/MOXA_POE_BT",
+]
+MOXA_POH = [
+    "plugins_moxa_framework/MOXA_POH",
+]
+MOXA_PORT = [
+    "plugins_moxa_framework/MOXA_PORT",
+]
+MOXA_PORT_MIRROR = [
+    "plugins_moxa_framework/MOXA_PORT_MIRROR",
+]
+MOXA_PROFINET = [
+    "plugins_moxa_framework/MOXA_PROFINET"
+]
+MOXA_PSEC = [
+    "plugins_moxa_framework/MOXA_PSEC",
+]
+MOXA_PTP = [
+    "plugins_moxa_framework/MOXA_PTP",
+]
+MOXA_QINQ = [
+    "plugins_moxa_framework/MOXA_QINQ",
+]
+MOXA_QOS = [
+    "plugins_moxa_framework/MOXA_QOS",
+]
+MOXA_RATE_LIMIT_EVENT = [
+    "plugins_moxa_framework/MOXA_RATE_LIMIT_EVENT",
+]
+MOXA_REBOOT = [
+    "plugins_moxa_framework/MOXA_REBOOT",
+]
+MOXA_RELAY = [
+    "plugins_moxa_framework/MOXA_RELAY",
+]
+MOXA_REMOVE = [
+    "plugins_moxa_framework/MOXA_REMOVE",
+]
+MOXA_RLPS = [
+    "plugins_moxa_framework/MOXA_RLPS",
+]
+MOXA_RMON = [
+    "plugins_moxa_framework/MOXA_RMON",
+]
+MOXA_RSPAN_REFLECT_MIRROR_CONTROL_FRAME = [
+    "plugins_moxa_framework/MOXA_RSPAN_REFLECT_MIRROR_CONTROL_FRAME"
+]
+MOXA_RSTP = [
+    "plugins_moxa_framework/MOXA_RSTP",
+]
+MOXA_RSTP_SWIFT = [
+    "plugins_moxa_framework/MOXA_RSTP_SWIFT",
+]
+MOXA_SECURE_SYSTEM_DIAGNOSTICS = [
+    "plugins_moxa_framework/MOXA_SECURE_SYSTEM_DIAGNOSTICS",
+]
+MOXA_SNMP = [
+    "plugins_moxa_framework/MOXA_SNMP",
+]
+MOXA_SNTP_QUERY_INTERVAL = [
+    "plugins_moxa_framework/MOXA_SNTP_QUERY_INTERVAL",
+]
+MOXA_SPAN_REFLECT_MIRROR_CONTROL_FRAME = [
+    "plugins_moxa_framework/MOXA_SPAN_REFLECT_MIRROR_CONTROL_FRAME"
+]
+MOXA_MIRROR_IGNORE_DUP_PKT = [
+    "plugins_moxa_framework/MOXA_MIRROR_IGNORE_DUP_PKT"
+]
+MOXA_MIRROR_VLAN_MIRROR = [
+    "plugins_moxa_framework/MOXA_MIRROR_VLAN_MIRROR"
+]
+MOXA_SSH_KEY = [
+    "plugins_moxa_framework/MOXA_SSH_KEY",
+]
+MOXA_STATUS_LAYER = [
+    "plugins_moxa_framework/MOXA_STATUS_LAYER",
+]
+MOXA_STCL = [
+    "plugins_moxa_framework/MOXA_STCL",
+]
+MOXA_SUPERVISION = [
+    "plugins_moxa_framework/MOXA_SUPERVISION",
+]
+MOXA_SWITCHING_EVENT = [
+    "plugins_moxa_framework/MOXA_SWITCHING_EVENT",
+]
+MOXA_SYSLOG = [
+    "plugins_moxa_framework/MOXA_SYSLOG",
+]
+MOXA_SYSTEM_INFORMATION = [
+    "plugins_moxa_framework/MOXA_SYSTEM_INFORMATION",
+]
+MOXA_SYSTEM_RESOURCE_MONITOR = [
+    "plugins_moxa_framework/MOXA_SYSTEM_RESOURCE_MONITOR",
+]
+MOXA_TCST = [
+    "plugins_moxa_framework/MOXA_TCST",
+]
+MOXA_TIME = [
+    "plugins_moxa_framework/MOXA_TIME",
+]
+MOXA_TRACE_ROUTE = [
+    "plugins_moxa_framework/MOXA_TRACE_ROUTE",
+]
+MOXA_TRACKING = [
+    "plugins_moxa_framework/MOXA_TRACKING",
+]
+MOXA_TRUSTED_ACCESS = [
+    "plugins_moxa_framework/MOXA_TRUSTED_ACCESS",
+]
+MOXA_TURBO_CHAIN = [
+    "plugins_moxa_framework/MOXA_TURBO_CHAIN",
+]
+MOXA_TURBO_CHAIN_HIDE_UI = [
+    "plugins_moxa_framework/MOXA_TURBO_CHAIN_HIDE_UI",
+]
+MOXA_TURBORINGV2 = [
+    "plugins_moxa_framework/MOXA_TURBORINGV2",
+]
+MOXA_UI_SERVICE_MANAGEMENT = [
+    "plugins_moxa_framework/MOXA_UI_SERVICE_MANAGEMENT",
+]
+MOXA_USER_ACCOUNT = [
+    "plugins_moxa_framework/MOXA_USER_ACCOUNT",
+]
+MOXA_USER_STATUS = [
+    "plugins_moxa_framework/MOXA_USER_STATUS",
+]
+MOXA_UTILIZATION = [
+    "plugins_moxa_framework/MOXA_UTILIZATION",
+]
+MOXA_VLAN = [
+    "plugins_moxa_framework/MOXA_VLAN",
+]
+MOXA_VLAN_UNAWARE = [
+    "plugins_moxa_framework/MOXA_VLAN_UNAWARE",
+]
+MOXA_WEB = [
+    "plugins_moxa_framework/MOXA_WEB",
+]
+MOXA_WEB_CRT = [
+    "plugins_moxa_framework/MOXA_WEB_CRT",
+]
+MOXA_WEB_CSR = [
+    "plugins_moxa_framework/MOXA_WEB_CSR",
+]
+MOXA_OOB_MANAGEMENT = [
+    "plugins_moxa_framework/MOXA_OOB_MANAGEMENT",
+    "rust_moxa_new_moxa_command_operation/MOXA_OOB_MANAGEMENT",
+]
+
+# Profiling
+MOXA_PROFILING = [
+    "rust_moxa_profiling/profiling",
+    "rust_moxa_config_layer/MOXA_PROFILING",
+    "rust_moxa_status_layer/MOXA_PROFILING",
+    "rust_moxa_file_layer/MOXA_PROFILING",
+    "rust_moxa_auth_layer/MOXA_PROFILING",
+    "rust_moxa_command_layer/MOXA_PROFILING",
+    "rust_moxa_new_moxa_command_layer/MOXA_PROFILING",
+    "rust_moxa_bff/MOXA_PROFILING",
+]
+
+# L3 part
+MOXA_BFD = [
+    "plugins_moxa_framework/MOXA_BFD",
+]
+MOXA_IP_INTERFACE = [
+    "plugins_moxa_framework/MOXA_IP_INTERFACE",
+]
+MOXA_MULTICAST_LOCAL_ROUTE = [
+    "plugins_moxa_framework/MOXA_MULTICAST_LOCAL_ROUTE",
+]
+MOXA_MULTICAST_ROUTING = [
+    "plugins_moxa_framework/MOXA_MULTICAST_ROUTING",
+]
+MOXA_NETWORK_DNS = [
+    "plugins_moxa_framework/MOXA_NETWORK_DNS",
+]
+MOXA_OSPF = [
+    "plugins_moxa_framework/MOXA_OSPF",
+]
+MOXA_PIM_DM = [
+    "plugins_moxa_framework/MOXA_PIM_DM",
+]
+MOXA_PIM_SM = [
+    "plugins_moxa_framework/MOXA_PIM_SM",
+]
+MOXA_RIP = [
+    "plugins_moxa_framework/MOXA_RIP",
+]
+MOXA_STATIC_ROUTE = [
+    "plugins_moxa_framework/MOXA_STATIC_ROUTE",
+]
+MOXA_VRRP = [
+    "plugins_moxa_framework/MOXA_VRRP",
+]
+MOXA_DEFAULT_IP_BY_SLOT_INDEX = [
+    "plugins_moxa_framework/MOXA_DEFAULT_IP_BY_SLOT_INDEX",
+]
+
+[dependencies]
+actix-cors = "0.6.5"
+actix-web = "4"
+sd-notify = "0.4.5"
+
+app_moxa_token_module = { path = "../../app_moxa_token_module-custom" }
+lib_moxa_rust_debug_log_ng = { path = "../../lib_moxa_rust_debug_log_ng-custom" }
+lib_moxa_rust_encrypt = { path = "../../lib_moxa_rust_encrypt-custom" }
+lib_moxa_rust_event_action = { path = "../../lib_moxa_rust_event_action-custom" }
+lib_moxa_rust_firmware_header = { path = "../../lib_moxa_rust_firmware_header-custom" }
+lib_moxa_rust_io = { path = "../../lib_moxa_rust_io-custom" }
+lib_moxa_rust_led_service = { path = "../../lib_moxa_rust_led_service-custom" }
+lib_moxa_rust_pam = { path = "../../lib_moxa_rust_pam-custom" }
+plugins_moxa_framework = { path = "../../plugins_moxa_framework-custom" }
+rust_moxa_app_state = { path = "../../rust_moxa_app_state-custom" }
+rust_moxa_auth_layer = { path = "../../rust_moxa_auth_layer-custom" }
+rust_moxa_bff = { path = "../../rust_moxa_bff-custom" }
+rust_moxa_command_layer = { path = "../../rust_moxa_command_layer-custom" }
+rust_moxa_command_operation = { path = "../../rust_moxa_command_operation-custom" }
+rust_moxa_common = { path = "../../rust_moxa_common-custom" }
+rust_moxa_config_layer = { path = "../../rust_moxa_config_layer-custom" }
+rust_moxa_file_layer = { path = "../../rust_moxa_file_layer-custom" }
+rust_moxa_file_operation = { path = "../../rust_moxa_file_operation-custom" }
+rust_moxa_new_moxa_command_layer = { path = "../../rust_moxa_new_moxa_command_layer-custom" }
+rust_moxa_new_moxa_command_operation = { path = "../../rust_moxa_new_moxa_command_operation-custom" }
+rust_moxa_status_layer = { path = "../../rust_moxa_status_layer-custom" }
+rust_moxa_status_operation = { path = "../../rust_moxa_status_operation-custom" }
+
+# Profiling (optional)
+rust_moxa_profiling = { path = "../../rust_moxa_profiling-custom", optional = true }
+# net for AsyncFd (the AgentX descriptor), time for the select timeout,
+# signal for the profiling handlers. Not optional any more: src/snmp_agentx.rs
+# always needs it.
+tokio = { version = "1", features = ["signal", "net", "time"] }
+futures-util = "0.3"
+
+lib_moxa_rust_snmp_agentx = { path = "../../lib_moxa_rust_snmp_agentx-custom" }
+# OID -> URI for the subagent's GET path. Same table snmpd builds from, so a
+# change to ies-auto-mibs reaches both sides from one place.
+lib_moxa_rust_ies_auto_mibs = { path = "../../lib_moxa_rust_ies_auto_mibs-custom" }
+# Both are what rust_moxa_status_layer already takes: the status layer's own
+# call signature needs a QString, and it answers in serde_json values.
+qstring = "0.7.2"
+serde_json = "1.0"
+
+[build-dependencies]
+# https://gitlab.com/moxa/sw/switch/general/buildsystem/moxa/-/issues/2715
+# cc = "=1.0.94"

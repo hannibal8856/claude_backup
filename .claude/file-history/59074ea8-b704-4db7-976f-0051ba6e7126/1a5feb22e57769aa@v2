@@ -1,0 +1,320 @@
+# ADR-0033: `+getfwd` 的三道正交防線,與三者都補不掉的那一格
+
+Status:
+  **Proposed(2026-08-14)** —— 程式碼已實作、單檔編譯乾淨、符號連結已驗;
+  **DUT 四條驗收標準尚未實測**,實測通過後才改 Accepted。
+
+  ⚠️ **2026-08-14 稍晚:故障機制已由執行期讀數證實(不再是原始碼推論),
+  而且其中一環比本 ADR 原本寫的更強** —— 見 Context 的「執行期讀數」節。
+  修法 A/B/C 的方向未變,但 A 的**必要性**從「否定測試不夠嚴」升級為
+  「否定測試永遠不可能觸發」。方法見 skill `probe-snmpd-registry`。
+  **修正 ADR-0031 §② 的宣稱**(「probe 填錯或推導錯的最壞結果是『沒有加速』,
+  不會是錯值或掉值」)—— 該宣稱**比實際強**,已由 mxlldp 掉 25 個 varbind 推翻。
+  ADR-0031 的其餘內容(三種 probe 來源、優先序、`+nodelegate` 解耦)維持有效。
+
+Date: 2026-08-14
+
+Context:
+  `snmp-plan-E reopen 7` 在 2026-08-14 對 `mxlldp/` 下 `+getfwd +nodelegate`,
+  **整支 MIB 消失**:`.1.3.6.1.4.1.8691.603.5.1` walk 回 No Such Object、
+  逐欄 GET 全部 No Such Object、25 個 varbind 歸零、**沒有任何錯誤訊息**。
+  pcap 顯示線路上 `.603.5.1` 位元組出現 **0 次** —— 也就是說連轉發都沒發生,
+  請求被行程內某個**本機 handler** 同步答掉了。
+
+  `snmp-plan-E trace 3` 從原始碼確認成因是**三個缺陷串聯**,缺一不可:
+
+  1. **推導走太高**:`mox_snmp_probe_derive()` 的走訪下限寫死 `len >= 3`,
+     可以一路爬到 `.1.3.6`,遠高於該 group 自己的 MIB root。
+  2. **身分檢查問錯問題**:`mox_snmp_reg_is_local()` 只檢查 handler chain 裡有沒有
+     `mox_snmp_handle_entry`,即只排除「我方」,**不要求「是 subagent」**。
+     同行程內任何別的 handler(net-snmp 內建 MIB module、dlmod 外掛)都被放行。
+  3. **無條件回報成功**:`mox_snmp_forward_get_to_iss()` 丟棄
+     `netsnmp_call_handlers()` 的結果直接 `return 0`,呼叫端據此跳過本地讀取。
+
+  ADR-0031 §② 認定「身分檢查」已經讓最壞情況只是「沒有加速」。**那是錯的** ——
+  它擋的是「撞到我們自己」,而 mxlldp 撞到的是**別人**,不是我們。
+
+  ### 執行期讀數(2026-08-14,dlmod 探針;skill `probe-snmpd-registry`)
+
+  以上三點原本全部來自原始碼推論。用唯讀 dlmod 探針讀 snmpd 活的註冊表之後,
+  **機制被證實,而且缺陷 2 比原本寫的更嚴重。**
+
+  `setup_tree()`(`agent_registry.c:2211-2213`)用 `netsnmp_null_handler` 註冊了
+  `.0` / `.1` / `.2`,**涵蓋整棵 OID 樹**。因此:
+
+  > **`netsnmp_subtree_find()` 對 `.1` 底下任何 OID 永遠不會回 NULL。**
+
+  探針對 mxlldp 推導會爬的整道階梯逐階查詢,`.603.5.1.1`(len 11)、`.603.5.1`、
+  `.603.5`、`.603`、`.8691`、`.1.3.6.1.4.1`、`.1.3.6` —— **七階全部回同一個
+  `.1` null 節點**(`handlerName=""`、`handler_name="null"`、鏈長 1、無 children)。
+  註冊表穩定後重測一次結果相同。
+
+  → 舊碼的接受條件是 `!mox_snmp_reg_is_local(...)`,而 null handler 當然不是
+  `mox_snmp_handle_entry`,所以**在第一階(len 11)就通過**,推導出的 probe 是
+  `.1.3.6.1.4.1.8691.603.5.1.1`,指向 net-snmp 自己的空 handler。
+
+  而 `netsnmp_null_handler`(`helpers/null.c:72-84`)是個**靜默水槽**:
+
+  ```c
+  case MODE_GETNEXT: case MODE_GETBULK:  return SNMP_ERR_NOERROR;   /* 什麼都不做 */
+  case MODE_GET:  netsnmp_request_set_error_all(requests, SNMP_NOSUCHOBJECT);
+  ```
+
+  GET → 同步設 noSuchObject、行程內完成、**線上零封包**;
+  GETNEXT → varbind 維持 `ASN_NULL` → master 依 `reassign_requests` 跳過**整個區間**。
+  逐欄 GET 全部 No Such Object、walk 整支消失 25→0、pcap 零封包 —— **三個症狀一字不差。**
+
+  🔴 **因此對缺陷 2 的描述要修正**:`mox_snmp_reg_is_local()` **不是「檢查得不夠嚴」,
+  是「永遠不可能觸發」**。任何形如「不是我們的就轉」的測試都會被這個 catch-all 滿足,
+  無論寫得多小心。這把修法 A 從「改良」變成「唯一可行的形狀」——
+  必須問「它**是**什麼」(比對 `agentx_master_handler`),不能問「它**不是**什麼」。
+
+  同一份讀數也證實了 children 鏈確實存在且可用:3755 個 subtree 區間中 3014 個有
+  >1 個註冊,**1291 個在鏈頭底下掛著 agentx 註冊**;`mxqosdb/`、`mxstcldb/`、
+  `mxportdb/` 的 `[d=1]` 都是 ISS,且範圍**被切到正好等於該欄**。
+  `mxlldp/` 則鏈長 2、`[d=1]` 就是 null handler、**零 agentx 候選**。
+
+  另一個被推翻的判斷:2026-08-12 曾以「AgentX 轉發是非同步的,呼叫返回時 varbind 尚未填值」
+  為由**整個撤回** runtime 回應檢查。該撤回**範圍過寬** —— 它只對「真的走了 AgentX」那一半成立,
+  而**會靜默掉值的偏偏是同步那一半**。
+
+Decision:
+  **三道防線一起做。它們正交,少任何一道都留下一條掉值路徑。**
+  (實作者原本傾向「A 為主、B 可選、C 可丟」,兩者都被具體程式碼路徑推翻。)
+
+  | 修法 | 擋住 | **擋不住** |
+  |---|---|---|
+  | **A** 肯定測試 | 撞到非 subagent 的本機 handler | 撞到錯的 subagent / 同一 subagent 的別的 MIB root |
+  | **C** 推導下限 | 走出自己 MIB root 之外 | 同一 MIB 內 ISS 不服務的欄位 |
+  | **B** `!delegated` + 錯誤檢查 | **同步**回錯(含 `myvoid == NULL`) | **非同步**回 noSuchObject |
+
+  ### A. 把否定測試換成肯定測試
+
+  `mox_snmp_reg_is_local()` 刪除,改為 `mox_snmp_reg_is_agentx()`:走 handler chain
+  比對 `h->access_method == agentx_master_handler`。
+  依據:`agent/mibgroup/agentx/master_admin.c:223` 用 `agentx_master_handler` 建立每個
+  subagent subtree 的 registration,`:232` 把該 subagent 的 `netsnmp_session *`
+  掛在 `handler->myvoid`。
+  handler 注入不會破壞比對:`netsnmp_inject_handler_before()` 是前插,
+  `inject_handler_into_subtree()` 插的是複本,都不動原節點的 `access_method`;
+  走整條 chain 是因為 `MIB_HANDLER_AUTO_NEXT` 包裝會讓目標節點不在第一個位置。
+
+  **兩個呼叫點都換**,不只推導那一個:
+
+  - `mox_snmp_probe_derive()` 的接受條件(原 ADR 設計指定的那一處)
+  - `mox_snmp_forward_get_to_iss()` 轉發前的守門(**本 ADR 追加**)
+
+  追加的理由:後者才是真正的 chokepoint。顯式 `probe=<oid>`(ADR-0031 的來源 1)
+  **不經過推導**,只修推導擋不住它。失敗模式仍是 `return -1` 退回本地讀取。
+
+  **不快取 `myvoid`。** 斷線時 `close_agentx_session()`(`master_admin.c:124`)會
+  `unregister_mibs_by_session()` 真的摘掉 subtree,但 net-snmp 自己在 `master.c:458`
+  仍檢查 `if (!ax_session)`。每次重新解析。
+  現有 `gAgentXDerived[]` 快取的是 **OID** 不是指標,那是安全的,維持原設計。
+
+  ### B. `!delegated` + 錯誤狀態檢查(必要,不是縱深防禦)
+
+  判別依據:AgentX master 送出請求時呼叫
+  `netsnmp_handler_mark_requests_as_delegated(..., REQUEST_IS_DELEGATED)`
+  (`master.c:238,280`),回應回來才清掉(`:355,399,420`)。所以
+  `netsnmp_call_handlers()` **返回的當下**:
+
+  | `request->delegated` | 意義 | 可否檢查 varbind |
+  |---|---|---|
+  | 已設定 | 真的走了 AgentX,答案稍後才到 | **不能** —— 這是 2026-08-12 撤回的正當範圍 |
+  | 仍是 0 | **同步答完 = 本機 handler 或失敗的 master 答的** | **可以,答案已經在裡面** |
+
+  A 擋不住的具體路徑(`master.c:443` `agentx_master_handler`):
+
+  ```c
+  :448  netsnmp_session *ax_session = (netsnmp_session *) handler->myvoid;
+  :458  if (!ax_session) {
+  :459      netsnmp_set_request_error(reqinfo, requests, SNMP_ERR_GENERR);
+  :460      return SNMP_ERR_NOERROR;      /* 同步返回,delegated 從未設定 */
+        }
+  ```
+  這是**貨真價實的 AgentX registration**(A 會放行),但 session 為 NULL 時同步設錯誤返回。
+
+  判定條件(不能只看 `NOSUCHOBJECT` 型別 —— 上面那條走的是 `SNMP_ERR_GENERR`,
+  **未必**改 varbind type):
+
+  ```
+  delegated == REQUEST_IS_NOT_DELEGATED  且
+  !( status == SNMP_ERR_NOERROR 且 type ∉ {ASN_NULL, NOSUCHOBJECT, NOSUCHINSTANCE, ENDOFMIBVIEW} )
+  ```
+
+  **退回本地前必須還原失敗轉發留下的狀態**,否則本地讀到的正確值會被既有 error-status 蓋掉
+  (「值對了但整個 PDU 仍回錯」)。`_request_set_error()`(`agent/snmp_agent.c:3967-4030`)
+  實際動四個欄位:
+
+  ```
+  request->processed  = 1;                     /* ← 設計階段沒預期到的那一個 */
+  request->delegated  = REQUEST_IS_NOT_DELEGATED;
+  request->status     = error_value;           /* GENERR 走這條 */
+  request->requestvb->type = <exception>;      /* 只有例外值那三個會動 type */
+  ```
+
+  實作**不猜哪個要清**:呼叫前快照 `processed` / `status` / `requestvb->type`,
+  判定失敗時三個一起還原。這比逐欄清除更耐得住 net-snmp 版本變動。
+
+  ### C. 推導下限 = 該 group 自己的 OID root
+
+  `mox_snmp_probe_derive()` 的 `len >= 3` 改為 `len >= floor_len`,
+  floor = 該 list 前綴底下**所有** entry 的最長共同 OID 前綴,註冊期累加一次。
+  累加點在 `mox_snmp_init_entry()` 的委派分支**之前** —— 被委派掉的 entry 也必須算進 root,
+  否則 root 會被算得太深。沒有 root 紀錄時 fallback 回 `3`,行為與舊碼相同。
+
+  **C 不可省。** A 只保證「目標是某個 subagent」,不保證是**對的**那個。走太高可能撞到
+  另一個 subagent 或同一 subagent 的另一個 MIB root —— 那時請求**真的走 AgentX**、
+  `delegated` **會**被設定、**B 不觸發**,noSuchObject 非同步回來就靜默掉值。
+
+Alternatives Considered:
+  - **只做 A。** 被 `master.c:458` 的 `myvoid == NULL` 路徑推翻:那是真的 AgentX
+    registration,A 會放行,同步回 GENERR,舊碼照樣 `return 0`。
+    **只做 A 會做出一個「看起來修好了、但仍然靜默掉值」的修法。**
+  - **丟掉 C(推導下限)。** 被「撞到錯的 subagent」推翻:該情況下 `delegated` 會被設定,
+    B 的檢查依設計不觸發(且不能觸發 —— 那時 varbind 還沒填)。A 與 B 都不擋。
+  - **整個放棄 runtime 檢查,安全網只留在驗收階段**(2026-08-12 的立場,見 ADR-0031 周邊)。
+    理由是 AgentX 非同步、回應階段沒有可用掛鉤點 —— `agentx_got_response()`
+    (`master.c:375-425`)直接填 varbind,**不會重新進入 in-master handler**。
+    該理由對非同步那一半仍然成立,但**範圍過寬**:同步那一半救得回來,而那正是掉值的那一半。
+  - **在 `agentx_owned.list` 為每個前綴明寫 `probe=<oid>`,不做推導。**
+    `probe=` 保留(ADR-0031 來源 1,優先序最高),但它不能取代這三道防線 ——
+    寫錯的 `probe=` 走的正是 `forward_get_to_iss()` 這條,所以 A 的第二個呼叫點才要追加。
+  - **快取 subagent 的 `netsnmp_session *`。** 否決:斷線重連後是懸空指標,
+    net-snmp 自己每次都重新解析。省下的只是一次 chain 走訪。
+  - **改 net-snmp 本體加 per-request 回應 callback**,把非同步那一半也納入。
+    否決:成本遠高於收益,且會讓這棵樹偏離 upstream 更多。
+
+Consequences:
+  - **`+getfwd` 對新前綴從「可能靜默掉整支 MIB」變成「可能沒有加速」** ——
+    但只在三道防線涵蓋的範圍內。殘餘風險見下。
+  - **每次轉發多付**:一次 handler chain 走訪(A)+ 三個欄位的快照與比較(B)。
+    都是暫存器等級,不涉 syscall。註冊期多付一次最長共同前綴計算(C)。
+  - **靜態記憶體 +約 16 KB**:`gAgentXRoot[32][IES_MAX_OID]` + `gAgentXRootLen[32]`。
+    ⚠️ **成本高於原設計預估的「一個 int」** —— 要算最長共同前綴就必須留一份參考 OID,
+    只有長度是算不出來的。量級與既有 `gAgentXDerived[]` 相同。
+  - **`libnetsnmpmibs.so` 現在引用 `libnetsnmpagent.so` 的 `agentx_master_handler`。**
+    已驗證不新增連結相依:該 `.so` 的 NEEDED 早已含 `libnetsnmpagent.so.40`,
+    且已有 49 個未定義 `netsnmp_*` 符號從那裡解析;`agentx_master_handler` 是其匯出動態符號。
+    ⚠️ **只驗了本 build(MDS-G4000-L3-4XGS)。** 沒有編入 AgentX master mibgroup 的機種組態
+    會在**連結期**失敗(不是執行期降級)。EDS-G4100 移植(`snmp-plan-E-edsg4000`)需自行確認。
+
+  ### 🔴 C 的已知缺口:跨多個 MIB root 的 group,LCP 會塌陷(`snmp-plan-E trace 3` 提出)
+
+  floor 是「該 list 前綴底下所有 entry 的最長共同前綴」。若一個前綴的 entry 分佈在
+  **兩個不相鄰的 MIB root**,LCP 會塌到兩者的共同祖先,**C 的保護對該 group 形同虛設,而且是靜默的**。
+
+  ```
+  fscfadb/ifMainTable/       → .1.3.6.1.4.1.8691.603.1.2.…
+  fscfadb/ifSetMgmtVlanList  → .1.3.6.1.4.1.8691.603.2.3.…
+  LCP = .1.3.6.1.4.1.8691.603  (len 9)   ← floor 幾乎回到「整個 Moxa 私有樹裡亂走」
+  ```
+  現有的 `ifmibdb/` 也是同一形狀(ifTable `.1.3.6.1.2.1.2.2` vs ifXTable `.1.3.6.1.2.1.31`,
+  LCP 塌到 mib-2 `.1.3.6.1.2.1`,len 6),只是它有被委派的 RO entry、從不走推導,所以不受影響。
+
+  **不加啟發式守衛,這是刻意的決定。** 實測過的判準「LCP >= 最短 entry 長度 − 1」會把
+  `mxqosdb/`(LCP 11 = `.603.2.9`+1)、`mxportdb/`(LCP 10 = `.603.1.1`,mxPort 的 MIB root)、
+  `mxrstpdb/`(LCP 10 = `.603.3.2`,mxRstp 的 MIB root)、`stdethdb/`(LCP 8 = `.10.7`,dot3 的 root)
+  **全部誤判成塌陷** —— 它們的 LCP 完全正確,只是 group 內同時有 scalar 與 table、深度不一。
+  **「LCP 落在正確的 MIB root」與「LCP 塌到共同祖先」在語法上長得一樣**,沒有便宜的區分方式。
+  加一個會誤傷四個現行前綴的守衛,比留一個已知且寫明的缺口糟。
+  (另一個提案「把 floor trace 出來讓塌陷可見」也未採用:`MOX_GETFWD_TRACE` 出貨預設編譯掉,
+  trace-only 的可見性在現場等於零。)
+
+  → **規則:entry 橫跨一個以上 MIB root 的前綴,C 的保護不適用。**
+  這種前綴要列進 `agentx_owned.list` 之前,必須改用顯式 `probe=<oid>`,或先確認塌陷後的
+  floor 之上沒有其他 subagent 註冊。**不要假設 C 會接住它。**
+
+  ### 🔴 三者都補不掉的那一格(明寫,不要再讓宣稱比實際強)
+
+  **轉給對的 subagent、但它不服務那個 OID → 非同步回 noSuchObject → 值靜默消失。**
+
+  這一格**沒有任何 runtime 機制擋得住**:請求已離開 handler chain,asp 已在
+  `agent_delegated_list` 上,填值發生在 `agentx_got_response()` 裡,in-master handler
+  不會被重新進入。唯一的防線是**流程**:
+
+  1. **事前**:確認 ISS 真的**服務**(不只在 `*db.h` 宣告)該段 OID ——
+     `iss_build == 1` 是假陽性,mxstcldb / mxrlpsdb / mxlldp 三個都宣告 1 而執行期 ISS 都沒服務。
+  2. **事後**:對 oracle 做完整性 gate(比 MIB 欄位,不比 varbind 數)。
+
+  → **加任何新前綴進 `agentx_owned.list` 都必須跑完這兩步。這是規則,不是建議。**
+
+Constraints / Assumptions:
+  - 假設 AgentX subagent 的 registration 一定帶 `agentx_master_handler` 作為
+    `access_method`。已從 `master_admin.c:223` 確認,適用於 net-snmp 5.9.3。
+    upstream 版本升級時要重驗。
+  - 假設 `mox_snmp_init_entry()` 是唯一會貢獻 group root 的註冊路徑。
+    `moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry()` 合成的 index entry
+    不經過它,但那些 entry 落在同一張表內、不會讓 root 變淺,所以不影響下限的正確性。
+  - **本 ADR 的 Decision 尚未在 DUT 上驗證。** 事前寫下的驗收標準:
+    ```
+    mxlldp/    +getfwd  →  25 vb / 5 欄保住,線路無轉發
+    mxstcldb/  +getfwd  →  36 vb / 3 欄,線路有轉發(不得回歸)
+    mxrlpsdb/  +getfwd  →  26 vb / 4 欄,線路有轉發
+    list 上既有 5 行     →  完整性不變(A 的第二個呼叫點是新增的風險點)
+    其中 mxqosdb/       →  ★ 必測,理由見下,原本的「四個前綴」漏了它
+    ```
+    靜態核對(**推論,不取代實驗**):mxstcldb root len = 13、mxrlpsdb = 11、mxlldp = 11;
+    前兩者舊碼的推導迴圈由深往淺取第一個命中,本來就會停在同一層,所以 C 對它們應是 no-op。
+
+  - 🔴 **註冊優先序由 `namelen` 決定,不是 `priority`** —— 執行期讀數,
+    2026-08-14。鏈的排序是**註冊 OID 長度遞減優先,同長度才比 priority 遞增**。
+    唯一真正的雙註冊案例 trustedIp 的讀數:
+    ```
+    [d=0] namelen=14 prio=127  in-master "trustedAccess/trustedIp/"   ← 贏
+    [d=1] namelen=12 prio=200  framework IterTable
+    [d=2] namelen=1  prio=0    net-snmp 的 .1 null
+    ```
+    in-master 贏在 **14 > 12**,priority 完全沒有參與。
+    先前紀錄(memory / ADR-0003 週邊)寫的是「framework 200 輸給 in-master 127,
+    小的贏」—— **結果對、機制錯**。
+    ⚠️ **實務後果:想換服務者而去調 priority 是無效修法。**
+    另有一個尚未觸發的隱患:framework 的 `register_instance` 註冊在完整含 `.0` 的
+    OID,若某個 in-master scalar 註冊得比它短,framework 會變成鏈頭並悄悄搶走服務。
+    `MoxaAgentX_RegisterHandler` 已刻意讓 namelen 對齊來避開這件事,
+    `register_instance` 沒有 —— 目前無對手所以沒事。
+
+  - **`mxqosdb/` 的 floor 疑慮已由讀數解除**:`netsnmp_subtree_find(.603.2.9.1)`
+    (len 11)回傳的**鏈頭就是 ISS**(agentx=1)。所以推導在 len 11 即命中,
+    floor=11 對 `mxqosdb/` 是 no-op,不會失去轉發。
+    `agentx_owned.list` 註解宣稱的「reaching ISS's mxQos root `.603.2.9`」(len 10)
+    **不精確** —— 實際命中在 len 11。仍需 DUT 驗收確認端到端行為。
+
+  - 🔴 **`mxqosdb/` 是 C 唯一有機會弄壞的既有前綴,驗收標準原本漏掉它。**
+    list 上五行裡,只有 `mxqosdb/`(全 RW + `+nodelegate`)沒有被委派的 RO entry,
+    因此**只有它走推導**;其餘四行走候選池(來源 2),完全不碰 `floor_len`。
+    實測 `mxqosdb/` 的 29 個 entry LCP = **11**(`.1.3.6.1.4.1.8691.603.2.9.1`),
+    但 `agentx_owned.list` 的註解宣稱推導「reaching ISS's mxQos root `.603.2.9`」(len **10**)。
+    若註解為真,floor = 11 會讓推導**永遠搆不到 10**,`mxqosdb/` 失去轉發(退回本地,不掉值)。
+    若實際命中在 11(`.603.2.9.1` 落在 ISS 註冊的 root 內就會如此),則 C 對它是 no-op。
+    **靜態分不出來,必須實測。**
+
+  - **既有四行(`ifmibdb/` `stdethdb/` `mxportdb/` `mxrstpdb/`)對 A 的新呼叫點是安全的**,
+    理由不只是「ADR-0030 看到封包」:它們走的候選池 probe 就是「被跳過本地註冊、交給 ISS 的
+    那些 entry 的 OID」,依定義落在 ISS 的 AgentX registration 內,肯定測試必然通過。
+    這是可以事前寫下的預期,不只是「會實測」。
+  - ⚠️ `mxlldp` 的 `~.1.4.1.3` 只有 10 列(缺埠 3、4)—— **mainline 就是如此**,
+    不是搬遷造成的,做完整性比對時不要誤判成回歸。
+
+Related Files / Modules:
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c`
+    - `mox_snmp_reg_is_agentx()`(取代 `mox_snmp_reg_is_local()`)
+    - `mox_snmp_root_note_entry()` / `gAgentXRoot[]` / `gAgentXRootLen[]`
+    - `mox_snmp_probe_derive()`(下限 `floor_len`)
+    - `mox_snmp_request_has_answer()`
+    - `mox_snmp_forward_get_to_iss()`(肯定測試 + 快照/還原 + `!delegated` 判定)
+    - `mox_snmp_init_entry()`(root 累加點,在委派分支之前)
+  - `buildroot/dl/3rdparty_net_snmp/net-snmp-5.9.3/agent/mibgroup/agentx/master.h`(新增的 include)
+  - `buildroot/dl/3rdparty_net_snmp/net-snmp-5.9.3/agent/mibgroup/agentx/master.c:443-460`
+  - `buildroot/dl/3rdparty_net_snmp/net-snmp-5.9.3/agent/mibgroup/agentx/master_admin.c:124,223,232`
+  - `buildroot/dl/3rdparty_net_snmp/net-snmp-5.9.3/agent/snmp_agent.c:3967-4030`
+  - `buildroot/dl/plugin_moxa_snmp/app/script/agentx_owned.list`(5 行,未含 mxlldp/)
+
+Related ADRs:
+  - **ADR-0031** —— 本 ADR 修正其 §② 的宣稱;三種 probe 來源與 `+nodelegate` 維持有效。
+  - **ADR-0030** —— 四個既有前綴確實轉發的封包證據,是本 ADR「不得回歸」驗收的基準。
+  - **ADR-0025** —— 已由 ADR-0030 推翻;其「靜默 no-op」的症狀描述與本 ADR 的故障形狀相同,
+    是同一類錯誤的早期樣本。
+  - **ADR-0032** —— mxQos 的 GETNEXT 邊界缺陷。該缺陷會讓被擋住的欄位落進量測盲區,
+    做本 ADR 的完整性比對時必須**主動列出**那些欄位,不能靠 walk 差異抓。

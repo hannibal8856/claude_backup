@@ -1,0 +1,2040 @@
+/*****************************************************************************
+ * $Id: snxmain.c,v 1.5 2015/04/28 12:35:03 siva Exp $
+ *
+ * Description: This file contains routines for AgentX main module. 
+ ****************************************************************************/
+#include "snxinc.h"
+#include "snxglob.h"
+#include "snprxtrn.h"
+#include "snmptrap.h"
+#include "utilrand.h"
+extern tSnmpAgentxOidType TempEndId;
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainAgentxProtoInit
+ *                                                                          
+ *    DESCRIPTION      :  This function initilizes SNMP Agentx SubAgent.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxMainProtoInit (VOID)
+{
+    /* Create Memory Buddy for storing the variable requests and responses */
+    if ((gAgtxGlobalInfo.i4BuddyId =
+         MemBuddyCreate (SNX_MAX_VAR_BLOCK_SIZE, SNX_MIN_VAR_BLOCK_SIZE,
+                         SNX_MAX_VAR_BLOCKS, BUDDY_CONT_BUF)) == BUDDY_FAILURE)
+    {
+        SNMPTrace ("Buddy creation for SNMP variable blocks failed \n");
+        return SNMP_FAILURE;
+    }
+
+    /* Do the initialization of globals */
+    if (SnxUtlAllocOctetString (&gAgtxGlobalInfo.MasterIpAddr) == NULL)
+    {
+        SNMPTrace ("Buddy Allocation for Master IP failed\n");
+        MemBuddyDestroy ((UINT1) gAgtxGlobalInfo.i4BuddyId);
+        return SNMP_FAILURE;
+    }
+    /* Do the initialization of globals */
+    if (SnxUtlAllocOctetString (&gAgtxGlobalInfo.ContextName) == NULL)
+    {
+        SNMPTrace ("Buddy Allocation for Context Name failed\n");
+        SnxUtlFreeOctetString (&gAgtxGlobalInfo.MasterIpAddr, OSIX_FALSE);
+        MemBuddyDestroy ((UINT1) gAgtxGlobalInfo.i4BuddyId);
+        return SNMP_FAILURE;
+    }
+    /* Create the TimerList for SNMP agentx-subagent */
+    if (TmrCreateTimerList ((const UINT1 *) SNMP_TASK_NAME, SNX_TMR_EXP_EVT,
+                            NULL, &gAgtxGlobalInfo.SnxTmrListId) != TMR_SUCCESS)
+    {
+        SNMPTrace ("Creation of 1 sec TimerList for SNMP Agent failed \n");
+        SnxUtlFreeOctetString (&gAgtxGlobalInfo.MasterIpAddr, OSIX_FALSE);
+        SnxUtlFreeOctetString (&gAgtxGlobalInfo.ContextName, OSIX_FALSE);
+        MemBuddyDestroy ((UINT1) gAgtxGlobalInfo.i4BuddyId);
+        return SNMP_FAILURE;
+    }
+    gAgtxGlobalInfo.i4SockId = -1;
+    gAgtxGlobalInfo.u1TDomain = SNX_TDOMAIN_TCP;
+    gAgtxGlobalInfo.u2PortNo = SNX_DEFAULT_MASTER_PORT;
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainAgentxEnable
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the enabling of SNMP Agentx
+ *                        SubAgent.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxMainAgentxEnable ()
+{
+    printf("OOO!! SnxMainAgentxEnable\n");
+    if (SnxTransInit () == SNMP_FAILURE)
+    {
+        SNMPTrace ("Initializing transport mechanism failed\n");
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainAgentxDisable
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the disabling of SNMP Agentx
+ *                        SubAgent.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxMainAgentxDisable ()
+{
+    /* If valid agentx Session is available,Send
+     * Close PDU to close it */
+    if (gAgtxGlobalInfo.i4SessionId != 0)
+    {
+        if (SnxMainCloseSession () == SNMP_FAILURE)
+        {
+            SNMPTrace ("Closing the session failed\n");
+            return SNMP_FAILURE;
+        }
+    }
+    /* Stop the timer for sending Ping Pdu */
+    TmrStop (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr);
+    if (gAgtxGlobalInfo.i4SockId != -1)
+    {
+        if (SnxTransDeInit () == SNMP_FAILURE)
+        {
+            SNMPTrace ("De-Initializing transport mechanism failed\n");
+            return SNMP_FAILURE;
+        }
+    }
+    MEMSET (&gAgtxStats, 0, sizeof (tSnmpAgentxStats));
+    MEMSET (gAgtxGlobalInfo.ContextName.pu1_OctetList, 0,
+            gAgtxGlobalInfo.ContextName.i4_Length);
+    gAgtxGlobalInfo.ContextName.i4_Length = 0;
+    gi4SnmpAgentxSubAgtStatus = SNMP_AGENTX_DISABLE;
+    /* Delete the Agentx module semaphore */
+    OsixDeleteSem (SELF, SNX_PROTO_SEMAPHORE);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainRcvdAgtxPacketEvent
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the agentx packet reception
+ *                        event.
+ *
+ *    INPUT            : None
+ *                                                                          
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : None 
+ ****************************************************************************/
+VOID
+SnxMainRcvdAgtxPacketEvent ()
+{
+    UINT1              *pu1RcvBuf = NULL;
+    UINT4               u4PktLen = 0;
+
+    pu1RcvBuf = MemAllocMemBlk (gSnmpDataPoolId);
+    if (pu1RcvBuf == NULL)
+    {
+        return;
+    }
+    MEMSET (pu1RcvBuf, 0, SNX_MAX_MTU);
+    /* Receive the packet based on the trasport mechanism */
+    if (SnxTransRcvPacket (pu1RcvBuf, &u4PktLen) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Receiving Agentx Packet failed\n");
+        MemReleaseMemBlock (gSnmpDataPoolId, pu1RcvBuf);
+        return;
+    }
+    /* Process the received packet */
+    if (SnxMainProcessRcvdPkt (pu1RcvBuf, u4PktLen) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Processing received Agentx Packet failed\n");
+    }
+    MemReleaseMemBlock (gSnmpDataPoolId, pu1RcvBuf);
+    return;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainProcessRcvdPkt
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the received agentx PDU and
+ *                        generate the appropriate response.
+ *                        
+ *    INPUT            :  pu1RcvBuf - Received Agentx packet
+ *                        u4PktLen  - Length of the Agentx Packet
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessRcvdPkt (UINT1 *pu1RcvBuf, UINT4 u4PktLen)
+{
+    tSnmpAgentxPdu      AgentxPdu;
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    gAgtxStats.u4InPkts++;
+
+    do
+    {
+        MEMSET (&AgentxPdu, 0, sizeof (tSnmpAgentxPdu));
+
+        i4RetVal = SnxCodeDecodePacket (pu1RcvBuf, (INT4) u4PktLen, &AgentxPdu);
+
+        if (i4RetVal == SNMP_FAILURE)
+        {
+            SNMPTrace ("Decoding of Agentx Packet failed\n");
+            return SNMP_FAILURE;
+        }
+        if (i4RetVal == SNX_PARSE_ERR)
+        {
+            SNMPTrace ("Unable to parse PDU information. Packet dropped\n");
+            SnxMainGenerateErrResPdu (&AgentxPdu, SNX_PARSE_ERR);
+            return SNMP_FAILURE;
+        }
+        if (i4RetVal == SNX_MUL_REQ_PKT)
+        {
+            pu1RcvBuf =
+                pu1RcvBuf + AgentxPdu.u4PayLoadLen + SNX_AGENTX_PDU_HDR_LEN;
+            u4PktLen =
+                u4PktLen - AgentxPdu.u4PayLoadLen - SNX_AGENTX_PDU_HDR_LEN;
+        }
+
+        /* Processes the Agentx PDU and takes care of sending response
+         * PDU */
+        if (SnxMainPduProcess (&AgentxPdu) == SNMP_FAILURE)
+        {
+            SNMPTrace ("Processing the Agentx PDU failed\n");
+            SnxMainFreePdu (&AgentxPdu);
+            return SNMP_FAILURE;
+        }
+        /* Free the PDU */
+        SnxMainFreePdu (&AgentxPdu);
+
+    }
+    while (i4RetVal == SNX_MUL_REQ_PKT);
+
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainPduProcess
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the received agentx PDU
+ *                        and update the PDU with response pdu info if required. 
+ *    INPUT            :  pAgentxPdu -Received PDU information
+ *                                                                          
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainPduProcess (tSnmpAgentxPdu * pAgentxPdu)
+{
+    UINT1               u1MgmtPdu = OSIX_FALSE;
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    switch (pAgentxPdu->u1PduType)
+    {
+        case SNX_CLOSE_PDU:
+            if (pAgentxPdu->i4SessionId != gAgtxGlobalInfo.i4SessionId)
+            {
+                SNMPTrace ("Close PDU with invalid Session-Id received\n");
+                SnxMainGenerateErrResPdu (pAgentxPdu, SNX_NOT_OPEN_ERR);
+                break;
+            }
+            i4RetVal = SnxMainProcessClosePdu (pAgentxPdu);
+            gAgtxStats.u4ClosePduRcvd++;
+            break;
+
+        case SNX_GET_PDU:
+            gAgtxStats.u4GetPduRcvd++;
+            u1MgmtPdu = OSIX_TRUE;
+            break;
+
+        case SNX_GETNEXT_PDU:
+            gAgtxStats.u4GetNextPduRcvd++;
+            u1MgmtPdu = OSIX_TRUE;
+            break;
+
+        case SNX_GETBULK_PDU:
+            gAgtxStats.u4GetBulkPduRcvd++;
+            u1MgmtPdu = OSIX_TRUE;
+            break;
+
+        case SNX_TESTSET_PDU:
+            gAgtxStats.u4TestSetPduRcvd++;
+            u1MgmtPdu = OSIX_TRUE;
+            break;
+
+        case SNX_COMMITSET_PDU:
+            i4RetVal = SnxMainProcessCommitPdu (pAgentxPdu);
+            gAgtxStats.u4CommitSetPduRcvd++;
+            break;
+
+        case SNX_CLEANUP_PDU:
+            gAgtxStats.u4CleanupSetPduRcvd++;
+            i4RetVal = SNMP_SUCCESS;
+            break;
+
+        case SNX_UNDOSET_PDU:
+            i4RetVal = SnxMainProcessUndoPdu (pAgentxPdu);
+            gAgtxStats.u4UndoSetPduRcvd++;
+            break;
+
+        case SNX_RESPONSE_PDU:
+            i4RetVal = SnxMainProcessResponsePdu (pAgentxPdu);
+            gAgtxStats.u4RespPduRcvd++;
+            break;
+        default:
+            break;
+    }
+    if (u1MgmtPdu == OSIX_TRUE)
+    {
+        i4RetVal = SnxMainProcessMgmtPdu (pAgentxPdu);
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainProcessClosePdu
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the revceived CLOSE PDU.  
+ *
+ *    INPUT            :  pClosePdu - Received CLOSE PDU 
+ *                                                                          
+ *    OUTPUT           :  None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessClosePdu (tSnmpAgentxPdu * pClosePdu)
+{
+    INT4                i4RetVal = SNMP_SUCCESS;
+
+    /* Reset the session ID */
+    gAgtxGlobalInfo.i4SessionId = 0;
+
+    /* If sending entity is not going for shutdown, try to open the session */
+    if (pClosePdu->u1Reason != SNX_REASON_SHUTDOWN)
+    {
+        i4RetVal = SnxMainOpenSession ();
+    }
+    else
+    {
+        /* Stop the timer for sending Ping Pdu */
+        TmrStop (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr);
+
+        /* We will try to establish the session after some time */
+        if (TmrStart (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr,
+                      SNX_OPEN_TIMER, SNX_OPEN_TIMEOUT * 3, 0) != TMR_SUCCESS)
+        {
+            SNMPTrace ("Starting the Open PDU Timer failed\n");
+            i4RetVal = SNMP_FAILURE;
+        }
+    }
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainProcessUndoPdu
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the revceived UNDO PDU.  
+ *
+ *    INPUT            :  pUndoPdu - Received UNDO PDU 
+ *                                                                          
+ *    OUTPUT           :  None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessUndoPdu (tSnmpAgentxPdu * pUndoPdu)
+{
+    /* We dont support Undo Process .Just indicate that via
+     * a error. */
+    pUndoPdu->u1PduType = SNX_RESPONSE_PDU;
+    pUndoPdu->u4SysUpTime = gSnmpSystem.u4SysUpTime;
+    pUndoPdu->u2Error = SNMP_ERR_UNDO_FAILED;
+    pUndoPdu->u2ErrIndex = 1;
+    pUndoPdu->u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE * 2;
+
+    if (SnxMainEncodeandTxPacket (pUndoPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for UNDO PDU failed\n");
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainProcessCommitPdu
+ *                                                                          
+ *    DESCRIPTION      : This function processes the revceived COMMIT SET
+ *                       PDU.  
+ *
+ *    INPUT            : pCommitPdu - Received COMMIT SET PDU 
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessCommitPdu (tSnmpAgentxPdu * pCommitPdu)
+{
+    /* We dont process Commit Set PDU. */
+    pCommitPdu->u1PduType = SNX_RESPONSE_PDU;
+    pCommitPdu->u4SysUpTime = gSnmpSystem.u4SysUpTime;
+    pCommitPdu->u2Error = SNX_NO_ERR;
+    pCommitPdu->u2ErrIndex = 0;
+    pCommitPdu->u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE * 2;
+
+    if (SnxMainEncodeandTxPacket (pCommitPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for COMMIT SET PDU failed\n");
+        return SNMP_FAILURE;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainGenerateErrResPdu
+ *                                                                          
+ *    DESCRIPTION      :  This function processes the management PDU received
+ *                        with parse errors 
+ *    INPUT            :  pMgmtPdu - Received PDU information 
+ *                        u2Error  - Error code
+ *                                                                          
+ *    OUTPUT           :  None
+ *                                                                          
+ *    RETURNS          : None
+ ****************************************************************************/
+VOID
+SnxMainGenerateErrResPdu (tSnmpAgentxPdu * pMgmtPdu, UINT2 u2Error)
+{
+    tSnmpAgentxPdu      ResPdu;
+
+    gAgtxStats.u4ParseDrops++;
+
+    MEMSET (&ResPdu, 0, sizeof (tSnmpAgentxPdu));
+    /* Generate Parse Error Response PDU */
+    MEMCPY (&ResPdu, pMgmtPdu, SNX_AGENTX_PDU_HDR_LEN);
+    ResPdu.u4SysUpTime = gSnmpSystem.u4SysUpTime;
+    ResPdu.u1PduType = SNX_RESPONSE_PDU;
+    ResPdu.u2Error = u2Error;
+    ResPdu.u2ErrIndex = 0;
+    ResPdu.u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE * 2;
+    if (SnxMainEncodeandTxPacket (&ResPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for UNDO PDU failed\n");
+    }
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainProcessResponsePdu
+ *                                                                          
+ *    DESCRIPTION      :  This function process the Response packet received from
+ *                        the master agent.  
+ *
+ *    INPUT            :  pResponsePdu - Received Response PDU 
+ *                                                                          
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessResponsePdu (tSnmpAgentxPdu * pResponsePdu)
+{
+    /* Based on the Packet for which we are waiting for the response
+     * We need to process the Response PDU */
+    switch (gAgtxLastTxedPdu.u1PduType)
+    {
+        case SNX_OPEN_PDU:
+            /* Response is not  for the open PDU we have sent */
+            if (SnxMainValidateRcvResponse (pResponsePdu) != SNMP_SUCCESS)
+            {
+                SNMPTrace ("Processing response for OPEN PDU failed\n");
+                return SNMP_FAILURE;
+            }
+            /* Rescived response for the OPEN PDU we have sent */
+            TmrStop (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr);
+            if (pResponsePdu->u2Error == SNX_NO_ERR)
+            {
+                gAgtxGlobalInfo.i4SessionId = pResponsePdu->i4SessionId;
+                SnxMainRegisterMibs ();
+                SnxMainInitiatePing ();
+            }
+            else
+            {
+                /* Try to establish the session again */
+                if (pResponsePdu->u2Error == SNX_OPEN_FAIL_ERR)
+                {
+                    gAgtxStats.u4OpenFails++;
+                }
+                SnxMainOpenSession ();
+            }
+            break;
+
+        case SNX_PING_PDU:
+        case SNX_REGISTER_PDU:
+        case SNX_UNREGISTER_PDU:
+        case SNX_INDEX_ALLOC_PDU:
+        case SNX_INDEX_DEALLOC_PDU:
+        case SNX_ADD_AGENT_CAPS_PDU:
+        case SNX_REMOVE_AGENT_CAPS_PDU:
+            if (pResponsePdu->u2Error == SNX_NOT_OPEN_ERR)
+            {
+                SNMPTrace ("Session-Not-open Error, Re-Init session\n");
+                gAgtxGlobalInfo.i4SessionId = 0;
+                SnxMainOpenSession ();
+                break;
+            }
+            if (pResponsePdu->u2Error == SNX_NO_ERR)
+            {
+                SNMPTrace ("Received valid response\n");
+            }
+            if (SnxMainValidateRcvResponse (pResponsePdu) == SNMP_SUCCESS)
+            {
+                /* Ping got the response */
+                if (gAgtxLastTxedPdu.u1PduType == SNX_PING_PDU)
+                {
+                    gAgtxGlobalInfo.u1OutStandPing = 0;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainValidateRcvResponse
+ *                                                                          
+ *    DESCRIPTION      :  This function validates the Response packet w.r.t the
+ *                        last transmitted packet
+ *
+ *    INPUT            :  pResponsePdu - Received Response PDU 
+ *                                                                          
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainValidateRcvResponse (tSnmpAgentxPdu * pResponsePdu)
+{
+    INT4                i4RetVal = SNMP_FAILURE;
+
+    if (gAgtxLastTxedPdu.u4PacketId != pResponsePdu->u4PacketId)
+    {
+        SNMPTrace ("Packet-Id mismatches Agentx PDU failed\n");
+        return i4RetVal;
+    }
+    if (gAgtxLastTxedPdu.u4TransactionId != pResponsePdu->u4TransactionId)
+    {
+        SNMPTrace ("Trans-Id mismatches Agentx PDU failed\n");
+        return i4RetVal;
+    }
+    if (gAgtxLastTxedPdu.u1PduType != SNX_OPEN_PDU)
+    {
+        if (pResponsePdu->i4SessionId != gAgtxGlobalInfo.i4SessionId)
+        {
+            SNMPTrace ("Session-Id mismatches in Agentx PDU received\n");
+            return i4RetVal;
+        }
+    }
+    i4RetVal = SNMP_SUCCESS;
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainProcessMgmtPdu
+ *                                                                          
+ *    DESCRIPTION      :  This processes the management PDU such as 
+ *                        GET/GETNEXT/GETBULK and SET PDUs
+ *
+ *    INPUT            :  pMgmtPdu - Received Agentx Mangement PDU
+ *                        
+ *    OUTPUT           : pMgmtPdu  - Response packet for the Mangement PDU
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainProcessMgmtPdu (tSnmpAgentxPdu * pMgmtPdu)
+{
+    tSNMP_NORMAL_PDU    AgentPdu;
+    tSnmpVacmInfo       VacmInfo;
+    tSnmpAgentxPdu      ResPdu;
+    INT4                i4RetVal = SNMP_FAILURE;
+    UINT4               u4IndexOne = 0, u4IndexTwo = 0;
+    tSNMP_OID_TYPE     *pOid = NULL;
+    UINT1               u1Valid = OSIX_FALSE;
+    UINT4               u4NoSubId = 0;
+
+    u4NoSubId =
+        (UINT4) (pMgmtPdu->pSearchRngLst->EndId.u1NoSubId +
+                 SNX_INET_PREFIX_LEN);
+    if (pMgmtPdu->i4SessionId != gAgtxGlobalInfo.i4SessionId)
+    {
+        SNMPTrace ("Mgmt PDU received with invalid Session-Id\n");
+        SnxMainGenerateErrResPdu (pMgmtPdu, SNX_NOT_OPEN_ERR);
+        return i4RetVal;
+    }
+
+    /* Convert the Agentx PDU to agent Process */
+    MEMSET (&AgentPdu, 0, sizeof (tSNMP_NORMAL_PDU));
+    MEMSET (&ResPdu, 0, sizeof (tSnmpAgentxPdu));
+
+    if (SnxCodeConvertAgtxPduToAgentPdu (pMgmtPdu, &AgentPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Agentx PDU to Agent PDU failed\n");
+        return SNMP_FAILURE;
+    }
+
+    /* Fill the default VACM info to invoke SNMP function for management
+     * directly */
+    MEMSET (&VacmInfo, 0, sizeof (tSnmpVacmInfo));
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (MEMCMP
+            (pMgmtPdu->ContextName.pu1_OctetList,
+             gAgtxGlobalInfo.ContextName.pu1_OctetList,
+             gAgtxGlobalInfo.ContextName.i4_Length) != 0)
+        {
+            SNMPMemInit ();
+            return SNMP_FAILURE;
+        }
+    }
+    VacmInfo.pContextName = SnxUtlAllocOctetString (VacmInfo.pContextName);
+    if (VacmInfo.pContextName == NULL)
+    {
+        SNMPTrace ("Allocation for VacmInfo failed\n");
+        SNMPMemInit ();
+        return SNMP_FAILURE;
+    }
+
+    VacmInfo.pUserName = SnxUtlAllocOctetString (VacmInfo.pUserName);
+    if (VacmInfo.pUserName == NULL)
+    {
+        SNMPTrace ("Allocation for VacmInfo failed\n");
+        SnxUtlFreeOctetString (VacmInfo.pContextName, OSIX_TRUE);
+        SNMPMemInit ();
+        return SNMP_FAILURE;
+    }
+    STRCPY (VacmInfo.pUserName->pu1_OctetList, "none");
+    VacmInfo.pUserName->i4_Length = (INT4) STRLEN ("none");
+
+    VacmInfo.u4SecModel = SNMP_SECMODEL_V1;
+    VacmInfo.u4SecLevel = SNMP_NOAUTH_NOPRIV;
+
+    /* Invoke the SNMP agent function to process the management PDU */
+    i4RetVal = SNMPPDUProcess (&AgentPdu, &VacmInfo);
+    SnxUtlFreeOctetString (VacmInfo.pContextName, OSIX_TRUE);
+    SnxUtlFreeOctetString (VacmInfo.pUserName, OSIX_TRUE);
+
+    /* Copy the Received agentx PDU information.Convert agentx PDU */
+    MEMCPY (&ResPdu, pMgmtPdu, SNX_AGENTX_PDU_HDR_LEN);
+    ResPdu.u4SysUpTime = gSnmpSystem.u4SysUpTime;
+    AgentPdu.i2_PduType = SNMP_PDU_TYPE_GET_RESPONSE;
+    if (i4RetVal == SNMP_FAILURE)
+    {
+        /* Fill the error code and eror index */
+        ResPdu.u2Error = (UINT2) AgentPdu.i4_ErrorStatus;
+        ResPdu.u2ErrIndex = (UINT2) AgentPdu.i4_ErrorIndex;
+    }
+    ResPdu.u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE * 2;
+    ResPdu.u1Flags &= (UINT1) (~SNX_NON_DEFAULT_CTXT);
+
+    if (SnxCodeConvertAgentPduToAgtxPdu (&AgentPdu, &ResPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Converting Agent PDU to Agentx PDU failed\n");
+        SnxMainFreePdu (&ResPdu);
+        SNMPMemInit ();
+        return SNMP_FAILURE;
+    }
+
+    pOid = alloc_oid (SNMP_MAX_OID_LENGTH);
+
+    if (pOid == NULL)
+    {
+        SNMPTrace ("Allocation for pOid failed\n");
+        SnxMainFreePdu (&ResPdu);
+        SNMPMemInit ();
+        return SNMP_FAILURE;
+    }
+    pOid->u4_Length = AgentPdu.pVarBindList->pObjName->u4_Length;
+
+    if ((pMgmtPdu->pSearchRngLst->EndId.u1Prefix != 0)
+        && (TempEndId.pu4OidLst != NULL))
+    {
+        pOid->pu4_OidList[0] = 1;
+        pOid->pu4_OidList[1] = 3;
+        pOid->pu4_OidList[2] = 6;
+        pOid->pu4_OidList[3] = 1;
+        pOid->pu4_OidList[4] = pMgmtPdu->pSearchRngLst->EndId.u1Prefix;
+        for (u4IndexOne = SNX_INET_PREFIX_LEN, u4IndexTwo = 0;
+             u4IndexOne < u4NoSubId; u4IndexOne++, u4IndexTwo++)
+        {
+            pOid->pu4_OidList[u4IndexOne] = TempEndId.pu4OidLst[u4IndexTwo];
+            /* Not all indices can be zero */
+            if (TempEndId.pu4OidLst[u4IndexTwo] != 0)
+            {
+                u1Valid = OSIX_TRUE;
+            }
+        }
+    }
+    else
+    {
+        for (u4IndexOne = 0;
+             u4IndexOne < AgentPdu.pVarBindList->pObjName->u4_Length;
+             u4IndexOne++)
+        {
+            pOid->pu4_OidList[u4IndexOne] =
+                AgentPdu.pVarBindList->pObjName->pu4_OidList[u4IndexOne];
+        }
+    }
+
+    i4RetVal =
+        (INT4) OIDCompare (*pOid, *AgentPdu.pVarBindList->pObjName,
+                           &pOid->u4_Length);
+    if (u1Valid == OSIX_TRUE)
+    {
+        if (((pMgmtPdu->pSearchRngLst->EndId.b1Include == 0) &&
+             (i4RetVal != SNMP_GREATER))
+            || ((pMgmtPdu->pSearchRngLst->EndId.b1Include == 1)
+                && (i4RetVal == SNMP_LESSER)))
+        {
+            ResPdu.unPduInfo.pVarBindList->u2Type =
+                SNMP_EXCEPTION_END_OF_MIB_VIEW;
+            ResPdu.u2Error = SNX_NO_ERR;
+            ResPdu.u2ErrIndex = 0;
+        }
+    }
+    free_oid (pOid);
+
+    /* Free the Agent Pdu */
+    SNMPMemInit ();
+    ResPdu.u4PayLoadLen += (UINT4) SnxCodeGetVbLstLen (ResPdu.pAgxVarBindList);
+    if (SnxMainEncodeandTxPacket (&ResPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket failed for MGMT PDU\n");
+        SnxMainFreePdu (&ResPdu);
+        return SNMP_FAILURE;
+    }
+    /* Free the response PDU generated */
+    SnxMainFreePdu (&ResPdu);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainEncodeandTxPacket
+ *                                                                          
+ *    DESCRIPTION      :  This function encodes and transmits the agentx PDU.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+INT4
+SnxMainEncodeandTxPacket (tSnmpAgentxPdu * pAgtxPdu)
+{
+    UINT1              *pu1OutBuf = NULL;
+    UINT4               u4OutLen;
+
+    pu1OutBuf = MemAllocMemBlk (gSnmpDataPoolId);
+    if (pu1OutBuf == NULL)
+    {
+        return SNMP_FAILURE;
+    }
+    MEMSET (pu1OutBuf, 0, SNX_MAX_MTU);
+
+    if (SnxCodeEncodePacket (pAgtxPdu, pu1OutBuf, &u4OutLen) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Encoding the Agentx PDU failed\n");
+        MemReleaseMemBlock (gSnmpDataPoolId, pu1OutBuf);
+        return SNMP_FAILURE;
+    }
+
+    gAgtxStats.u4OutPks++;
+
+    if (SnxTransTxPkt (pu1OutBuf, u4OutLen) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Transmitting Open message failed\n");
+        MemReleaseMemBlock (gSnmpDataPoolId, pu1OutBuf);
+        return SNMP_FAILURE;
+    }
+    MemReleaseMemBlock (gSnmpDataPoolId, pu1OutBuf);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainFreePdu
+ *                                                                          
+ *    DESCRIPTION      :  This function frees the agentx PDU.
+ *
+ *    INPUT            : None
+ * 
+ *    OUTPUT           : None 
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE
+ ****************************************************************************/
+VOID
+SnxMainFreePdu (tSnmpAgentxPdu * pAgxPdu)
+{
+    if (pAgxPdu->u1Flags & SNX_NON_DEFAULT_CTXT)
+    {
+        SnxUtlFreeOctetString (&pAgxPdu->ContextName, OSIX_FALSE);
+    }
+
+    switch (pAgxPdu->u1PduType)
+    {
+        case SNX_GET_PDU:
+        case SNX_GETNEXT_PDU:
+        case SNX_GETBULK_PDU:
+            SnxUtlFreeSrchRngLst (pAgxPdu->pSearchRngLst);
+            break;
+        case SNX_RESPONSE_PDU:
+        case SNX_TESTSET_PDU:
+            SnxUtlFreeVbList (pAgxPdu->pAgxVarBindList);
+            break;
+        default:
+            break;
+    }
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainRegisterMibs
+ *                                           
+ *    DESCRIPTION      :  Registers all the MIBs available with SNMP agent with
+ *                        SNMP Agentx Master Agent
+ *                         
+ *    INPUT            :  None
+ *                        
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainRegisterMibs (VOID)
+{
+    tMibReg            *pMibPtr = gpMibReg;
+    UINT4               au4FirstPropId[] = SNX_PROP_MIBID_1;
+    UINT4               au4SecondPropId[] = SNX_PROP_MIBID_2;
+    UINT4               au4ThirdPropId[] = SNX_PROP_MIBID_3;
+    UINT4               au4SnmpV2Id[] = SNX_SNMPV2_MIB_ID;
+    INT4                i4RetVal = SNMP_FAILURE;
+    tSNMP_OID_TYPE      MibID;
+    UINT4               u4MinOidLen = SNMP_ZERO;
+    UINT1               IsFirstPropMibReg = OSIX_FALSE;
+    UINT1               IsSecondPropMibReg = OSIX_FALSE;
+    UINT1               IsThirdPropMibReg = OSIX_FALSE;
+
+    tSNMP_OID_TYPE     *pOid = NULL;
+
+    pOid = alloc_oid (MAX_OID_LENGTH);
+    if (pOid == NULL)
+    {
+        SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+        return SNMP_FAILURE;
+    }
+    /*.The sub-agent does NOT support the capability to distribute 
+     * a MIB across multiple sub-agents. So we register MIB II and
+     * proprietory mib region. */
+    MEMSET (&MibID, 0, sizeof (tSNMP_OID_TYPE));
+    /* Since MIB tree is sorted lexographically, traverse it
+     * find the root of the MIBs and then register */
+    for (; pMibPtr != NULL; pMibPtr = pMibPtr->pNextMib)
+    {
+        /* No need to register MIBs under SNMPv2 Tree */
+        if ((pMibPtr->pMibID->u4_Length >= SNX_SNMPV2_MIB_ID_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4SnmpV2Id,
+                     SNX_SNMPV2_MIB_ID_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            SNMPTrace ("Not Registering SNMPV2 MIB tree\n");
+            continue;
+        }
+        if ((IsFirstPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_1_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4FirstPropId,
+                     SNX_PROP_MIBID_1_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Register the proprietary tree and neglect other 
+             * MIBs under the proprietary tree */
+            MibID.u4_Length = SNX_PROP_MIBID_1_LEN;
+            MibID.pu4_OidList = au4FirstPropId;
+
+            IsFirstPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_REG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Registration of Proprietary OID-1 fails\n");
+            }
+            continue;
+        }
+
+        if ((IsSecondPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_2_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4SecondPropId,
+                     SNX_PROP_MIBID_2_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Register the next proprietary tree and neglect other
+             * MIBs under the proprietary tree */
+            MibID.u4_Length = SNX_PROP_MIBID_2_LEN;
+            MibID.pu4_OidList = au4SecondPropId;
+
+            IsSecondPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_REG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Registration of Proprietary OID-2 fails\n");
+            }
+            continue;
+        }
+
+        if ((IsThirdPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_3_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4ThirdPropId,
+                     SNX_PROP_MIBID_3_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Register Moxa enterprise tree (.1.3.6.1.4.1.8691) once and
+             * neglect other MIBs under it. */
+            MibID.u4_Length = SNX_PROP_MIBID_3_LEN;
+            MibID.pu4_OidList = au4ThirdPropId;
+
+            IsThirdPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_REG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Registration of Proprietary OID-3 (Moxa) fails\n");
+            }
+            continue;
+        }
+        u4MinOidLen =
+            MibID.u4_Length <
+            pMibPtr->pMibID->u4_Length ? MibID.u4_Length : pMibPtr->pMibID->
+            u4_Length;
+
+        if (u4MinOidLen != SNMP_ZERO)
+        {
+            /* Compare the OIDs, if the root is already registered then
+             * sublevels are not required to be registered */
+            if (MibID.pu4_OidList != NULL)
+            {
+                if (MEMCMP (pMibPtr->pMibID->pu4_OidList, MibID.pu4_OidList,
+                            u4MinOidLen * sizeof (UINT4)) != SNMP_ZERO)
+                {
+                    MibID.u4_Length = pMibPtr->pMibID->u4_Length;
+                    MibID.pu4_OidList = pMibPtr->pMibID->pu4_OidList;
+                }
+                else
+                {
+                    /* This MIB's root is already registered. So move to the next MIB */
+                    continue;
+                }
+            }
+        }
+        else
+        {
+            /* Register MIB in the MIB tree */
+            MibID.u4_Length = pMibPtr->pMibID->u4_Length;
+            MibID.pu4_OidList = pMibPtr->pMibID->pu4_OidList;
+        }
+
+        SNMPRevertEOID (&MibID, pOid);
+        i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                         0, SNX_REG_FLAG,
+                                         (UINT1) ~SNX_INSTANCE_REGISTRATION);
+        if (i4RetVal == SNMP_FAILURE)
+        {
+            SNMPTrace ("Registration of OID fails\n");
+        }
+    }
+
+    free_oid (pOid);
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainUnRegisterMibs
+ *                                                                          
+ *    DESCRIPTION      :  This unregisters the MIBS with the Master Agent 
+ *
+ *    INPUT            :  None
+ *                        
+ *    OUTPUT           :  None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainUnRegisterMibs (VOID)
+{
+    tMibReg            *pMibPtr = gpMibReg;
+    UINT4               au4FirstPropId[] = SNX_PROP_MIBID_1;
+    UINT4               au4SecondPropId[] = SNX_PROP_MIBID_2;
+    UINT4               au4ThirdPropId[] = SNX_PROP_MIBID_3;
+    INT4                i4RetVal = SNMP_FAILURE;
+    tSNMP_OID_TYPE      MibID;
+    UINT4               au4SnmpV2Id[] = SNX_SNMPV2_MIB_ID;
+    UINT4               u4MinOidLen = SNMP_ZERO;
+    UINT1               IsFirstPropMibReg = OSIX_FALSE;
+    UINT1               IsSecondPropMibReg = OSIX_FALSE;
+    UINT1               IsThirdPropMibReg = OSIX_FALSE;
+    tSNMP_OID_TYPE     *pOid = NULL;
+    MEMSET (&MibID, 0, sizeof (tSNMP_OID_TYPE));
+
+    MEMSET (&MibID, 0, sizeof (tSNMP_OID_TYPE));
+
+    for (; pMibPtr != NULL; pMibPtr = pMibPtr->pNextMib)
+    {
+        /* No need to un-register MIBs under SNMPv2 Tree */
+        if ((pMibPtr->pMibID->u4_Length >= SNX_SNMPV2_MIB_ID_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4SnmpV2Id,
+                     SNX_SNMPV2_MIB_ID_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            SNMPTrace ("No need to UnRegister SNMPV2 MIB tree\n");
+            continue;
+        }
+
+        if ((IsFirstPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_1_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4FirstPropId,
+                     SNX_PROP_MIBID_1_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Un-Register the proprietary tree and neglect other 
+             * MIBs under the proprietary tree */
+            MibID.u4_Length = SNX_PROP_MIBID_1_LEN;
+            MibID.pu4_OidList = au4FirstPropId;
+
+            IsFirstPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            if (pOid == NULL)
+            {
+                SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+                return SNMP_FAILURE;
+            }
+
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_UNREG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Un-Registration of Proprietary OID-1 fails\n");
+            }
+            continue;
+        }
+
+        if ((IsSecondPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_2_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4SecondPropId,
+                     SNX_PROP_MIBID_2_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Un-Register the next proprietary tree and neglect other
+             * MIBs under the proprietary tree */
+            MibID.u4_Length = SNX_PROP_MIBID_2_LEN;
+            MibID.pu4_OidList = au4SecondPropId;
+
+            IsSecondPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            if (pOid == NULL)
+            {
+                SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+                return SNMP_FAILURE;
+            }
+
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_UNREG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Un-Registration of Proprietary OID-2 fails\n");
+            }
+            continue;
+        }
+
+        if ((IsThirdPropMibReg == OSIX_FALSE) &&
+            (pMibPtr->pMibID->u4_Length >= SNX_PROP_MIBID_3_LEN) &&
+            (MEMCMP (pMibPtr->pMibID->pu4_OidList, au4ThirdPropId,
+                     SNX_PROP_MIBID_3_LEN * sizeof (UINT4)) == SNMP_ZERO))
+        {
+            /* Un-Register Moxa enterprise tree (.1.3.6.1.4.1.8691) */
+            MibID.u4_Length = SNX_PROP_MIBID_3_LEN;
+            MibID.pu4_OidList = au4ThirdPropId;
+
+            IsThirdPropMibReg = OSIX_TRUE;
+            SNMPRevertEOID (&MibID, pOid);
+            if (pOid == NULL)
+            {
+                SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+                return SNMP_FAILURE;
+            }
+
+            i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                             0, SNX_UNREG_FLAG,
+                                             (UINT1)
+                                             ~SNX_INSTANCE_REGISTRATION);
+            if (i4RetVal == SNMP_FAILURE)
+            {
+                SNMPTrace ("Un-Registration of Proprietary OID-3 (Moxa) fails\n");
+            }
+            continue;
+        }
+        u4MinOidLen =
+            MibID.u4_Length <
+            pMibPtr->pMibID->u4_Length ? MibID.u4_Length : pMibPtr->pMibID->
+            u4_Length;
+
+        if (u4MinOidLen != SNMP_ZERO)
+        {
+            /* Compare the OIDs, if the root is already unregistered then
+             * sublevels are not required to be unregistered */
+            if (MibID.pu4_OidList == NULL)
+            {
+                SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+                return SNMP_FAILURE;
+            }
+
+            if (MEMCMP (pMibPtr->pMibID->pu4_OidList, MibID.pu4_OidList,
+                        u4MinOidLen * sizeof (UINT4)) != SNMP_ZERO)
+            {
+                MibID.u4_Length = pMibPtr->pMibID->u4_Length;
+                MibID.pu4_OidList = pMibPtr->pMibID->pu4_OidList;
+            }
+            else
+            {
+                /* This MIB's root is already unregistered. So move to the next MIB */
+                continue;
+            }
+        }
+        else
+        {
+            /* Un-Register MIB in the MIB tree */
+            MibID.u4_Length = pMibPtr->pMibID->u4_Length;
+            MibID.pu4_OidList = pMibPtr->pMibID->pu4_OidList;
+        }
+
+        SNMPRevertEOID (&MibID, pOid);
+        if (pOid == NULL)
+        {
+            SNMPTrace ("SNMP: Unable to allocate memory for Oids\n");
+            return SNMP_FAILURE;
+        }
+
+        i4RetVal = SnxMainRegOrUnRegOid (pOid, 0,
+                                         0, SNX_UNREG_FLAG,
+                                         (UINT1) ~SNX_INSTANCE_REGISTRATION);
+        if (i4RetVal == SNMP_FAILURE)
+        {
+            SNMPTrace ("Un-Registration of OID fails\n");
+        }
+    }
+
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainAddAgtCaps
+ *                                           
+ *    DESCRIPTION      :  Add all the agentx capablities to Master Agent
+ *                         
+ *    INPUT            :  None
+ *                        
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainAddAgtCaps (VOID)
+{
+    tSNMP_OID_TYPE      CapsOid;
+    INT4                i4RetVal = SNMP_FAILURE;
+    UINT4               u4Index = SNMP_ZERO;
+
+    if (SnxUtlAllocOid (&CapsOid) == NULL)
+    {
+        return i4RetVal;
+    }
+    for (u4Index = SNMP_ZERO; u4Index < MAX_SYSOR_TABLE_ENTRY; u4Index++)
+    {
+        MEMCPY (CapsOid.pu4_OidList, gaSnmpSysorTable[u4Index].au4SysOrId,
+                (gaSnmpSysorTable[u4Index].u4OidLen * sizeof (UINT4)));
+        CapsOid.u4_Length = gaSnmpSysorTable[u4Index].u4OidLen;
+
+        SnxMainAddOrRemoveCaps (&CapsOid,
+                                gaSnmpSysorTable[u4Index].au1SysOrDescr,
+                                SNX_ADDCAP_FLAG);
+
+        if (gaSnmpSysorTable[u4Index].i4Status != SNMP_ACTIVE)
+        {
+            i4RetVal = SNMP_SUCCESS;
+            break;
+        }
+    }
+    SnxUtlFreeOid (&CapsOid, OSIX_FALSE);
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainRmvAgtCaps
+ *                                           
+ *    DESCRIPTION      :  Remove all the agentx capablities added to Master Agent
+ *                         
+ *    INPUT            :  None
+ *                        
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainRmvAgtCaps (VOID)
+{
+    tSNMP_OID_TYPE      CapsOid;
+    INT4                i4RetVal = SNMP_FAILURE;
+    UINT4               u4Index = SNMP_ZERO;
+
+    if (SnxUtlAllocOid (&CapsOid) == NULL)
+    {
+        return i4RetVal;
+    }
+    for (u4Index = SNMP_ZERO; u4Index < MAX_SYSOR_TABLE_ENTRY; u4Index++)
+    {
+        MEMCPY (CapsOid.pu4_OidList, gaSnmpSysorTable[u4Index].au4SysOrId,
+                (gaSnmpSysorTable[u4Index].u4OidLen * sizeof (UINT4)));
+        CapsOid.u4_Length = gaSnmpSysorTable[u4Index].u4OidLen;
+
+        SnxMainAddOrRemoveCaps (&CapsOid,
+                                gaSnmpSysorTable[u4Index].au1SysOrDescr,
+                                SNX_REMCAP_FLAG);
+
+        if (gaSnmpSysorTable[u4Index].i4Status != SNMP_ACTIVE)
+        {
+            i4RetVal = SNMP_SUCCESS;
+            break;
+        }
+    }
+    SnxUtlFreeOid (&CapsOid, OSIX_FALSE);
+    return i4RetVal;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainOpenSession
+ *                                                                          
+ *    DESCRIPTION      :  This initiates the agentx session with the Master 
+ *                        agent.
+ *
+ *    INPUT            : None
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainOpenSession (VOID)
+{
+    tSnmpAgentxPdu      OpenPdu;
+
+    MEMSET (&OpenPdu, 0, sizeof (tSnmpAgentxPdu));
+
+    OpenPdu.u1Version = SNX_AGENTX_VERSION;
+    OpenPdu.u1PduType = SNX_OPEN_PDU;
+    OpenPdu.u1Flags = SnxTransByteOrderFlag ();
+    OpenPdu.u4PacketId = (UINT4) RAND ();
+    OpenPdu.u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE;
+    OpenPdu.u1TimeOut = SNX_MASTER_DISPATCH_TIMEOUT;
+
+    /* Copy the Agentx OID information */
+    if (SnxUtlAllocAgtxOid (&OpenPdu.OidVal) == NULL)
+    {
+        SNMPTrace ("SnxUtlAllocOid failed for Caps failed\n");
+        return SNMP_FAILURE;
+    }
+    if (SnxCodeConvertAgentOidToAgtxOid (gpMibReg->pMibID,
+                                         &OpenPdu.OidVal,
+                                         OSIX_TRUE) == SNMP_FAILURE)
+    {
+        SNMPTrace ("Converting Agent OID to AgentxOid failed\n");
+        SnxUtlFreeAgtxOid (&OpenPdu.OidVal, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    OpenPdu.u4PayLoadLen += (SNX_OID_INFO_SIZE +
+                             (OpenPdu.OidVal.u1NoSubId * sizeof (UINT4)));
+
+    if (SnxUtlAllocOctetString (&OpenPdu.OidDesc) == NULL)
+    {
+        SNMPTrace ("SnxUtlAllocOctetString failed for Reg failed\n");
+        SnxUtlFreeAgtxOid (&OpenPdu.OidVal, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    MEMCPY (OpenPdu.OidDesc.pu1_OctetList, SNX_SUBAGT_DESC,
+            STRLEN (SNX_SUBAGT_DESC));
+    OpenPdu.OidDesc.i4_Length = (INT4) STRLEN (SNX_SUBAGT_DESC);
+    OpenPdu.u4PayLoadLen += (UINT4) OpenPdu.OidDesc.i4_Length + sizeof (UINT4);
+    if ((OpenPdu.OidDesc.i4_Length % SNX_4BYTE_DATALEN) != 0)
+    {
+        OpenPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                         (OpenPdu.OidDesc.i4_Length %
+                                          SNX_4BYTE_DATALEN));
+    }
+
+    if (SnxMainEncodeandTxPacket (&OpenPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Open PDU failed\n");
+        SnxUtlFreeAgtxOid (&OpenPdu.OidVal, OSIX_FALSE);
+        SnxUtlFreeOctetString (&OpenPdu.OidDesc, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    MEMCPY (&gAgtxLastTxedPdu, &OpenPdu, sizeof (tSnmpAgentxPdu));
+
+    if (TmrStart (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr,
+                  SNX_OPEN_TIMER, SNX_OPEN_TIMEOUT, 0) != TMR_SUCCESS)
+    {
+        SNMPTrace ("Starting Open PDU Timer failed\n");
+        SnxUtlFreeAgtxOid (&OpenPdu.OidVal, OSIX_FALSE);
+        SnxUtlFreeOctetString (&OpenPdu.OidDesc, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    SnxUtlFreeAgtxOid (&OpenPdu.OidVal, OSIX_FALSE);
+    SnxUtlFreeOctetString (&OpenPdu.OidDesc, OSIX_FALSE);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainCloseSession
+ *                                                                          
+ *    DESCRIPTION      :  This initate the termination of agentx session.  
+ *
+ *    INPUT            : None
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainCloseSession (VOID)
+{
+    tSnmpAgentxPdu      ClosePdu;
+
+    MEMSET (&ClosePdu, 0, sizeof (tSnmpAgentxPdu));
+    ClosePdu.u1Version = SNX_AGENTX_VERSION;
+    ClosePdu.u1PduType = SNX_CLOSE_PDU;
+    ClosePdu.u1Flags = SnxTransByteOrderFlag ();
+    ClosePdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    ClosePdu.u4PacketId = (UINT4) RAND ();
+    ClosePdu.u4PayLoadLen = SNX_PDU_GEN_INFO_SIZE;
+    ClosePdu.u1Reason = SNX_REASON_SHUTDOWN;
+
+    if (SnxMainEncodeandTxPacket (&ClosePdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Close PDU failed\n");
+        return SNMP_FAILURE;
+    }
+    gAgtxGlobalInfo.i4SessionId = 0;
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    :  SnxMainRegOrUnRegOid
+ *                                                                          
+ *    DESCRIPTION      :  This registers the Specified MIB region with the master
+ *                        Agent. 
+ *    INPUT            :  pOid - MIB Region to be registered
+ *                        u1RangSubId  - Indicates that the range is specified
+ *                        u4UpperBound - UpperBound of the OID
+ *                        u1Flag       - Flag indicates operation is 
+ *                                       register/unregister
+ *                        u1RegFlag   - if the value is INSTANCE_REGISTRATION,
+ *                                      indicates fully qualified instance 
+ *                                      registration.Used only for registration.
+ *    OUTPUT           :  None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ ****************************************************************************/
+INT4
+SnxMainRegOrUnRegOid (tSNMP_OID_TYPE * pOid, UINT1 u1RangSubId,
+                      UINT4 u4UpperBound, UINT1 u1Flag, UINT1 u1RegFlag)
+{
+    tSnmpAgentxPdu      RegisterPdu;
+    tSnmpAgentxOidType  AgentxOid;
+
+    MEMSET (&RegisterPdu, 0, sizeof (tSnmpAgentxPdu));
+    RegisterPdu.u1Version = SNX_AGENTX_VERSION;
+
+    if (u1Flag == SNX_REG_FLAG)
+    {
+        RegisterPdu.u1PduType = SNX_REGISTER_PDU;
+        if (u1RegFlag == SNX_INSTANCE_REGISTRATION)
+        {
+            RegisterPdu.u1Flags = SNX_INSTANCE_REGISTRATION;
+        }
+    }
+    else
+    {
+        RegisterPdu.u1PduType = SNX_UNREGISTER_PDU;
+    }
+    RegisterPdu.u1Flags |= SnxTransByteOrderFlag ();
+    RegisterPdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    RegisterPdu.u4PacketId = (UINT4) RAND ();
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (SnxUtlAllocOctetString (&RegisterPdu.ContextName) == NULL)
+        {
+            SNMPTrace ("SnxUtlAllocOctetString failed for Reg failed\n");
+            return SNMP_FAILURE;
+        }
+        SNMPCopyOctetString (&RegisterPdu.ContextName,
+                             &gAgtxGlobalInfo.ContextName);
+        RegisterPdu.u4PayLoadLen =
+            ((UINT4) gAgtxGlobalInfo.ContextName.i4_Length + sizeof (UINT4));
+        if ((RegisterPdu.ContextName.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            RegisterPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                                 (RegisterPdu.ContextName.
+                                                  i4_Length %
+                                                  SNX_4BYTE_DATALEN));
+        }
+        RegisterPdu.u1Flags |= SNX_NON_DEFAULT_CTXT;
+    }
+    RegisterPdu.u4PayLoadLen += SNX_PDU_GEN_INFO_SIZE;
+    RegisterPdu.u1TimeOut = SNX_MASTER_DISPATCH_TIMEOUT;
+    RegisterPdu.u1Priority = SNX_DEF_REG_PRIORITY;
+    RegisterPdu.u1RangeSubId = u1RangSubId;
+
+    if ((u1RangSubId != 0) && (u4UpperBound != 0))
+    {
+        RegisterPdu.u4UpperBound = u4UpperBound;
+        RegisterPdu.u4PayLoadLen += sizeof (UINT4);
+    }
+
+    if (SnxUtlAllocAgtxOid (&AgentxOid) == NULL)
+    {
+        SNMPTrace ("SnxUtlAllocOid failed for Reg failed\n");
+        SnxUtlFreeOctetString (&RegisterPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    if (SnxCodeConvertAgentOidToAgtxOid (pOid, &AgentxOid, OSIX_TRUE) ==
+        SNMP_FAILURE)
+    {
+        SNMPTrace ("Converting Agent OID to AgentxOid failed\n");
+        SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+        SnxUtlFreeOctetString (&RegisterPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    MEMCPY (&RegisterPdu.OidVal, &AgentxOid, sizeof (tSnmpAgentxOidType));
+    RegisterPdu.u4PayLoadLen += (SNX_OID_INFO_SIZE +
+                                 (AgentxOid.u1NoSubId * sizeof (UINT4)));
+
+    if (SnxMainEncodeandTxPacket (&RegisterPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Register  PDU failed\n");
+        SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+        SnxUtlFreeOctetString (&RegisterPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+    SnxUtlFreeOctetString (&RegisterPdu.ContextName, OSIX_FALSE);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainAddOrRemoveCaps
+ *                                                                          
+ *    DESCRIPTION      :  Adds/Removes the agentx-subagent Capability 
+ *                        information with the master agent.
+ *
+ *    INPUT            : pCapOid       - Capability information
+ *                       pu1CapDes     - Capability description
+ *                       u1Flag        - Indicates that AddCaps or RemoveCaps
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainAddOrRemoveCaps (tSNMP_OID_TYPE * pCapOid,
+                        UINT1 *pu1CapDes, UINT1 u1Flag)
+{
+    tSnmpAgentxPdu      CapsPdu;
+    tSnmpAgentxOidType  AgentxOid;
+
+    MEMSET (&CapsPdu, 0, sizeof (tSnmpAgentxPdu));
+    CapsPdu.u1Version = SNX_AGENTX_VERSION;
+
+    if (u1Flag == SNX_ADDCAP_FLAG)
+    {
+        CapsPdu.u1PduType = SNX_ADD_AGENT_CAPS_PDU;
+    }
+    else
+    {
+        CapsPdu.u1PduType = SNX_REMOVE_AGENT_CAPS_PDU;
+    }
+    CapsPdu.u1Flags = SnxTransByteOrderFlag ();
+    CapsPdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    CapsPdu.u4PacketId = (UINT4) RAND ();
+
+    /* Copy the Context information */
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (SnxUtlAllocOctetString (&CapsPdu.ContextName) == NULL)
+        {
+            SNMPTrace ("SnxUtlAllocOctetString failed for Caps PDU failed\n");
+            return SNMP_FAILURE;
+        }
+        SNMPCopyOctetString (&CapsPdu.ContextName,
+                             &gAgtxGlobalInfo.ContextName);
+        CapsPdu.u4PayLoadLen =
+            ((UINT4) gAgtxGlobalInfo.ContextName.i4_Length + sizeof (UINT4));
+        if ((CapsPdu.ContextName.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            CapsPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                             (CapsPdu.ContextName.i4_Length %
+                                              SNX_4BYTE_DATALEN));
+        }
+        CapsPdu.u1Flags |= SNX_NON_DEFAULT_CTXT;
+    }
+
+    /* Copy the Capability OID information */
+    if (SnxUtlAllocAgtxOid (&AgentxOid) == NULL)
+    {
+        SNMPTrace ("SnxUtlAllocOid failed for Caps failed\n");
+        SnxUtlFreeOctetString (&CapsPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    if (SnxCodeConvertAgentOidToAgtxOid (pCapOid, &AgentxOid, OSIX_TRUE) ==
+        SNMP_FAILURE)
+    {
+        SNMPTrace ("Converting Agent OID to AgentxOid failed\n");
+        SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+        SnxUtlFreeOctetString (&CapsPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    MEMCPY (&CapsPdu.OidVal, &AgentxOid, sizeof (tSnmpAgentxOidType));
+    CapsPdu.u4PayLoadLen += (SNX_OID_INFO_SIZE +
+                             (AgentxOid.u1NoSubId * sizeof (UINT4)));
+
+    /* Copy the OID description */
+    if (pu1CapDes != NULL)
+    {
+        if (SnxUtlAllocOctetString (&CapsPdu.OidDesc) == NULL)
+        {
+            SNMPTrace
+                ("Memory allocation failed for Caps description failed\n");
+            SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+            SnxUtlFreeOctetString (&CapsPdu.ContextName, OSIX_FALSE);
+            return SNMP_FAILURE;
+        }
+        MEMCPY (CapsPdu.OidDesc.pu1_OctetList, pu1CapDes, STRLEN (pu1CapDes));
+        CapsPdu.OidDesc.i4_Length = (INT4) STRLEN (pu1CapDes);
+        CapsPdu.u4PayLoadLen +=
+            ((UINT4) CapsPdu.OidDesc.i4_Length + sizeof (UINT4));
+        if ((CapsPdu.OidDesc.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            CapsPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                             (CapsPdu.OidDesc.i4_Length %
+                                              SNX_4BYTE_DATALEN));
+        }
+    }
+    if (SnxMainEncodeandTxPacket (&CapsPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Capability  PDU failed\n");
+        SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+        SnxUtlFreeOctetString (&CapsPdu.ContextName, OSIX_FALSE);
+        SnxUtlFreeOctetString (&CapsPdu.OidDesc, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    SnxUtlFreeAgtxOid (&AgentxOid, OSIX_FALSE);
+    SnxUtlFreeOctetString (&CapsPdu.ContextName, OSIX_FALSE);
+    SnxUtlFreeOctetString (&CapsPdu.OidDesc, OSIX_FALSE);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *    FUNCTION NAME    : SnxMainIndexAllocOrDeAlloc
+ *                                                                          
+ *    DESCRIPTION      :  Generates allocate or deallocate index PDU for the 
+ *                        given VarBind List.
+ *
+ *    INPUT            : pVbList       - VarBind List
+ *                       u1Flag        - Flag indicates alloc/dealloc
+ *                       u1AllocFlag   - SNX_ANY_INDEX/ SNX_NEW_INDEX 
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainIndexAllocOrDeAlloc (tSNMP_VAR_BIND * pVbList,
+                            UINT1 u1AllocFlag, UINT1 u1Flag)
+{
+    tSnmpAgentxPdu      IndxAllocPdu;
+    tSnmpAgentxVarBind *pAgtxVbList = NULL;
+    INT4                i4VbLen = 0;
+
+    MEMSET (&IndxAllocPdu, 0, sizeof (tSnmpAgentxPdu));
+    IndxAllocPdu.u1Version = SNX_AGENTX_VERSION;
+
+    if (u1Flag == SNX_ALLOC_FLAG)
+    {
+        IndxAllocPdu.u1PduType = SNX_INDEX_ALLOC_PDU;
+    }
+    else
+    {
+        IndxAllocPdu.u1PduType = SNX_REMOVE_AGENT_CAPS_PDU;
+    }
+    IndxAllocPdu.u1Flags = SnxTransByteOrderFlag ();
+    IndxAllocPdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    IndxAllocPdu.u4PacketId = (UINT4) RAND ();
+
+    if (u1AllocFlag & SNX_ANY_INDEX)
+    {
+        IndxAllocPdu.u1Flags |= SNX_ANY_INDEX;
+    }
+    if (u1AllocFlag & SNX_NEW_INDEX)
+    {
+        IndxAllocPdu.u1Flags |= SNX_NEW_INDEX;
+    }
+    /* Copy the Context information */
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (SnxUtlAllocOctetString (&IndxAllocPdu.ContextName) == NULL)
+        {
+            SNMPTrace ("SnxUtlAllocOctetString failed for Caps PDU failed\n");
+            return SNMP_FAILURE;
+        }
+        SNMPCopyOctetString (&IndxAllocPdu.ContextName,
+                             &gAgtxGlobalInfo.ContextName);
+        IndxAllocPdu.u4PayLoadLen =
+            ((UINT4) gAgtxGlobalInfo.ContextName.i4_Length + sizeof (UINT4));
+        if ((IndxAllocPdu.ContextName.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            IndxAllocPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                                  (IndxAllocPdu.ContextName.
+                                                   i4_Length %
+                                                   SNX_4BYTE_DATALEN));
+        }
+        IndxAllocPdu.u1Flags |= SNX_NON_DEFAULT_CTXT;
+    }
+    if (SnxCodeConvertVbLstToAgtxVbList (pVbList, &pAgtxVbList) == SNMP_FAILURE)
+    {
+        SnxUtlFreeOctetString (&IndxAllocPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    i4VbLen = SnxCodeGetVbLstLen (pAgtxVbList);
+    if (i4VbLen > 0)
+    {
+        IndxAllocPdu.pAgxVarBindList = pAgtxVbList;
+        IndxAllocPdu.u4PayLoadLen += (UINT4) i4VbLen;
+    }
+    if (SnxMainEncodeandTxPacket (&IndxAllocPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Capability  PDU failed\n");
+        SnxUtlFreeVbList (pAgtxVbList);
+        SnxUtlFreeOctetString (&IndxAllocPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    SnxUtlFreeVbList (pAgtxVbList);
+    SnxUtlFreeOctetString (&IndxAllocPdu.ContextName, OSIX_FALSE);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *                                                                          
+ *    FUNCTION NAME    : SnxMainInitiatePing
+ *                                                                          
+ *    DESCRIPTION      :  This initate the Agentx Ping over the session  
+ *
+ *    INPUT            : None
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainInitiatePing (VOID)
+{
+    tSnmpAgentxPdu      PingPdu;
+
+    MEMSET (&PingPdu, 0, sizeof (tSnmpAgentxPdu));
+    PingPdu.u1Version = SNX_AGENTX_VERSION;
+    PingPdu.u1PduType = SNX_PING_PDU;
+    PingPdu.u1Flags = SnxTransByteOrderFlag ();
+    PingPdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    PingPdu.u4PacketId = (UINT4) RAND ();
+
+    /* Copy the Context information */
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (SnxUtlAllocOctetString (&PingPdu.ContextName) == NULL)
+        {
+            SNMPTrace ("SnxUtlAllocOctetString failed for Ping PDU failed\n");
+            return SNMP_FAILURE;
+        }
+        SNMPCopyOctetString (&PingPdu.ContextName,
+                             &gAgtxGlobalInfo.ContextName);
+        PingPdu.u4PayLoadLen =
+            ((UINT4) gAgtxGlobalInfo.ContextName.i4_Length + sizeof (UINT4));
+        if ((PingPdu.ContextName.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            PingPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                             (PingPdu.ContextName.i4_Length %
+                                              SNX_4BYTE_DATALEN));
+        }
+        PingPdu.u1Flags |= SNX_NON_DEFAULT_CTXT;
+    }
+    if (SnxMainEncodeandTxPacket (&PingPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Close PDU failed\n");
+        SnxUtlFreeOctetString (&PingPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    SnxUtlFreeOctetString (&PingPdu.ContextName, OSIX_FALSE);
+
+    /* We will be sending the ping PDUs periodically and verify
+     * that that Master agent is in reachable scope */
+    if (gAgtxGlobalInfo.u1OutStandPing < SNX_MAX_OUTSTAND_PING)
+    {
+        if (TmrStart (gAgtxGlobalInfo.SnxTmrListId, &gAgtxGlobalInfo.SnxTmr,
+                      SNX_PING_TIMER, SNX_PING_TIMEOUT, 0) != TMR_SUCCESS)
+        {
+            SNMPTrace ("Starting Ping PDU Timer failed\n");
+            return SNMP_FAILURE;
+        }
+        gAgtxGlobalInfo.u1OutStandPing++;
+    }
+    MEMCPY (&gAgtxLastTxedPdu, &PingPdu, sizeof (tSnmpAgentxPdu));
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *    FUNCTION NAME    : SnxMainGenerateTrap
+ *                                                                          
+ *    DESCRIPTION      : Generates Agentx Trap using the Given VarBind List 
+ *
+ *    INPUT            : pVbList       - VarBind List
+ *                       pEnterprise   - Enterprise Oid Pointer
+ *                       u4GenTrapType - Generic Trap type
+ *                       u4SpecTrapType - Specific trap type
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+INT4
+SnxMainGenerateTrap (tSNMP_VAR_BIND * pVbList, tSNMP_OID_TYPE * pEnterprise,
+                     UINT4 u4GenTrapType, UINT4 u4SpecTrapType)
+{
+    tSnmpAgentxPdu      NotifyPdu;
+    tSnmpAgentxVarBind *pAgtxVbList = NULL;
+    tSNMP_VAR_BIND     *pSysTVbList = NULL;
+    tSNMP_OID_TYPE     *pSnmpTrapOidValue = NULL, *pSnmpStdTrapOid = NULL;
+    tSNMP_OID_TYPE     *pVarBindOidName = NULL;
+    tSNMP_VAR_BIND     *pSnmpTrapVb = NULL;
+    tSNMP_VAR_BIND     *pTmpVarBind = NULL;
+    INT4                i4VbLen = 0;
+    tSNMP_COUNTER64_TYPE Counter64Value;
+    UINT1               u1TrapOidPresent = SNMP_FALSE;
+
+    /* Agentx Session is not available.So we can`t
+     * generate Trap */
+    if (gAgtxGlobalInfo.i4SessionId == 0)
+    {
+        FREE_OID (pEnterprise);
+        FREE_SNMP_VARBIND_LIST (pVbList);
+        return SNMP_FAILURE;
+    }
+    Counter64Value.msn = SNMP_ZERO;
+    Counter64Value.lsn = SNMP_ZERO;
+
+    MEMSET (&NotifyPdu, 0, sizeof (tSnmpAgentxPdu));
+    NotifyPdu.u1Version = SNX_AGENTX_VERSION;
+    NotifyPdu.u1PduType = SNX_NOTIFY_PDU;
+    NotifyPdu.u1Flags = SnxTransByteOrderFlag ();
+    NotifyPdu.i4SessionId = gAgtxGlobalInfo.i4SessionId;
+    NotifyPdu.u4PacketId = (UINT4) RAND ();
+
+    /* Update System Up Time as a first VarBind */
+    pSysTVbList = SNMPGetSysUpTime ();
+
+    if (pSysTVbList == NULL)
+    {
+        FREE_OID (pEnterprise);
+        FREE_SNMP_VARBIND_LIST (pVbList);
+        return SNMP_FAILURE;
+    }
+    /* Build SNMP Trap OID */
+    pTmpVarBind = pVbList;
+    while (pTmpVarBind != NULL)
+    {
+        pVarBindOidName = pTmpVarBind->pObjName;
+        if (pVarBindOidName)
+        {
+            if (SNMP_EQUAL ==
+                SNMPProxyCompareOidtoarr (pVarBindOidName, gau4snmpTrapOid,
+                                          TRAP_OID_LEN))
+            {
+                u1TrapOidPresent = SNMP_TRUE;
+            }
+        }
+
+        pTmpVarBind = pTmpVarBind->pNextVarBind;
+    }
+
+    if (SNMP_FALSE == u1TrapOidPresent)
+    {
+        if (u4GenTrapType == ENTERPRISE_SPECIFIC)
+        {
+            pSnmpTrapOidValue =
+                alloc_oid ((INT4) pEnterprise->u4_Length + SNMP_TWO);
+            if (pSnmpTrapOidValue == NULL)
+            {
+                FREE_OID (pEnterprise);
+                FREE_SNMP_VARBIND_LIST (pVbList);
+                FREE_SNMP_VARBIND_LIST (pSysTVbList);
+                return SNMP_FAILURE;
+            }
+            MEMCPY (pSnmpTrapOidValue->pu4_OidList,
+                    pEnterprise->pu4_OidList,
+                    pEnterprise->u4_Length * sizeof (UINT4));
+            pSnmpTrapOidValue->u4_Length = pEnterprise->u4_Length;
+            pSnmpTrapOidValue->pu4_OidList[pSnmpTrapOidValue->u4_Length++] =
+                SNMP_ZERO;
+            pSnmpTrapOidValue->pu4_OidList[pSnmpTrapOidValue->u4_Length++] =
+                u4SpecTrapType;
+        }
+        else
+        {
+            pSnmpTrapOidValue = alloc_oid (SNMP_TRAP_OID_LEN);
+            if (pSnmpTrapOidValue == NULL)
+            {
+                FREE_OID (pEnterprise);
+                FREE_SNMP_VARBIND_LIST (pVbList);
+                FREE_SNMP_VARBIND_LIST (pSysTVbList);
+                return SNMP_FAILURE;
+            }
+
+            switch (u4GenTrapType)
+            {
+                case COLD_START:
+                case WARM_START:
+                case LINK_DOWN:
+                case LINK_UP:
+                case AUTH_FAILURE:
+                case EGP_NEIGHBOR_LOSS:
+
+                    MEMCPY (pSnmpTrapOidValue->pu4_OidList, gau4snmpTrapsOid,
+                            (AUTH_FAILURE_OID_LEN - SNMP_ONE) * sizeof (UINT4));
+                    pSnmpTrapOidValue->u4_Length =
+                        AUTH_FAILURE_OID_LEN - SNMP_ONE;
+                    pSnmpTrapOidValue->pu4_OidList[pSnmpTrapOidValue->
+                                                   u4_Length++] =
+                        u4GenTrapType + SNMP_ONE;
+                    break;
+
+                default:
+                    free_oid (pSnmpTrapOidValue);
+                    FREE_OID (pEnterprise);
+                    FREE_SNMP_VARBIND_LIST (pVbList);
+                    FREE_SNMP_VARBIND_LIST (pSysTVbList);
+                    return SNMP_FAILURE;
+            }
+
+        }
+        pSnmpStdTrapOid = alloc_oid (SNMP_TRAP_OID_LEN);
+        if (pSnmpStdTrapOid == NULL)
+        {
+            free_oid (pSnmpTrapOidValue);
+            FREE_OID (pEnterprise);
+            FREE_SNMP_VARBIND_LIST (pVbList);
+            FREE_SNMP_VARBIND_LIST (pSysTVbList);
+            return SNMP_FAILURE;
+        }
+        MEMCPY (pSnmpStdTrapOid->pu4_OidList, gau4snmpTrapOid,
+                SNMP_TRAP_OID_LEN * sizeof (UINT4));
+
+        if ((pSnmpTrapVb = SNMP_AGT_FormVarBind (pSnmpStdTrapOid,
+                                                 SNMP_DATA_TYPE_OBJECT_ID,
+                                                 SNMP_ZERO, SNMP_ZERO, NULL,
+                                                 pSnmpTrapOidValue,
+                                                 Counter64Value)) == NULL)
+        {
+            free_oid (pSnmpTrapOidValue);
+            free_oid (pSnmpStdTrapOid);
+            FREE_OID (pEnterprise);
+            FREE_SNMP_VARBIND_LIST (pVbList);
+            FREE_SNMP_VARBIND_LIST (pSysTVbList);
+            return SNMP_FAILURE;
+        }
+
+        pSysTVbList->pNextVarBind = pSnmpTrapVb;
+        pSysTVbList->pNextVarBind->pNextVarBind = pVbList;
+    }
+    else
+    {
+        /* Append other OIDs */
+        pSysTVbList->pNextVarBind = pVbList;
+    }
+
+    FREE_OID (pEnterprise);
+
+    /* Copy the Context information */
+    if (gAgtxGlobalInfo.ContextName.i4_Length != 0)
+    {
+        if (SnxUtlAllocOctetString (&NotifyPdu.ContextName) == NULL)
+        {
+            SNMPTrace ("Memory allocation failed for ContextName failed\n");
+            FREE_SNMP_VARBIND_LIST (pSysTVbList);
+            return SNMP_FAILURE;
+        }
+        SNMPCopyOctetString (&NotifyPdu.ContextName,
+                             &gAgtxGlobalInfo.ContextName);
+        NotifyPdu.u4PayLoadLen =
+            ((UINT4) gAgtxGlobalInfo.ContextName.i4_Length + sizeof (UINT4));
+        if ((NotifyPdu.ContextName.i4_Length % SNX_4BYTE_DATALEN) != 0)
+        {
+            NotifyPdu.u4PayLoadLen += (UINT4) (SNX_4BYTE_DATALEN -
+                                               (NotifyPdu.ContextName.
+                                                i4_Length % SNX_4BYTE_DATALEN));
+        }
+        NotifyPdu.u1Flags |= SNX_NON_DEFAULT_CTXT;
+    }
+    if (SnxCodeConvertVbLstToAgtxVbList (pSysTVbList, &pAgtxVbList) ==
+        SNMP_FAILURE)
+    {
+        SnxUtlFreeOctetString (&NotifyPdu.ContextName, OSIX_FALSE);
+
+        FREE_SNMP_VARBIND_LIST (pSysTVbList);
+        return SNMP_FAILURE;
+    }
+    i4VbLen = SnxCodeGetVbLstLen (pAgtxVbList);
+    if (i4VbLen > 0)
+    {
+        NotifyPdu.pAgxVarBindList = pAgtxVbList;
+        NotifyPdu.u4PayLoadLen += (UINT4) i4VbLen;
+    }
+    if (SnxMainEncodeandTxPacket (&NotifyPdu) == SNMP_FAILURE)
+    {
+        SNMPTrace ("SnxMainEncodeandTxPacket for Capability  PDU failed\n");
+        SnxUtlFreeVbList (pAgtxVbList);
+        FREE_SNMP_VARBIND_LIST (pSysTVbList);
+        SnxUtlFreeOctetString (&NotifyPdu.ContextName, OSIX_FALSE);
+        return SNMP_FAILURE;
+    }
+    FREE_SNMP_VARBIND_LIST (pSysTVbList);
+    SnxUtlFreeOctetString (&NotifyPdu.ContextName, OSIX_FALSE);
+    SnxUtlFreeVbList (pAgtxVbList);
+    return SNMP_SUCCESS;
+}
+
+/****************************************************************************
+ *    FUNCTION NAME    : SnxProcessTmrExpiry
+ *                                                                          
+ *    DESCRIPTION      : Generates Agentx Trap using the Given VarBind List 
+ *
+ *    INPUT            : pContextName  - Context Name
+ *                       pVbList       - VarBind List
+ *                                                                          
+ *    OUTPUT           : None
+ *                                                                          
+ *    RETURNS          : SNMP_SUCCESS/SNMP_FAILURE 
+ *                                                                          
+ ****************************************************************************/
+PUBLIC VOID
+SnxProcessTmrExpiry (VOID)
+{
+    tTmrAppTimer       *pExpiredTimers = NULL;
+    UINT1               u1TimerId = 0;
+
+    while ((pExpiredTimers =
+            TmrGetNextExpiredTimer (gAgtxGlobalInfo.SnxTmrListId)) != NULL)
+    {
+        SNMPARGTrace ("Timer Expiry to be processed %x\n", pExpiredTimers);
+
+        u1TimerId = ((tTmrBlk *) pExpiredTimers)->u1TimerId;
+
+        switch (u1TimerId)
+        {
+            case SNX_OPEN_TIMER:
+                SnxMainOpenSession ();
+                break;
+
+            case SNX_PING_TIMER:
+                /* No Response for the  maximum outstanding Ping PDU */
+                if (gAgtxGlobalInfo.u1OutStandPing == SNX_MAX_OUTSTAND_PING)
+                {
+                    if (SnxMainOpenSession () == SNMP_FAILURE)
+                    {
+                        SNMPTrace ("Opening session failed\n");
+                        return;
+                    }
+                }
+                else
+                {
+                    SnxMainInitiatePing ();
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+/***************************  End of snxmain.c *******************************/

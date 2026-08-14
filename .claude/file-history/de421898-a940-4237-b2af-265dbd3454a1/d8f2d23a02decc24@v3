@@ -1,0 +1,57 @@
+/*
+ * Feasibility probe for Task 3, second attempt: with the handler bodies behind
+ * IES_AUTO_MIBS_TABLE_ONLY, does ies_auto_mibs_setup.c compile as a pure table
+ * build - and does the flag setup still run?
+ */
+
+#define IES_AUTO_MIBS_TABLE_ONLY 1
+
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
+#include <stdio.h>
+#include <string.h>
+
+#include "ies_auto_mibs_handle.h"
+
+/* Nothing is registered when building a lookup table. The arguments are
+ * discarded, so the handler symbols are never referenced. */
+#define moxaSnmpHandle_RegEntryGetValue(...)  (0)
+#define moxaSnmpHandle_RegEntrySetValue(...)  (0)
+#define moxaSnmpHandle_RegEntryDep(...)       (0)
+
+/* The array set and its #if guards stay in snmpd's own file; only what is done
+ * with each array changes. */
+#undef MOX_SNMP_INIT_ENTRY
+#define MOX_SNMP_INIT_ENTRY(ARRAY_NAME) \
+    probe_collect(ARRAY_NAME, sizeof(ARRAY_NAME) / sizeof(ARRAY_NAME[0]));
+
+static int probe_arrays;
+static int probe_entries;
+
+static void
+probe_collect(struct ies_auto_mibs_entry *a, int n)
+{
+    (void) a;
+    probe_arrays++;
+    probe_entries += n;
+}
+
+#include "ies_auto_mibs_setup.c"
+
+int
+main(void)
+{
+    struct ies_auto_mibs_entry e;
+
+    ies_auto_mibs_load_mibs();
+    printf("arrays=%d entries=%d\n", probe_arrays, probe_entries);
+
+    memset(&e, 0, sizeof(e));
+    snprintf(e.uri, sizeof(e.uri), "%s", "portMirror/enable");
+    ies_auto_mibs_setup_entry_flags(&e);
+    printf("portMirror/enable flags[0]=0x%x\n", (unsigned) e.flags[0]);
+
+    return 0;
+}

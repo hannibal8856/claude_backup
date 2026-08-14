@@ -1,0 +1,227 @@
+//! lib_moxa_rust_ies_auto_mibs — Rust FFI over the C `lib_moxa_ies_auto_mibs`.
+//!
+//! Looks up an OID and returns its config-layer URI mapping. Links
+//! `libmoxaiesautomibs.so` (resolved when the final binary links).
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_ulong};
+
+/// Same width as net-snmp `oid` / C `moxa_oid` (unsigned long).
+pub type Oid = c_ulong;
+
+/// Mirrors C `struct ies_map_entry` (see lib_moxa_ies_auto_mibs.h).
+#[repr(C)]
+struct CIesMapEntry {
+    oid: *const c_ulong,
+    oid_len: usize,
+    uri: *const c_char,
+    uri_index: *const c_char,
+    val_type: c_int,
+    mode: c_int,
+    table_col: c_int,
+    is_status: c_int,
+    is_iface: c_int,
+}
+
+#[link(name = "moxaiesautomibs")]
+extern "C" {
+    fn ies_map_lookup_by_oid(o: *const c_ulong, olen: usize) -> *const CIesMapEntry;
+    fn ies_map_count() -> usize;
+    fn ies_map_entry_at(i: usize) -> *const CIesMapEntry;
+    fn ies_config_set(config_uri: *const c_char, value: *const c_char) -> c_int;
+    fn ies_config_set_int(config_uri: *const c_char, value: std::os::raw::c_long) -> c_int;
+    fn ies_config_set_bool(config_uri: *const c_char, value: c_int) -> c_int;
+    fn ies_config_set_json(config_uri: *const c_char, json_text: *const c_char) -> c_int;
+    fn ies_max_port_num() -> std::os::raw::c_uint;
+    fn ies_fc_array_elem(
+        json_text: *const c_char,
+        which: c_int,
+        out: *mut c_char,
+        out_len: usize,
+    ) -> c_int;
+    fn ies_fc_array_pair(json_text: *const c_char, out: *mut c_char, out_len: usize) -> c_int;
+    fn ies_fc_set(port_index: std::os::raw::c_uint, option: c_int, value: *const c_char) -> c_int;
+}
+
+/// `option` for [`fc_set`] — mirror of the `IES_FC_*` defines in
+/// lib_moxa_ies_auto_mibs.h. Anything below `MODE_AUTO` carries a numeric value;
+/// the rest are actions and pass `None`.
+pub mod fc {
+    pub const TEMP_WARN_C: i32 = 0;
+    pub const TEMP_WARN_F: i32 = 1;
+    pub const TX_POWER_HI: i32 = 2;
+    pub const TX_POWER_LO: i32 = 3;
+    pub const RX_POWER_HI: i32 = 4;
+    pub const RX_POWER_LO: i32 = 5;
+    pub const MODE_AUTO: i32 = 6;
+    pub const MODE_USER: i32 = 7;
+    pub const RESET_DEFAULT: i32 = 8;
+}
+
+/// Longest thing the fiber-check formatters produce is `[-XXX.XX, -XXX.XX]`.
+const FC_OUT_LEN: usize = 128;
+
+fn fc_out_to_string(buf: &[c_char]) -> String {
+    // Safety: the C side always NUL-terminates within `buf`.
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// One end of a fiber-check 2-element string array: `which` is 0 (low) or 1
+/// (high). `json_text` is the field's JSON as the caller already read it — the
+/// C side only extracts, it does not fetch. `None` if the text is not an array.
+pub fn fc_array_elem(json_text: &str, which: i32) -> Option<String> {
+    let j = CString::new(json_text).ok()?;
+    let mut buf = [0 as c_char; FC_OUT_LEN];
+    let rc = unsafe { ies_fc_array_elem(j.as_ptr(), which, buf.as_mut_ptr(), buf.len()) };
+    (rc == 0).then(|| fc_out_to_string(&buf))
+}
+
+/// The same array rendered `[<low>, <high>]`, byte-identical to the dlmod.
+pub fn fc_array_pair(json_text: &str) -> Option<String> {
+    let j = CString::new(json_text).ok()?;
+    let mut buf = [0 as c_char; FC_OUT_LEN];
+    let rc = unsafe { ies_fc_array_pair(j.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+    (rc == 0).then(|| fc_out_to_string(&buf))
+}
+
+/// Write one fiber-check config option for `port_index` (0-based, config-layer
+/// numbering). Read-modify-writes the whole row like the dlmod. 0 on success.
+pub fn fc_set(port_index: u32, option: i32, value: Option<&str>) -> i32 {
+    match value {
+        Some(v) => match CString::new(v) {
+            Ok(c) => unsafe { ies_fc_set(port_index, option, c.as_ptr()) },
+            Err(_) => -1,
+        },
+        None => unsafe { ies_fc_set(port_index, option, std::ptr::null()) },
+    }
+}
+
+/// Physical port count (in-master's `gMaxPortInDevice`). 0 if LibSystem failed.
+/// Used by `col::TR2RING_IFACE` to encode a PORT_CHANNEL interface.
+pub fn max_port_num() -> u32 {
+    unsafe { ies_max_port_num() as u32 }
+}
+
+/// `table_col` values — mirror of the C `IES_COL_*` in lib_moxa_ies_auto_mibs.h.
+/// How the handler resolves an OID's value. Keep in sync with the C header.
+pub mod col {
+    pub const SCALAR: i32 = 0; // plain config leaf: get_config_from_path(uri)
+    pub const ROW_INDEX: i32 = 1; // index column, value = trailing OID sub-id (portsPbmp / ring index)
+    pub const PBMP_VALUE: i32 = 2; // portsPbmp value: config bool array[port-1] as TruthValue
+    pub const IDXTBL_VALUE: i32 = 3; // index-table value: "<uri><row-1>/<column>" (0-based)
+    pub const IDXTBL_INDEX: i32 = 4; // index-table index: trailing OID sub-id, if the row exists
+    pub const TR2RING_VALUE: i32 = 5; // turboring ring value: "<uri>/ring<row>/<column>" (1-based)
+    pub const ROWSTATUS: i32 = 6; // SNMP RowStatus life-cycle (ADR-0001); not a config leaf
+    pub const TR2RING_IFACE: i32 = 7; // turboring ring "interface": one OCTET STRING from
+                                      // "<uri>/ring<row>/{firstPort,secondPort}" objects
+    // Index-table columns backed by a 2-element JSON string array: fiber_check
+    // keeps a {low, high} pair in one field but the MIB gives each end its own
+    // column. Path is built exactly like IDXTBL_VALUE; only extraction differs.
+    pub const IDXTBL_ARR_LO: i32 = 8; // array[0] as OCTET STRING
+    pub const IDXTBL_ARR_HI: i32 = 9; // array[1] as OCTET STRING
+    pub const IDXTBL_ARR_STR: i32 = 10; // whole array as "[<a>, <b>]"
+    pub const CONST_FALSE: i32 = 11; // no backing field: GET is always TruthValue false(2)
+}
+
+/// Owned Rust view of a mapping row.
+#[derive(Debug, Clone)]
+pub struct MapEntry {
+    pub uri: String,
+    pub uri_index: String,
+    pub val_type: i32,
+    pub mode: i32,
+    /// One of `col::*` — how the handler resolves this OID's value.
+    pub table_col: i32,
+    /// true = read from the status layer (URI had a "stat/" prefix), not config.
+    pub is_status: bool,
+    /// true = port interface index: config is 0-based, SNMP is 1-based, so GET
+    /// adds 1 and SET subtracts 1 (mirrors in-master's IES_FLAG_SNMP_URI_INTERFACE).
+    pub is_iface: bool,
+}
+
+/// Exact-match lookup by OID (no instance). `None` if not found.
+pub fn lookup_by_oid(oid: &[Oid]) -> Option<MapEntry> {
+    let p = unsafe { ies_map_lookup_by_oid(oid.as_ptr(), oid.len()) };
+    if p.is_null() {
+        return None;
+    }
+    // Safety: `p` points to a 'static const table entry; the string fields are
+    // NUL-terminated C strings living for the program's lifetime.
+    let e = unsafe { &*p };
+    Some(MapEntry {
+        uri: c_str_to_string(e.uri),
+        uri_index: c_str_to_string(e.uri_index),
+        val_type: e.val_type as i32,
+        mode: e.mode as i32,
+        table_col: e.table_col as i32,
+        is_status: e.is_status != 0,
+        is_iface: e.is_iface != 0,
+    })
+}
+
+/// Every mapped OID, in table order (so the subagent can register them all).
+pub fn all_oids() -> Vec<Vec<Oid>> {
+    let n = unsafe { ies_map_count() };
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = unsafe { ies_map_entry_at(i) };
+        if p.is_null() {
+            continue;
+        }
+        let e = unsafe { &*p };
+        // Safety: `oid` points to a 'static const subid array of length `oid_len`.
+        let oid = unsafe { std::slice::from_raw_parts(e.oid, e.oid_len) }.to_vec();
+        out.push(oid);
+    }
+    out
+}
+
+/// Write `value` to the config path `config_uri` via the framework's REST
+/// endpoint (loopback), byte-identical to the dlmod's SET. Returns 0 on success.
+pub fn config_set(config_uri: &str, value: &str) -> i32 {
+    let (u, v) = match (CString::new(config_uri), CString::new(value)) {
+        (Ok(u), Ok(v)) => (u, v),
+        _ => return -1, // interior NUL
+    };
+    unsafe { ies_config_set(u.as_ptr(), v.as_ptr()) }
+}
+
+/// Write an INTEGER `value` to the config path `config_uri` via the framework's
+/// REST endpoint (loopback). Returns 0 on success.
+pub fn config_set_int(config_uri: &str, value: i64) -> i32 {
+    let u = match CString::new(config_uri) {
+        Ok(u) => u,
+        Err(_) => return -1,
+    };
+    unsafe { ies_config_set_int(u.as_ptr(), value as std::os::raw::c_long) }
+}
+
+/// Write a JSON BOOLEAN to `config_uri` via the framework's REST endpoint.
+/// For config fields stored as booleans but exposed as SNMP INTEGER TruthValues.
+pub fn config_set_bool(config_uri: &str, value: bool) -> i32 {
+    let u = match CString::new(config_uri) {
+        Ok(u) => u,
+        Err(_) => return -1,
+    };
+    unsafe { ies_config_set_bool(u.as_ptr(), i32::from(value)) }
+}
+
+/// PATCH a raw JSON value (`json_text`, e.g. a boolean array "[true,false,…]")
+/// to `config_uri`. Used by the portsPbmp SET (whole-array read-modify-write).
+pub fn config_set_json(config_uri: &str, json_text: &str) -> i32 {
+    let (u, j) = match (CString::new(config_uri), CString::new(json_text)) {
+        (Ok(u), Ok(j)) => (u, j),
+        _ => return -1, // interior NUL
+    };
+    unsafe { ies_config_set_json(u.as_ptr(), j.as_ptr()) }
+}
+
+fn c_str_to_string(p: *const c_char) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}

@@ -1,0 +1,473 @@
+# mxQos 手動測試總結 — 2026-08-13
+
+量測者:`snmp-plan-E reopen 7`。DUT = MDS-G4012-L3-4XGS-T @ 192.168.127.253。
+封包分析(第 6 節)由 `snmp-plan-E trace 3` 提供。
+
+---
+
+## 0. 一頁結論
+
+> 🔴 **2026-08-13 同日更新:「不搬」這個結論已撤回重審。**
+> 使用者指出 mxQos 仍有搬遷價值,我同意本文的量測**不足以支撐該結論** ——
+> 只量了 walk 形狀(最有利於 in-master 的形狀),而且兩臂都把 registration 留在 in-master,
+> 所以「換 ISS 服務能否讓 walk 從 17% 變 100%」**從未被測到**。
+> **量測數據本身仍然有效,失效的是從它推導出的結論。** 詳見文末「結論撤回」一節。
+
+| 問題 | 答案 | 強度 |
+|---|---|---|
+| `+getfwd +nodelegate` 會轉發嗎? | **會**,201 個 GetNext PDU | 封包證實 |
+| 轉發比較快嗎? | **不會,慢 14.0%** | 交錯 A/B/A,雙對照有效 |
+| 委派會掉欄位嗎? | **不會**,兩臂都是 434 varbinds | 逐表比對 |
+| 所以要搬嗎? | ~~不搬~~ **無法判斷**(見上方撤回) | — |
+| mainline 有 mxQos 嗎? | **有**,`.1.4`–`.1.7` 正常,`.1.1`/`.1.2`/`.1.3` 回 badValue | 封包證實 |
+| Plan E 改善了什麼? | **修好 `.1.1` 與 `.1.2`**;`.1.3` 兩側都還壞 | 封包證實 |
+| 客戶 walk 得到完整資料嗎? | **不行,只拿得到 17%** | 實測 |
+| table view 的成本在哪? | **具象化,每次開表付兩次**(本表 + 下一張表並立刻丟棄) | 封包 + 原始碼 |
+
+**最重要的兩項都不是效能比較:第 5 節的 GETNEXT 缺陷,與第 6b 節的單槽快取設計。**
+`+getfwd` 委派這個題目本身,對兩者都無能為力。
+
+---
+
+## 1. 受測對象
+
+```
+image        FWR_MDS-G4000-L3-4XGS_v7.0_2026_0813_0905.swu   (p1)
+對照         mainline 2026_0805_2335                          (p2,全程未覆蓋)
+MIB          mxQos,.1.3.6.1.4.1.8691.603.2.9,七張表 29 個可存取欄位
+```
+
+這是**第一顆可用於計時的 image** —— `2026_0812_*` 那批都帶 GETFWD trace
+instrumentation(`LibUtil_CheckDbgFlgBits()` 每次呼叫都跑一輪 `ftok`+`shmget`+`shmat`,
+且 `T4 GATE` 在每個 RW GET 的路徑上),連把 runtime 旗標關掉都躲不掉。
+本輪先把 trace 收進編譯期開關(預設關),實查出貨 `.so` 內 `GETFWD` 字串為 **0** 後才開始量。
+
+## 2. A/B 的設計
+
+**同一顆 image,只切換 `/etc/moxa/netsnmp/agentx_owned.list` 的一行**(bind mount)
++ 依支援路徑(moxash `snmp-ser acc dis` / `en`)重啟 snmpd。兩臂之間除了那一行以外
+**位元組完全相同**。
+
+```
+A 臂   list 中沒有 mxqosdb/            → mxQos 全部由 in-master 服務
+B 臂   mxqosdb/  +getfwd  +nodelegate   → GET 轉發給 ISS AgentX subagent(出貨形態)
+```
+
+沒有採用「建兩顆 image」的做法:跨 image 比較會把中間所有無關的重編都算進差異。
+
+## 3. 效能:轉發慢 14.0%
+
+七張表**逐表** walk(不能用整棵 walk,見第 5 節),每表 7 次取中位數,交錯 B→A→B→A:
+
+```
+A1 1.4033s    A2 1.4117s     A↔A 重複性 0.008s
+B1 1.6144s    B2 1.5960s     B↔B 重複性 0.018s
+Δ = +0.197s (+14.0%)         雜訊的 11–25 倍
+```
+
+逐表(A → B):
+
+| 表 | varbinds | A(in-master) | B(轉發) | Δ |
+|---|---|---|---|---|
+| `.1.1` DscpMapping | 64 | 0.182 | 0.183 | +0.8% |
+| `.1.2` CoSMapping | 9/10 | 0.053 | 0.040 | 不可比(見下) |
+| `.1.3` DefaultPriority | 1 | 0.015 | 0.014 | ~0 |
+| `.1.4` PbitPreference | 24 | 0.178 | 0.186 | +4.6% |
+| `.1.5` Meter | 180 | **0.537** | **0.654** | **+21.8%** |
+| `.1.6` Scheduler | 120 | **0.356** | **0.424** | **+19.0%** |
+| `.1.7` Shaper | 36 | 0.087 | 0.102 | +18.0% |
+
+`.1.2` 兩臂的 varbind 數不同(A 10 / B 9)—— **委派狀態會改變 NULL 的落點**,
+只能比有實際值的行(兩臂都是 8 筆,CoS 0–7 完整)。
+
+### 反直覺之處
+
+in-master 走 `ies_uri_handle_client` → LibFrameworkUri,而後者 `_isConnectionAlive()`
+硬編回 0,**每個請求重建一次 TCP 連線**;AgentX 相反,開機建一次、之後常駐。
+**結構上 in-master 該比較慢,實測卻快 14%。**
+
+→ **ISS 端回答一個 varbind 的成本,超過「本地建連 + 讀取」的總和。**
+mxQos 的 in-master 單價是 **2.98 ms/varbind**,已經快到 ISS 蓋不過去。
+
+→ 通則:**委派的收益取決於本地讀取有多慢,不取決於 AgentX 有多快。**
+篩選候選群組應先量 in-master 的 ms/varbind 並排序,只對慢的做完整 A/B;
+「本地夠快」本身就是不委派的充分理由。
+
+## 4. 完整性:兩臂相同,委派沒有掉東西
+
+逐表 varbinds / 欄位數,對 `reopen 6` 的基線:
+
+```
+        基線(熱套用)   本輪(出貨 image)
+.1.1      64 / 1           64 / 1     ✓
+.1.2      10 / 2            9 / 1     ← NULL 落點差異,實際值 8 筆兩臂相同
+.1.3       1 / 1            1 / 1     ✓
+.1.4      24 / 2           24 / 2     ✓
+.1.5     180 / 15         180 / 15    ✓  ← +nodelegate 生效的關鍵指標
+.1.6     120 / 10         120 / 10    ✓
+.1.7      36 / 3           36 / 3     ✓
+```
+
+`.1.5` 回到 **180/15** 證明 `+nodelegate` 在出貨形態下保住了那個唯一實際 RO 的欄位
+(`qosConfigMeterColorModeType` `.1.5.1.2`);沒有它,該欄會被交給不服務它的 ISS,
+整欄消失(180→168 varbind、15→14 欄)。
+
+gate(`~/mxqos_check.py`,比 OID 不比名字)的兩個永久例外:
+
+- `missing .1.3.1.2` —— 被第 5 節的缺陷擋住,**欄位實際存在**(`snmpget .603.2.9.1.3.1.2.1` 回 `INTEGER: 3`)
+- `surplus` 4 個 not-accessible index 欄(`.1.4.1.1` `.1.5.1.1` `.1.6.1.1` `.1.7.1.1`)——
+  `GenerateTableIndexEntry()` 的既有 MIB 違規,基線也有
+
+⚠️ **完整性一律比 OID 不比名字**:8 欄在 MIB 與 ies-auto-mibs 的拼法不同
+(`qosConfigQueueWeight1` vs `qosConfigQueue1Weight`),用名字比會假報 8 欄消失 ——
+而那個假象與真故障長得一模一樣。
+
+## 5. 🔴 最重要的發現:整棵 mxQos 走不完,只回得出 17%
+
+GETNEXT 在兩個邊界回傳「請求的 OID 自己」:
+
+```
+GETNEXT .603.2.9.1.3        → .603.2.9.1.3 = NULL      (應為 .603.2.9.1.3.1.2.1)
+GETNEXT .603.2.9.1.2.1.2.7  → .603.2.9.1.2.1.2.7       (應跨到 .1.3)
+```
+
+任何標準 walk 在 `.1.2` 就以 `Error: OID not increasing` 中止,
+**只拿到 434 個 varbind 中的 73 個(17%)**。逐表 walk 才完整。
+
+**欄位本身存在** —— `snmpget .603.2.9.1.3.1.2.1` 回 `INTEGER: 3`,
+`snmpgetnext .603.2.9.1.3.1.2` 也正確回下一筆。是 walk 走不到,不是沒實作。
+
+`snmpwalk -Cc`(忽略不遞增)**不能繞** —— 會無限重送同一個 OID,實測 180 秒未停。
+
+**客戶用一般網管軟體對 `.603.2.9` 做標準 walk,看到的就是 17%。**
+修這個的價值(17% → 100%)大於整輪效能討論。
+
+### 根因分析(`trace 3`,靜態 + 封包)
+
+整個 mxQos **沒有使用 net-snmp 的 table helper / table_iterator**,每個欄位各自以欄層 OID
+註冊,所以**所有跨欄跨表的邊界都落在 `ies_auto_mibs.c:1834-1879` 的
+`entry_handle_exception()` 這一個手寫函式上**。三個可證缺陷:
+
+- **(a) 錨點不一致**(最可能的直接成因):`netsnmp_subtree_find_prev()` 用 `req_oid` 定位,
+  但後續 skip 迴圈用 `reginfo->rootoid` 當門檻。當 req_oid 小於當前 registration 的 root,
+  迴圈會把自己這個 registration 的 instance 整段跳過。**修法是把門檻改成 `req_oid`。**
+  這解釋了 GET 查得到、walk 走不到的不對稱(`snmpget` 走 CURR 分支不經過此函式)。
+- **(b) `name_a` vs `start_a`**(已由封包證實):`:1868` 把 `next_subtree->name_a` 直接回傳,
+  而 `find_prev()` 是照 `start_a` 排序走訪的。實例:`GETNEXT .1.1.1.1 → .1.2.1.3`,
+  而 `.603.2.9.1.2.1.3` **在 `net_mxQosdb.h` 裡不存在** —— 那是 net-snmp 的 range 結束哨兵,
+  被當成真 OID 交了出去。
+- **(c) `MIB_HANDLER_AUTO_NEXT_OVERRIDE_ONCE` 是黏的**(`:1869`,**未證實**):
+  旗標設在別人的 handler 上,若未被消費會永久殘留、污染後續每個請求。
+  這解釋得了「walk 一旦壞掉就整段壞下去」的形狀。
+
+**已排除**:不是 net-snmp 放棄。`tp == NULL` 的 GETNEXT 會回 `SNMP_ENDOFMIBVIEW`
+(`snmp_agent.c:2361-2371`),不是「OID 回自己 + NULL」。
+
+## 6. mainline 對照 — ⚠️ 初稿結論已更正
+
+**初稿寫「mainline 完全沒有 mxQos」,那是錯的,已更正。**
+
+誤讀的來源:
+
+```
+mainline p2   snmpwalk .1.3.6.1.4.1.8691.603.2.9
+  Error in packet. Reason: (badValue) ...
+  .603.2.9 = No Such Object available on this agent at this OID
+```
+
+我只讀了第二行。**`badValue` 那行才是關鍵**:沒有註冊的話 net-snmp 會回 `endOfMibView`
+(`snmp_agent.c:2361-2371`,`tp == NULL` 的 GETNEXT 分支),**不會回 `badValue`**;
+`badValue` 是 `ies_auto_mibs.c:1822` 的 fall-through,代表**有註冊、請求進到了 handler、
+handler 自己回錯**。而 `.1.4`–`.1.7` 我沒看到,是因為 walk 在第一個請求就中止。
+
+⚠️ **界線要劃清楚**(由 `trace 3` 指出,避免過度更正):
+
+- **已推翻**:「mainline 完全沒有 mxQos」。封包直接證明 `.1.4`–`.1.7` 在 mainline 上正常回應,
+  這與請求形式無關,是硬證據。
+- **未確立**:上面那兩行輸出的**確切產生順序**。我沒有自己那次 walk 的 pcap,
+  「第二行是 snmpwalk 自己補印的」是推論。而且我觀測的是 **`.603.2.9` 裸前綴**,
+  `trace 3` 的封包是 **欄層 OID 的 table view GETNEXT** —— **不同的請求,不能直接對消**。
+- **調和只需一條指令**:`/usr/bin/snmpwalk -v2c -c public -On <mainline> .1.3.6.1.4.1.8691.603.2.9`
+  同時抓 pcap,看裸前綴那一發到底送出什麼、收回什麼。需要 DUT 切到 p2。
+
+`trace 3` 以 MIB browser table view 的封包給出正確狀態:
+
+```
+mainline    .1.1 .1.2 .1.3  全部 badValue(OID 原樣退回)     .1.4–.1.7  正常
+Plan E      .1.1 .1.2 已修好                .1.3 仍 badValue  .1.4–.1.7  正常
+                                            (0.014s 立即失敗,非逾時)
+```
+
+**→ 正確敘述:mxQos 不是 Plan E 新增的覆蓋,而是 Plan E 修好了 mainline 上壞掉的兩張表。**
+仍是正面事實,但性質不同(修復 > 新增),而且兩側都有封包、更容易被查證。
+
+### table view 的另一個形狀(待進一步分析)
+
+`trace 3` 量到 table view 操作 mainline → Plan E 快 31%,**但差異 94% 集中在頭尾兩個請求**,
+中段 57 個請求兩邊相同(322ms vs 301ms,雜訊):
+
+```
+Scheduler  mainline: 130.9  7.6 7.6 7.7 7.7 7.6 7.6 8.0 8.5 8.7 8.7 8.1   86.5
+           Plan E  :  72.1  7.4 7.3 7.3 7.2 7.2 7.7 7.3 8.3 8.2 8.1 8.4   48.4
+```
+
+⚠️ 那個 −31% 是**單次量測、未交錯**,`trace 3` 自己聲明不可引用。
+但「差異只在頭尾、中段相同」是單一 capture 內部的形狀,不受跨 capture 漂移影響,結論是穩的。
+
+## 6b. 具象化(materialization)—— 假說成立,且它主導 table view 的成本
+
+由 `trace 3` 以唯讀原始碼 + 既有 pcap 查證(未碰 DUT)。**這是本文對「效能」最有用的一節。**
+
+### 機制
+
+mxQos 全部 29 個 entry 都是 `iss_build == 1`,`mox_snmp_handle_entry:3725` 依此走 **ISS 路徑**
+(`entry_handle_generate_iss_value_file`)。具象化在 `ies_auto_mibs.c:2306`
+`mox_snmp_iss_uri_read_inplace()`,檔名是 URI 把 `/` 換成 `_`、table 加 `tbl` 後綴,
+前綴 `AUTO_MIB_PATH` = **`/moxa/run/auto_mibs`**(`/moxa/run` **已由使用者確認是 tmpfs**):
+
+```
+mxqosdb/qosConfigSchedulerTable/  →  /moxa/run/auto_mibs/mxqosdb_qosConfigSchedulerTable_tbl
+```
+
+一次具象化:寫中繼檔 → remap 轉出正式檔 → `unlink` 中繼檔 →(若需要)**fork
+`/bin/iss_snmp_makeup_index`** → rename → `fileBuffer_init()` 把整份 parse 進記憶體。
+
+⚠️ **檔案全程在 RAM,所以那 30–135 ms 不是磁碟 I/O。** 成本在 CPU 與 IPC:
+fork+exec、向 ISS 取 URI 的往返、remap、`makeup_index` 的 fork、以及 parse。
+→ **這條路徑不可能靠「換更快的儲存」改善。**
+
+### 頭端成本:Plan E 省下的是一次 fork+exec
+
+`mox_snmp_iss_uri_read_inplace` 由 commit **`17055a9`(2026-05-15)** 引入,
+`git branch --contains` 顯示**只在 Plan E 系列分支,不在 mainline**。註解自述它避免了
+`/bin/sh` + helper binary 的 fork+exec(「~25 ms on ARM Cortex-A」)。
+
+首請求延遲(ms):
+
+| 表 | mainline | Plan E | Δ |
+|---|---|---|---|
+| Pbit | 69.8 | 28.6 | **−41.2** |
+| Meter | 138.5 | 97.3 | **−41.2** |
+| Sched | 130.9 | 72.1 | −58.8(離群,單次量測無法判斷) |
+| Shaper | 75.4 | 33.5 | **−41.9** |
+
+**四張裡三張是 41.2±0.7 ms**,與「移除一次固定 fork+exec」高度吻合。
+Plan E 仍有的 29–97 ms 從封包拆不開,但 `ies_auto_mibs.c:2347` 已有現成的
+`util_timeDiff("get_val_from_iss", ...)` 包住整段具象化 —— **開 trace 即可拆,不必改 code**。
+
+### 🔴 尾端成本:與頭端同一個成因(我原本的假設是錯的)
+
+我原本要 `trace 3` 把頭尾分開,認為尾端是「跨界進 `entry_handle_exception()`」。
+**封包否證了這個歸因** —— Meter 與 Sched 的尾端請求根本沒跨表,卻一樣慢;
+也不是 TTL 過期(表內請求間隔 0–1 ms,遠小於 200 ms)。
+
+成因看尾端 response 的**最後一個 varbind**:
+
+```
+Pbit   尾端 136.4/96.2 ms   最後 varbind → .2.9.1.5.1.2.1  = Meter 表
+Meter  尾端 112.3/77.6 ms   最後 varbind → .2.9.1.6.1.2.1  = Sched 表
+Sched  尾端  86.5/48.4 ms   最後 varbind → .2.9.1.7.1.2.1  = Shaper 表
+Shaper 尾端  37.3/ 7.1 ms   最後 varbind → .603.3.2.1.1.0  = 別支 MIB 的 scalar
+```
+
+table view 的 GETNEXT 帶 N 個 varbind,最後一個會掉出最後一欄、**跨進下一張表 →
+快取未命中 → 把下一張表整個具象化,然後馬上丟掉**。
+
+**Shaper 那格是反證**:它跨出去的是 scalar 不是 table,Plan E 只花 7.1 ms ——
+同一個位置、同一段 code,成本差一個量級,差別只在「跨到的是不是一張要具象化的表」。
+
+→ **頭尾是同一個成因出現兩次:頭 = 具象化本表,尾 = 具象化下一張表(並立刻丟棄)。**
+→ `entry_handle_exception()` 本身不慢;慢的是它觸發的具象化。**兩件事要分開引用。**
+
+### 快取:單槽、換表即刪檔、200 ms idle TTL
+
+- **深度 = 1 張表。** `gSnmpTblSnapShot` 是單一全域變數,只存一個 `fname`(`:175`)。
+- **不只是驅逐,是刪檔。** `util_table_snapshot_reset()`(`:255-262`)對前一張表 `unlink()`。
+  **A→B→A 時 A 要從頭再做一次,沒有任何重用。**
+- **TTL 200 ms,且是 idle timer 不是絕對壽命** —— `time_lastUpdate` 每次呼叫都被重寫(`:2085`),
+  所以連續請求永遠命中,但**使用者手動點下一張表(秒級)必定過期**。
+- ⚠️ **附帶發現的缺陷:800 ms 絕對壽命檢查是 dead code。**
+  `entry_handle_check_value_file` `:2100-2109` 的 if/else 兩邊都 `return`,
+  底下的 `MAX_TABLE_TIMEOUT` 檢查**不可達** —— 原設計的「表最多存活 800 ms」從未生效。
+
+**→ 幾百 ms 是「每次開表都付」,不是開機一次。而且一次 table view 付兩次。**
+
+⚠️ 既然檔案在 RAM,`unlink` 省下的是記憶體、付出的是每次重開表重跑整段流程。
+**單槽 + `unlink` 在 tmpfs 上的取捨不划算。**(唯讀分析下的判斷,無實作無量測。)
+
+### 與 ifTable 是同一條路徑
+
+`net_ifmibdb.h` 的 47 個 entry 也全部 `iss_build == 1`,與 mxQos 走**同一個
+`entry_handle_generate_iss_value_file`、同一個單槽快取**。
+⚠️ 但 ifTable 欄列數大得多,**可互推的是「機制與生命週期」,不是毫秒數**。
+
+### 這對第 3 節那 +14% 的意義
+
+兩個數字量的不是同一件事,**不衝突**:連續 walk 每張表只付一次具象化、攤在大量
+varbind 上;table view 每張表付兩次、且每次重開都重付。
+
+⚠️ **「真實使用者體感由具象化主導」是推論不是量測** —— 取決於使用者實際怎麼用
+(MIB browser 逐表點 vs 監控系統跑 walk)。已證實的只有「在 table view 這種操作下,
+頭尾 8 個請求佔可比子集總時間的 60–71%」。
+
+**站得住的是:要改善 table view,「mxQos 該不該委派」問錯了 —— 委派動不到這條路。
+該問的是單槽快取 + `unlink` 這個設計。**
+
+### 🔴 附帶查出的產品級固定成本:每個成功的 GET 都做一次 SHM attach
+
+追查具象化成本時查到的,**與 mxQos 無關,影響整個 SNMP 讀取路徑**:
+
+```
+util_timeDiff:241        LibUtil_DbgTrace(kDbgFlgIssUriSNMP, ...)   無旗標前置檢查,無條件呼叫
+LibUtil_DbgTrace:81      if (LibUtil_CheckDbgFlgBits(aType))        (util_debug.c)
+LibUtil_CheckDbgFlgBits  ftok(:251) shmget(:260) shmat(:269) shmdt(:281)   每次呼叫,無快取
+呼叫點 :3772             util_timeDiff("mib_get_success", ...)      在每個成功 GET 的路徑上
+呼叫點 :2349             util_timeDiff("get_val_from_iss", ...)     每次具象化再付一次
+```
+
+⚠️ **成本不在 `_LibUtil_InitDbgFlagShm()`** —— 它在 `util_debug.c:389-392` 用一次 `stat`
+成功就 early-return。**要摘成本改 `LibUtil_CheckDbgFlgBits()` 自己,不是改 Init。**
+(初稿寫錯落點,由 `trace 3` 覆核修正;我漏了 `shmdt`。)
+
+→ **出貨 image 的每一個成功 SNMP GET 都付一次 `ftok`+`shmget`(+`shmat`),
+即使 debug 旗標是關的。** 因為旗標檢查在 `LibUtil_DbgTrace()` **內部**,
+呼叫端無法跳過;而 `util_timeDiff` 連一個 `if` 都沒有。
+
+`git blame` 三行都指向 **`280b1b7f`(2022-06-02,"Upgrade to net-snmp 5.8")**,
+該 commit 在 `develop` / `NOS_v6.0_develop` 上 —— **不是 Plan E 引入的,是產品自 2022 年
+就有的既有成本,mainline 同樣在付。**
+
+⚠️ **量級未測,是候選不是發現。** 但它的位置(每個 GET)使它成為目前已知**唯一一個
+無條件落在熱路徑上、純為診斷而存在**的固定成本。
+
+🔴 **不要把它當成 mxQos 效能的嫌疑犯。** 穩態下每次呼叫約 **5 個 syscall**
+(`stat` + `ftok`(內含一次路徑解析/stat)+ `shmget` + `shmat` + `shmdt`),**沒有檔案寫入**,
+在 tmpfs 上是微秒級 —— **解釋不了本文中段那 2–8 ms/請求**。它是獨立的一題,值得修,
+但**不可用來歸因 mxQos 的數字**。
+
+**冷機第一筆要丟掉**:`LIB_UTIL_DBG_CTRL_FILE` = `/run/util_debug/debug_ctrl_block`,
+`/run` 是 tmpfs、重開機清空,所以開機後第一次呼叫會走 Init 慢路徑,
+內含**兩次 `LibUtil_ExecShCmd` = 兩次 fork+exec `/bin/sh`**(`mkdir -p` :395、`echo >` :403)。
+每次開機一次,不是每次請求。**量 baseline 時第一筆不能算。**
+
+✅ **一個已查證並排除的更糟假設**(記下來免得重推):曾懷疑「出貨狀態下 SHM 段不存在 →
+`shmget` 失敗 → 走 `_LibUtil_Dbg2File()`(無條件 `fopen`/`vfprintf`/`fclose`)→
+每個 GET 都寫一行檔」。**不成立** —— Init 慢路徑會用 `IPC_CREAT|IPC_EXCL` 建段
+(`util_debug.c:423-424`),穩態下 `shmget` 成功。(`trace 3` 自提自駁。)
+
+**對本文其他部分的影響**:這也修正了我先前的一個判斷 —— 我曾說「用 debug image 量
+`get_val_from_iss` 會被 instrumentation 汙染」。**不會**,那個 SHM 成本本來就在付;
+開旗標只新增每行 trace 的寫出成本(`fopen`/`fprintf`/`fclose`,`util_debug.c:87-93` 每行一次)。
+
+### 一個查法上的教訓
+
+全樹掃 `dl/` **找不到任何 tmpfs / fstab / `.mount` 宣告**,只有 `mkdir -p /moxa/run/...` ——
+掛載點來自 `dl` 之外。**「grep `dl/` 沒有」不等於「不存在」**,差點被當成否定證據。
+與第 8 節那條同形。
+
+## 7. 證據
+
+```
+~/pcap/2026-08-13-mxqos-armA-not-listed-2026_0813_0905.pcap          1.6 KB   2 GetNext(邊界)
+~/pcap/2026-08-13-mxqos-armB-getfwd-nodelegate-2026_0813_0905.pcap   70  KB   201 GetNext / 608 次 OID 位元組
+                                        (各附 .tcpdump.log,含有效性中繼資料)
+~/mxqos-walk-B-pertable-2026_0813_0905.txt      逐表 walk 原始輸出(434 varbinds)
+~/mxqos_check.py  +  ~/mxqosdb-oracle-*-2026-08-13.txt               完整性 gate 與 oracle
+~/mds4xgl3/.adr/ADR-0032-*.md                                        決策紀錄
+```
+
+**兩張 pcap 差 44 倍**,排除了「兩臂其實一樣」與「B 臂沒轉發」兩種解釋。
+
+## 8. ⚠️ 本輪踩到的量測陷阱(共同形狀:工具給出一個由工具自己決定、看起來卻很合理的數字)
+
+1. **`tcpdump -G 25 -W 1`**(`measure-snmp-walk/walkpcap.sh` 的寫法)讓 tcpdump 在 walk
+   **之前**就結束,stderr 照樣印 `19 packets captured / 0 dropped`,pcap 1.7 KB。
+   連續兩次重現。→ **該 skill 產出的舊 pcap 全部有嫌疑**,1–2 KB 的幾乎一定是空的。
+2. **DUT 上沒有 `timeout` 指令**(`exit 127`),不能用 `timeout N tcpdump` 限時。
+3. **`/etc/os-release` 的 `VERSION` 是死標籤**(寫著 `EDS-G4100_...`,連機種都錯)。
+   image 身分讀 `/etc/moxa/version/BUILD_TIME`,機種讀 `/proc/device-tree/model`。
+4. **整棵 walk 的 0.241s 是「中止時間」不是 walk 時間。**
+5. **walk 在第一個請求中止,使 `.1.4`–`.1.7` 從未被看見** → 被讀成「mainline 沒有 mxQos」。
+
+**第 5 條與前四條性質不同**:前四條產生「錯的數字」,第 5 條產生「不存在的印象」。
+錯的數字還會被下一個人對帳而露出矛盾;**缺席不會 —— 沒有任何一行輸出會說「你沒走到那裡」**,
+而缺席正好是許多假說的預期結果。
+
+→ **判準:凡是結論的形式為「X 不存在 / 沒有發生」,都必須另外證明觀測管道走到了
+X 應該在的位置。** 本輪同一天內,「零 Get PDU」「No Such Object」「62 欄而非 73 欄」
+三個結論都是這個形狀。
+
+### 有效擷取的三道自我檢查(缺任何一道,空擷取就會看起來像結論)
+
+```
+kill -0 $TP              確認 walk 開始時 tcpdump 還活著
+回報 walk 的 varbind 數    確認 walk 真的跑了、落在擷取視窗內
+ps | grep -c tcpdump     結束後確認沒有殘留(殘留會污染下一次判定)
+```
+
+收尾用同一 session 內已知 PID 的 `kill -INT`,**不用 `pkill`** —— 那個寫法 2026-08-12
+造成兩個行程掛 11 小時,並各佔一條 DUT ssh session。
+
+## 9. 未決 / 待辦
+
+| # | 項目 | 需要 DUT |
+|---|---|---|
+| 1 | `.1.3.1.1` 是否註冊 —— `snmpget .603.2.9.1.3.1.1.1` 一條指令即可釘死 | 是 |
+| 2 | GETNEXT 缺陷 (a) 的修法驗證(門檻改 `req_oid`) | 是 |
+| 3 | ~~tmpfs 具象化假說~~ **已完成,見第 6b 節** —— 成立,且主導 table view 成本 | — |
+| 3b | 單槽快取 + `unlink` 的改善(加大快取 / 移除 unlink),需實作與量測 | 是 |
+| 4 | 移除 `agentx_owned.list` 的 `mxqosdb/` 行(新 commit,非 revert) | 否 |
+| 5 | `walkpcap.sh` 的 `-G` 缺陷修正 | 否 |
+
+### 與本 MIB 無關但同時發現的重大疑慮
+
+`walk.sh` 寫死 `-t 5` 且未指定 `-r`(net-snmp 預設 retries 5),總等待 = **5 × 6 = 30 秒**。
+語料庫中所有「慢」的量測都是 `30 + 小數` 的形狀,且 1–29 秒之間完全空白:
+
+```
+31.900 = 30 + 1.900   mxrstpdb .603.3.2 整棵      ADR-0015 / 0016 / agentx_owned.list
+31.700 = 30 + 1.700   mxrstpdb status 子樹         ADR-0016 / agentx_owned.list
+31.000 = 30 + 1.000   mainline .603.3.2            ADR-0016
+30.994 = 30 + 0.994   mxrstpdb(ADR-0018 引用)    ADR-0018
+30.953 = 30 + 0.953   簡報頭條 mainline            
+37.355 = 30 + 7.355   evtPort in-master            ADR-0018
+```
+
+**ADR-0016 的「48×」、ADR-0018 的「27×」、簡報頭條的「48 倍」可能都建立在逾時常數上。**
+若成立,正確詮釋不是「讀取變快 48 倍」,而是「**修好了一個會讓 walk 卡死的缺陷**」——
+那是比效能數字更硬的賣點,而且完整性那欄(62 vs 73)可能同源(walk 提早中止而非欄位不存在)。
+
+⚠️ **這目前是推論不是結論**,真值未知,**不要用任何替代數字**。
+判定方法:`-r 0` + 交錯 A/B/A + 兩側都量 + **逐輪記錄 varbind 數**(唯一能分辨「慢」與「沒走完」的辦法)。
+
+
+---
+
+## 10. 結論撤回(2026-08-13,與本文同日)
+
+使用者指出 mxQos 仍有搬遷價值。重審後我同意 **第 0 節與第 3 節推出的「不搬」不成立**,
+三個理由:
+
+1. **只量了 walk 形狀的存取。** walk 把具象化攤在大量 varbind 上,結構上最有利於 in-master;
+   而真實使用者是 **table view 形狀**,那裡具象化佔 60–71%(第 6b 節)。
+   **同一個改動在兩種形狀下的結論可能相反**,我卻只量了對它不利的那一種。
+2. **兩臂都把 registration 留在 in-master。** `+nodelegate` 的定義就是如此,
+   所以 `entry_handle_exception()` 的邊界缺陷在兩臂都存在 ——
+   **「換 ISS 服務能不能讓 walk 從 17% 變 100%」從未被測到**,而它的價值遠大於 14%。
+3. **機制模型對不上。** `ies_auto_mibs.c:3704-3707` 顯示轉發成功即 `return`,
+   不會走到 `:3725` 的具象化,那 B 臂應該省下具象化;但逐表數字回推不出來
+   (`.1.4` 24 vb:A 0.178s / B 0.186s)。**代表我對 B 臂實際走哪條路的理解有誤**,
+   可能 GETNEXT 不經過 `:3666` 那個 `MODE_IS_GET` 閘門,那 201 個 GetNext PDU 另有來源。
+
+**第 3–4 節的量測數據與第 7 節的兩張 pcap 不受影響,仍然有效。**
+失效的是從它們推導出的判斷。正確狀態是「**用這組量測無法判斷**」。
+
+### 下一步取決於所求的價值是哪一個(待使用者裁示)
+
+| 若價值是 | 該測的是 | 目前狀態 |
+|---|---|---|
+| 消除具象化(table view 體感) | **table view 形狀**的交錯 A/B,不是 walk | 未測 |
+| 繞開邊界缺陷(17% → 100%) | 讓 **ISS 真正擁有 subtree**,不是 `+getfwd` | 未測,且會撞上「RW 欄不得委派、SET 留 framework」 |
+| 架構一致性 | 不是效能問題,效能只需「不明顯變差」 | — |
+
+**三者要的實驗完全不同。** 在釐清之前不要再量,否則會再量錯一次。

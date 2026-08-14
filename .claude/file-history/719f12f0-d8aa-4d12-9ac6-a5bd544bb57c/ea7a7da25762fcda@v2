@@ -1,0 +1,29 @@
+---
+name: framework-vs-mainline-snmp-diffs
+description: snmp-plan-E branch 的 framework subagent 與 NOS v7.0 mainline 的已知 SNMP 行為差異(mxTurboRingV2 實測三處)
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 719f12f0-d8aa-4d12-9ac6-a5bd544bb57c
+  modified: 2026-07-29T09:50:54.738Z
+---
+
+`snmp-plan-E` branch(framework AgentX subagent 服務 mxTurboRingV2)與 **NOS v7.0 mainline**(in-master 服務)的 `snmpwalk .1.3.6.1.4.1.8691.603.3.4` 實測差異,2026-07-29:**我們 25 個 OID、mainline 23 個**。
+
+| # | OID | 我們 | mainline | 性質 |
+|---|---|---|---|---|
+| 1a | `.1.2.1.1.x` config ring index | `1`,`2` | 無 | 我們多回 |
+| 1b | `.2.1.1.1.x` stat ring index | `1`,`2` | 無 | 我們多回(2026-07-29 引入) |
+| 2 | `.1.2.1.4.x` ring interface | 無 | `01 02`,`03 04` | 我們缺,功能未實作 |
+| 3 | `.1.3.3.0` coupling port | `4` | `5` | **值錯誤(bug)** |
+
+**#1 index 欄**:`mapping_reuse.c::is_turboring_ring()` 納入 `uri_index=="index"` → emit `IES_COL_ROW_INDEX`/`TR2RING`。mainline 的 `generate_uri_snmp_table.py::generate_mxTr2_configPortTable()` 雖也寫出 `## tableEntryIndex` 的值,但 in-master 不對外回應(SMIv2 的 INDEX 欄應 not-accessible;**確切跳過機制未查明**,MIB 檔不在 buildroot/dl)。config ring 的 2 個是既有;stat ring 的 2 個是 2026-07-29 擴充 `is_turboring_ring` 支援 status 欄時一併納入 `"index"` 所引入。
+
+**#2 interface(REDUNDANT_PORT)**:framework 未實作,mapping 註解本就標 deferred。2026-07-29 修 `is_index_table()`(排除 named-key ring)讓 deferred 真正生效。**修正前那 16 個 `.1.2.1.4.1~16` 路徑被組成 `"turboringv20/interface"`、全是 noSuchInstance,從未有正確值** → 非 regression。mainline 編碼:`port_index+1`(iftype 為 PORT_CHANNEL 再 `+MAX_PORT_NUM`),兩埠 `"%02x%02x"` 成 2-byte OCTET STRING。
+
+**#3 最重要 —— flag 語意未搬移**:in-master `ies_auto_mibs.c::entry_handle_generate_uri_value_file()` 對帶 `IES_FLAG_SNMP_URI_INTERFACE` 的 entry 做 **`uri_iface + 1`**(0-based config port → 1-based SNMP interface)。framework 直接回 config 原值,少 1。
+**根因:`struct ies_map_entry` 根本沒有 flags 欄位** —— in-master 的 flag 只有 `is_status` 被搬到 framework(`emit_row()`),`URI_INTERFACE`、`FIXED_VALUE`、`TR2_REPLACE_URI`(靠 baked 進 uri 的 mod_uri 間接處理)等都沒帶過來。`REPLACE_TRUTH_VALUE` 的效果剛好被 handler 的 bool→1/2 涵蓋,屬巧合。
+
+**Why:** 這三處是「framework 遷移未竟」的具體清單,不是新 bug。#3 是**一類**問題 —— 任何帶 `IES_FLAG_SNMP_URI_INTERFACE` 的 OID 都會少 1,需清查還有哪些 group 用到該 flag。
+
+**How to apply:** 拿 framework 的 walk 與 mainline 比對時,先扣除這三項已知差異再判斷有無 regression。若要收斂差異:#3 應優先(值是錯的),做法是在 `ies_map_entry` 補 flags 欄位並在 handler 實作對應語意;#2 需實作 REDUNDANT_PORT;#1 需確認 MIB 的 not-accessible 並在 mapping 排除 index 欄。相關:[[project_snmp_walk_slow_diagnosis]]、[[project_mxipif_col2_inmaster_deferred]]、[[project_snmp_framework_subagent_migration]]。

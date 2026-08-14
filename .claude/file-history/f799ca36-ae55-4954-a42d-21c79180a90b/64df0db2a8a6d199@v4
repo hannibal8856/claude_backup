@@ -1,0 +1,134 @@
+/*
+ * lib_moxa_snmp_agentx — implementation.
+ * See include/lib_moxa_snmp_agentx.h.
+ */
+#include "lib_moxa_snmp_agentx.h"
+
+#include <pthread.h>
+#include <string.h>
+
+static volatile int g_running = 0;
+static pthread_t    g_thread;
+
+int
+MoxaAgentX_Init(const char *daemon_name)
+{
+    /* Become an AgentX sub-agent (not the master) and dial the master socket. */
+    netsnmp_ds_set_boolean(NETSNMP_DS_APPLICATION_ID,
+                           NETSNMP_DS_AGENT_ROLE, 1);
+    netsnmp_ds_set_string(NETSNMP_DS_APPLICATION_ID,
+                          NETSNMP_DS_AGENT_X_SOCKET, "tcp:127.0.0.1:705");
+
+    init_agent(daemon_name);
+    init_snmp(daemon_name);   /* opens the AgentX session to the master */
+    return 0;
+}
+
+int
+MoxaAgentX_RegisterScalar(const char *descr, const oid *o, size_t olen,
+                          int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    return netsnmp_register_scalar(reg);
+}
+
+int
+MoxaAgentX_RegisterTestInt(const char *descr, const oid *o, size_t olen, long value)
+{
+    static int s_val;   /* single test value; persists for net-snmp's pointer */
+    s_val = (int) value;
+    return netsnmp_register_read_only_int_instance(descr, o, olen, &s_val, NULL);
+}
+
+int
+MoxaAgentX_RegisterInstance(const char *descr, const oid *o, size_t olen,
+                            int mode, Netsnmp_Node_Handler *handler)
+{
+    netsnmp_handler_registration *reg =
+        netsnmp_create_handler_registration(descr, handler, o, olen, mode);
+
+    if (reg == NULL)
+    {
+        return -1;
+    }
+    return netsnmp_register_instance(reg);
+}
+
+int
+MoxaAgentX_GetRequestOid(void *requests, oid *buf, size_t buf_max, size_t *out_len)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+    size_t n;
+
+    if (req == NULL || req->requestvb == NULL || buf == NULL || out_len == NULL)
+    {
+        return -1;
+    }
+    n = req->requestvb->name_length;
+    if (n > buf_max)
+    {
+        return -1;
+    }
+    memcpy(buf, req->requestvb->name, n * sizeof(oid));
+    *out_len = n;
+    return 0;
+}
+
+int
+MoxaAgentX_SetOctetString(void *requests, const char *s, size_t len)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL || req->requestvb == NULL)
+    {
+        return -1;
+    }
+    snmp_set_var_typed_value(req->requestvb, ASN_OCTET_STR,
+                             (const u_char *) s, len);
+    return 0;
+}
+
+int
+MoxaAgentX_SetError(void *requests, int snmp_err)
+{
+    netsnmp_request_info *req = (netsnmp_request_info *) requests;
+
+    if (req == NULL)
+    {
+        return -1;
+    }
+    netsnmp_request_set_error(req, snmp_err);
+    return 0;
+}
+
+static void *
+moxa_agentx_loop(void *arg)
+{
+    (void) arg;
+    while (g_running)
+    {
+        /* Blocks up to the internal select timeout, then processes AgentX fds. */
+        agent_check_and_process(1);
+    }
+    return NULL;
+}
+
+int
+MoxaAgentX_RunInThread(void)
+{
+    g_running = 1;
+    return pthread_create(&g_thread, NULL, moxa_agentx_loop, NULL);
+}
+
+void
+MoxaAgentX_Shutdown(void)
+{
+    g_running = 0;
+    snmp_shutdown("lib_moxa_snmp_agentx");
+}

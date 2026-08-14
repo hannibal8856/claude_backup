@@ -1,0 +1,83 @@
+<mxfile host="app.diagrams.net" modified="2026-08-09T00:00:00.000Z" agent="claude-code" version="24.0.0" type="device">
+  <diagram name="收斂後的兩條路" id="snmp-2paths">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="920" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="SNMP GET —— 收斂後,只剩兩條路" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="380" y="10" width="540" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nms" value="NMS / 網管系統" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;strokeWidth=2;fontSize=18;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="520" y="70" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="snmpd" value="snmpd —— SNMP 主程式&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;資料在自己行程內就直接答,在別的行程一律走 AgentX&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;strokeWidth=3;fontSize=19;fontStyle=1;fontColor=#1F3D63;" vertex="1" parent="1">
+          <mxGeometry x="80" y="200" width="1120" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="laneL" value="① netsnmp in-application&lt;br&gt;&lt;font style=&quot;font-size:12px;color:#3B6E3D&quot;&gt;維持原狀,本次不變動&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F8F1;strokeColor=#A9CBA4;strokeWidth=2;fontSize=15;fontStyle=1;fontColor=#3B6E3D;verticalAlign=top;spacingTop=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="410" width="300" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l1" value="ies-auto-mibs —— 自己算" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;fontSize=14;fontStyle=1;fontColor=#1E4620;" vertex="1" parent="1">
+          <mxGeometry x="105" y="490" width="190" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="l1tag" value="原 ①" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#82B366;strokeColor=none;fontSize=12;fontStyle=1;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="303" y="504" width="60" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="laneR" value="② AgentX&amp;nbsp;&amp;nbsp;&lt;font style=&quot;font-size:15px&quot;&gt;127.0.0.1:705&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px;color:#2C5A82&quot;&gt;資料在別的行程 —— 原本三種取得方式,收斂成兩個 subagent&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F0FA;strokeColor=#6C8EBF;strokeWidth=4;fontSize=20;fontStyle=1;fontColor=#1F3D63;verticalAlign=top;spacingTop=16;" vertex="1" parent="1">
+          <mxGeometry x="440" y="370" width="760" height="300" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r1" value="ISS subagent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=16;fontStyle=1;fontColor=#1F3D63;" vertex="1" parent="1">
+          <mxGeometry x="475" y="450" width="290" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="r1tag" value="原 ②" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6C8EBF;strokeColor=none;fontSize=12;fontStyle=1;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="775" y="464" width="62" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r2" value="framework subagent&lt;br&gt;&lt;font style=&quot;font-size:12px&quot;&gt;原 dlmod 模組的 MIB 一併由此提供&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;strokeWidth=3;fontSize=16;fontStyle=1;fontColor=#1F3D63;" vertex="1" parent="1">
+          <mxGeometry x="475" y="530" width="290" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="r2tag" value="原 ③" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6C8EBF;strokeColor=none;fontSize=12;fontStyle=1;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="775" y="545" width="62" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="r2tag4" value="原 ④" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6C8EBF;strokeColor=none;fontSize=12;fontStyle=1;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="775" y="595" width="62" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gone" value="✕&amp;nbsp; 外部程式(fork + exec)已消除&lt;br&gt;&lt;br&gt;✕&amp;nbsp; 檔案往返(寫檔 → 讀回)已消除&lt;br&gt;&lt;br&gt;✕&amp;nbsp; 各自為政的取得方式已消除" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B85450;strokeWidth=2;fontSize=15;fontStyle=1;fontColor=#B85450;dashed=1;align=left;spacingLeft=16;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="870" y="450" width="300" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="setnote" value="SET 一律回到 in-master(可寫註冊),再交給 framework 的 config layer&lt;br&gt;&lt;font style=&quot;font-size:13px&quot;&gt;subagent 註冊為&lt;b&gt;唯讀&lt;/b&gt;,net-snmp 依能力自動分流 —— 不需任何路由程式碼&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;fontSize=15;fontStyle=1;fontColor=#5C4813;" vertex="1" parent="1">
+          <mxGeometry x="80" y="710" width="1120" height="62" as="geometry" />
+        </mxCell>
+
+        <mxCell id="before" value="改變前:四條路,各自有各自的取得方式&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;① 自己算&amp;nbsp;&amp;nbsp;② 問 ISS(檔案往返)&amp;nbsp;&amp;nbsp;③ 問 framework(外部程式+檔案往返)&amp;nbsp;&amp;nbsp;④ dlmod&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#AAAAAA;strokeWidth=1;fontSize=15;fontStyle=1;fontColor=#888888;align=center;" vertex="1" parent="1">
+          <mxGeometry x="80" y="800" width="1120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rule" value="收斂規則只有一句:&lt;br&gt;&lt;b&gt;資料在 snmpd 行程內的就留在 snmpd,&lt;br&gt;在別的行程的一律走 AgentX。&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9E6;strokeColor=#D6B656;strokeWidth=2;fontSize=15;align=left;spacingLeft=14;fontColor=#5C4813;" vertex="1" parent="1">
+          <mxGeometry x="80" y="608" width="300" height="94" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_nms" value="SNMP GET (UDP 161)" style="entryDy=0;entryDx=0;entryY=0;entryX=0.5;edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=4;strokeColor=#333333;endArrow=blockThin;endFill=1;endSize=6;fontSize=14;fontStyle=1;fontColor=#333333;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="nms" target="snmpd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_L" value="少數" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=3;strokeColor=#A9CBA4;endArrow=blockThin;endFill=1;endSize=6;exitX=0.13393;exitY=1;exitDx=0;exitDy=0;fontSize=13;fontStyle=1;fontColor=#3B6E3D;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="snmpd" target="laneL">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_R" value="絕大多數" style="entryDy=0;entryDx=0;entryY=0;entryX=0.5;edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=6;strokeColor=#6C8EBF;endArrow=blockThin;endFill=1;endSize=6;exitX=0.66071;exitY=1;exitDx=0;exitDy=0;fontSize=14;fontStyle=1;fontColor=#1F3D63;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="snmpd" target="laneR">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

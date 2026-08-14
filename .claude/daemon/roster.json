@@ -1,0 +1,76 @@
+{
+  "proto": 1,
+  "supervisorPid": 2375887,
+  "updatedAt": 1785883492616,
+  "workers": {
+    "8cfed5d8": {
+      "pid": 4078104,
+      "procStart": "102390699",
+      "sessionId": "8cfed5d8-4864-4852-909c-dc38e8002435",
+      "rendezvousSock": "/tmp/cc-daemon-1000/1ce7a644/rv/8cfed5d8.sock",
+      "ptySock": "/tmp/cc-daemon-1000/1ce7a644/pty/8cfed5d8.sock",
+      "cliVersion": "2.1.221",
+      "startedAt": 1785811429604,
+      "attempt": 1,
+      "cwd": "/home/moxa/sdc1/home/moxa/SNMP_PLAN_E/buildroot/dl",
+      "dispatch": {
+        "proto": 1,
+        "short": "8cfed5d8",
+        "nonce": "1ef7003a",
+        "sessionId": "8cfed5d8-4864-4852-909c-dc38e8002435",
+        "createdAt": 1785811428310,
+        "source": "slash",
+        "cwd": "/home/moxa/sdc1/home/moxa/SNMP_PLAN_E/buildroot/dl",
+        "launch": {
+          "mode": "resume",
+          "sessionId": "/home/moxa/.claude/projects/-home-moxa-sdc1-home-moxa-SNMP-PLAN-E-buildroot-dl/ba3523f8-fd26-456e-8fce-c6165f41d9f4.jsonl",
+          "fork": true,
+          "flagArgs": [
+            "--add-dir",
+            "/home/moxa/SNMP_PLAN_E/buildroot/dl",
+            "--permission-mode",
+            "auto"
+          ]
+        },
+        "env": {
+          "CLAUDE_BG_ISOLATION": "none"
+        },
+        "isolation": "none",
+        "respawnFlags": [
+          "--add-dir",
+          "/home/moxa/SNMP_PLAN_E/buildroot/dl",
+          "--permission-mode",
+          "auto"
+        ],
+        "seed": {
+          "intent": "Context已經93%, 請問建議我整理文件, 然後開新的session, 還是/clear?",
+          "name": "SNMP GET改用AgentX路徑優化"
+        },
+        "cols": 135,
+        "rows": 73
+      },
+      "decModes": [
+        1000,
+        1002,
+        1003,
+        1006,
+        2004,
+        1004,
+        2031
+      ],
+      "firedInteractiveMarks": [
+        {
+          "kind": "content_paint",
+          "msgsLoaded": 2217,
+          "msgsInJsonl": 2217,
+          "msgsRenderedAtFirstPaint": 2189
+        },
+        {
+          "kind": "prompt_idle"
+        }
+      ],
+      "rvAuth": "844f4687cfe8de0e25f121aa5ae53d8d",
+      "ptyAuth": "d14bcf177484f6d411d5b5c094e04ed8"
+    }
+  }
+}

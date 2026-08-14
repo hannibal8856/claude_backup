@@ -1,0 +1,44 @@
+$ kill -TERM $(pidof app_moxa_framework)
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ 
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+$ ss -antp | grep 705
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1330,fd=47))                                                  
+TIME-WAIT  0      0          127.0.0.1:59900    127.0.0.1:705                                                                                     
+ESTAB      0      0          127.0.0.1:59888    127.0.0.1:705   users:(("ISS.exe",pid=300,fd=25))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:59888 users:(("snmpd",pid=1330,fd=48))                                                  
+l -20
+2023/05/04-15:57:24 Notice [app_moxa_framework.main] AgentX subagent connected as moxa-framework
+2023/05/04-16:26:51 Notice [app_moxa_framework.main] AgentX subagent moxa-framework started, master tcp:127.0.0.1:705
+2023/05/04-16:36:33 Notice [app_moxa_framework.main] AgentX subagent moxa-framework started, master tcp:127.0.0.1:705
+$ date
+Thu May  4 16:38:33 LOCAL 2023
+$ 

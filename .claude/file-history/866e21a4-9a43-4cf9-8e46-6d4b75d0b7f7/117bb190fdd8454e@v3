@@ -1,0 +1,156 @@
+#!/bin/bash
+#
+# rebuild_snmp_plan_e.sh -- canonical Buildroot rebuild chain for the SNMP Plan E
+# work on the MDS-G4000-L3-4XGS tree.
+#
+# WHY THIS SCRIPT EXISTS
+# ----------------------
+# The rebuild order is not obvious and getting it wrong fails SILENTLY -- the
+# build still exits 0, and the symptom shows up much later as "my change had no
+# effect", which reads like a code bug. It has cost real time twice:
+#
+#   * 2026-08-09: rust_moxa_build was run without first rebuilding the crate's
+#     own package. rust_moxa_build compiles the workspace but does NOT rsync
+#     each crate's source, so cargo compiled days-old source and exited 0.
+#     Three images were wasted before this was found.
+#   * 2026-08-12: the same mistake again, from a memory note that recorded the
+#     order backwards. Caught by the user mid-build, not by the build.
+#
+# THE RULE
+# --------
+#   1. <pkg>-rebuild rsyncs that package's source into output/build/<pkg>-custom/
+#   2. rust_moxa_build-rebuild is what actually runs `cargo build --workspace`
+#   => every Rust workspace member must be rebuilt BEFORE rust_moxa_build.
+#
+# The ordering requirement does NOT come from being a workspace member. It comes
+# from cargo reading the package through a path dependency into the sibling
+# -custom directory -- and those directories are filled by <pkg>-rebuild's rsync.
+# app_moxa_framework has 25 such dependencies:
+#
+#       grep 'path = "\.\./\.\./' dl/app_moxa_framework/Cargo.toml
+#
+# They include rust_moxa_common, rust_moxa_bff, the rust_moxa_*_layer crates,
+# lib_moxa_rust_*, app_moxa_token_module, and plugins_moxa_framework (note the
+# plural -- it is not one of the plugin_moxa_* packages below).
+#
+# The workspace members are only two -- check dl/rust_moxa_build/Cargo.toml, do
+# not assume from the name:
+#
+#       app_moxa_framework
+#       app_moxa_iss_config_loader
+#
+# Every other app_moxa_* (app_moxa_iss_10_1_0, app_moxa_fiber_check, ...) is not
+# Rust at all.
+#
+# The arrays below cover what the Plan E work touches, NOT all 25. If you edit a
+# crate that is not listed, add it to STAGE_LIBS -- otherwise cargo compiles the
+# old copy and exits 0, which is exactly the failure this script exists to stop.
+#
+# plugin_moxa_* must also precede rust_moxa_build, for a different reason: the
+# Rust side consumes what the plugins install into staging.
+#
+# ies_auto_mibs.c belongs to 3rdparty_net_snmp, NOT lib_moxa_ies_auto_mibs.
+# It compiles into libnetsnmpmibs.so -- libmoxaiesautomibs.so is a different
+# library whose name differs by a few characters. Verify the right one.
+#
+# USAGE
+#   ./rebuild_snmp_plan_e.sh              # full chain
+#   ./rebuild_snmp_plan_e.sh --rust-only  # only when the edit is confined to the
+#                                         # two members' own src/ -- it skips
+#                                         # STAGE_LIBS and STAGE_PLUGINS, so an
+#                                         # edit to any path dependency would be
+#                                         # compiled from the stale copy
+#   ./rebuild_snmp_plan_e.sh --dry-run    # print the command, build nothing
+#
+# The final `make` wipes output/images/, so this script copies any .swu still
+# sitting there into ~/swu/ first (cp -n: idempotent, never overwrites). That
+# backup used to be a comment telling you to remember; on 2026-08-12 an image
+# survived only because someone happened to check in time.
+
+set -o pipefail
+
+PROJECT=mds4xgl3
+RUNNER=/usr/local/bin/run_in_docker.sh
+
+# --- ordered stages: the order of these arrays IS the rule -------------------
+STAGE_LIBS=(
+    lib_moxa_utility
+    3rdparty_net_snmp          # ies_auto_mibs.c lives here
+    app_moxa_iss_10_1_0
+    lib_moxa_ies_auto_mibs
+    lib_moxa_rust_ies_auto_mibs
+    lib_moxa_rust_snmp_agentx
+    app_moxa_fiber_check
+)
+STAGE_RUST_MEMBERS=(           # MUST precede rust_moxa_build
+    app_moxa_framework
+    app_moxa_iss_config_loader
+)
+STAGE_PLUGINS=(                # MUST precede rust_moxa_build
+    plugin_moxa_snmp
+    plugin_moxa_fiber_check
+    plugin_moxa_system_information
+)
+
+DRY_RUN=0
+RUST_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)   DRY_RUN=1 ;;
+        --rust-only) RUST_ONLY=1 ;;
+        -h|--help)   sed -n '2,50p' "$0"; exit 0 ;;
+        *)           echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+
+pkgs=()
+if [ "$RUST_ONLY" -eq 0 ]; then
+    pkgs+=("${STAGE_LIBS[@]}")
+fi
+pkgs+=("${STAGE_RUST_MEMBERS[@]}")
+if [ "$RUST_ONLY" -eq 0 ]; then
+    pkgs+=("${STAGE_PLUGINS[@]}")
+fi
+
+cmd=""
+for p in "${pkgs[@]}"; do
+    cmd="${cmd}make ${p}-rebuild && "
+done
+cmd="${cmd}make rust_moxa_build-rebuild && make"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "$RUNNER \"$cmd\" $PROJECT"
+    exit 0
+fi
+
+# The final `make` wipes output/images/. Preserve whatever is there before it
+# does -- cp -n never overwrites, so running this repeatedly is harmless and a
+# concurrent copier cannot lose a race with us.
+mkdir -p ~/swu
+if cp -n ~/mds4xgl3/buildroot/output/images/*.swu* ~/swu/ 2>/dev/null; then
+    echo "backed up existing .swu to ~/swu/"
+fi
+
+LOG=~/build_$(date +%m%d_%H%M).log
+echo "log: $LOG"
+echo "order: ${pkgs[*]} -> rust_moxa_build -> make"
+"$RUNNER" "$cmd" "$PROJECT" > "$LOG" 2>&1
+rc=$?
+echo "exit: $rc"
+
+if [ "$rc" -ne 0 ]; then
+    echo "FAILED -- last 20 lines:" >&2
+    tail -20 "$LOG" >&2
+    exit "$rc"
+fi
+
+# And back up what we just built. The pre-build copy above saves the PREVIOUS
+# image; without this one the image you are about to flash exists only in
+# output/images/ and the next build deletes it -- which is exactly the hole
+# this script was written to close, missed on the other side.
+cp -n ~/mds4xgl3/buildroot/output/images/*.swu* ~/swu/ 2>/dev/null
+
+ls -l ~/mds4xgl3/buildroot/output/images/*.swu 2>/dev/null
+echo
+echo "Built OK, and copied to ~/swu/. Before trusting it, confirm the change is"
+echo "actually in the image; a green build is not evidence (see the header)."

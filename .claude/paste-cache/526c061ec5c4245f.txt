@@ -1,0 +1,31 @@
+$ tcpdump -i lo -s0 -w /tmp/agentx4.pcap port 705 &
+[1] 2189
+#                                                          [ 1966.263428] device lo entered promiscuous mode
+                [ 1966.268958] audit: type=1700 audit(1683300153.550:14): dev=lo prom=256 old_prom=0 auid=4294967295 uid=0 gid=0 ses=4294967295
+$ TD=$!
+tcpdump: listening on lo, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+$ sleep 3
+$ snmpgetnext -v2c -c public 192.168.127.253 .1.3.6.1.2.1.10.7.9.1.3.12
+.1.3.6.1.2.1.10.7.10.1.1.1 = INTEGER: 1
+$ sleep 3
+$ kill $TD
+# 1974.771835] device lo left promiscuous mode
+1m          [ 1974.776756] audit: type=1700 audit(1683300162.060:15): dev=lo prom=0 old_prom=256 auid=4294967295 uid=0 gid=0 ses=4294967295
+13 packets captured                                                  
+26 packets received by filter
+0 packets dropped by kernel
+$ 
+[1]  + done       tcpdump -i lo -s0 -w /tmp/agentx4.pcap port 705
+$ 
+$ scp /tmp/agentx4.pcap moxa@192.168.127.209:~/
+The authenticity of host '192.168.127.209 (192.168.127.209)' can't be established.
+ED25519 key fingerprint is: SHA256:Jzupw+Qb4fHmLCpOrNA3ZRzExXCTGKOoAPkkdLVKtq4
+This key is not known by any other names.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Failed to add the host to the list of known hosts (/root/.ssh/known_hosts).
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+moxa@192.168.127.209's password: 
+agentx4.pcap                                  100% 1458   462.6KB/s   00:00    
+$ 

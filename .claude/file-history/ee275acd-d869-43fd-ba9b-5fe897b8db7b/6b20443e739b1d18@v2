@@ -1,0 +1,160 @@
+---
+name: measure-snmp-walk
+description: Measure SNMP walk latency and completeness on the Moxa DUT, and prove on the wire whether an OID group is actually served over AgentX. Enforces the protocol that stops silently-wrong results — absolute /usr/bin paths, interleaved A/B/A, medians, completeness by MIB column, and a pcap check with mandatory positive and negative controls. Use whenever the answer is "X is faster/slower than Y" or "this group is/isn't going through AgentX", before adding +getfwd to agentx_owned.list, before quoting any number in a deck or ADR, or when asked to re-verify a previously measured figure.
+---
+
+# Measuring SNMP walk latency and AgentX routing on the DUT
+
+The hard part of this task is **not** getting a number. It is not getting a
+number that is confidently wrong. Every trap below has already produced a
+plausible-looking result that pointed the opposite way from the truth.
+
+**If you cannot satisfy the acceptance criteria below, report `INVALID` and say
+why. Never downgrade to "roughly" or "seems".**
+
+## The DUT is a single shared mutable resource
+
+There is one device: `192.168.127.253`. Partition state, bind mounts and the
+running `snmpd` are global. **Two agents measuring at once produce garbage that
+looks fine.** Before starting, make sure nobody else holds it; when handing a
+result back, say what state you left the device in.
+
+---
+
+## Trap list — read before writing any command
+
+| # | Trap | What it looks like when it bites |
+|---|---|---|
+| 1 | `~/.local/bin/snmpwalk` is a **pysnmp** build that hangs and returns 0 varbinds. `snmpgetnext` is *not* shadowed. | "getnext responds instantly but walk is completely stuck" → looks exactly like a hung DUT. **Always `/usr/bin/snmpwalk`, `/usr/bin/snmpget`, `/usr/bin/snmpset`, `/usr/bin/snmptranslate`.** |
+| 2 | **The DUT has no `timeout`.** `timeout 8 tcpdump …` → `command not found`, tcpdump never starts, every capture window returns 0 packets. | 0 is usually also the value the "no forwarding" hypothesis predicts, so the run *appears* to confirm it. Only the positive control catches this. |
+| 3 | **`:705` is shared.** Both the ISS subagent and the framework subagent connect to the AgentX master there. Background traffic is 3–16 pkt/s. | Filtering on `port 705` drowns the signal. Filter on **ISS's own ephemeral port** (`ss -tnp \| grep ':705 ' \| grep ISS`). **That port changes on every snmpd restart** — re-read it after each one. |
+| 4 | **Small N.** At 6 pkt/s background, a 3-second window is ~20 packets — the same order as a 20-request signal. | Positive control 36 vs negative control 33: "no difference". Use **N ≥ 150**. |
+| 5 | **Timing drift between arms.** Same build, same flag, 20 minutes apart, has drifted 7.5%. | An A→B comparison "finds" an effect the size of the drift. **Interleave A→B→A** and treat any effect smaller than the A→A2 spread as noise. |
+| 6 | **A value coming back is not proof of routing.** The forward path falls through to the local handler silently, and on a good day the local handler returns the correct value. | "It answers, so it's forwarded." It is not. Only pcap decides. |
+| 7 | **Mean vs median.** Every 9-rep arm measured so far contains exactly one ~1.2 s outlier, on both partitions. | Means move by 5–8% on one sample. **Report medians**, and report the worst separately. |
+| 8 | **Completeness by varbind count is wrong.** Delegation changes index encoding, so varbinds can drop while MIB coverage rises. | mxRstp: 235 → 227 varbinds but 25 → 27 MIB objects — reported as a regression if counted by varbind. **Judge completeness by MIB object (column) set** (ADR-0017). |
+
+---
+
+## Protocol
+
+### A. Latency + completeness
+
+Use `walk.sh`. It pins the absolute binary, does N reps, and reports the
+median, the worst, the varbind count and the distinct-column count.
+
+```bash
+./walk.sh .1.3.6.1.4.1.8691.603.1.1 9 planE
+```
+
+**Interleaving is mandatory whenever the two arms are not the same running
+process.** Different partition, different build, or anything that needed an
+`snmpd` restart between arms ⇒ run **A → B → A2**:
+
+```bash
+./walk.sh <oid> 9 A          # arm A
+#   … switch state …
+./walk.sh <oid> 9 B          # arm B
+#   … switch back …
+./walk.sh <oid> 9 A2         # arm A again
+```
+
+Report all three. **If |A − A2| is comparable to |A − B|, the result is
+`INCONCLUSIVE`** — say so rather than reporting B as an effect.
+
+Partition switching (non-destructive, auto-reverts nothing, ~3 min per reboot):
+
+```bash
+printf 'Y\nY\n' | /moxa/fwr_change.sh
+```
+
+After every reboot, **wait until uptime > 200 s** before the first rep, and
+confirm the build you think you are on:
+
+```bash
+cat /etc/moxa/version/BUILD_TIME ; fw_printenv fwrbootpart
+```
+
+### B. Is it actually going over AgentX?
+
+Use `fwdcheck.sh`. It runs entirely on the DUT: reads ISS's ephemeral port,
+starts a self-terminating capture, then walks five windows — idle, target,
+idle, positive control, negative control — and prints the deltas and a verdict.
+
+```bash
+./fwdcheck.sh <TARGET_OID> <POSITIVE_OID> <NEGATIVE_OID> [N] [IDLE]
+```
+
+- **TARGET** — the OID whose routing is in question (usually an RW column of the
+  group you are testing).
+- **POSITIVE** — an OID *known* to be served by the ISS subagent. An RO column
+  of a delegated group. **Not optional.** This is the only thing that catches
+  traps 2 and 3.
+- **NEGATIVE** — an OID known to be served in-master. An RW column of a group
+  with no `+getfwd`. This calibrates the background rate against a real request
+  load rather than an idle window.
+
+Example (testing whether `mxportdb/` forwards):
+
+```bash
+./fwdcheck.sh \
+  .1.3.6.1.4.1.8691.603.1.1.1.1.1.2.1 \
+  .1.3.6.1.4.1.8691.603.1.1.2.1.1.2.1 \
+  .1.3.6.1.4.1.8691.603.3.2.1.1.0
+```
+
+---
+
+## Acceptance criteria
+
+A run is **INVALID** — do not report its numbers at all — unless:
+
+1. `walk.sh` returned the **same varbind count on every rep** of an arm.
+   (A varying count means the walk aborted early; investigate before timing it.)
+2. `fwdcheck.sh` reports **POSITIVE ≥ 5 × NEGATIVE**. If it does not, the
+   harness is broken (tcpdump never started, wrong ephemeral port, snmpd
+   restarted mid-run) — fix it, do not interpret the target.
+
+Given a valid run, the verdict is:
+
+| Condition | Verdict |
+|---|---|
+| TARGET ≥ 5 × NEGATIVE | **FORWARDED** over AgentX |
+| TARGET ≤ 2 × NEGATIVE | **NOT FORWARDED** — served locally |
+| in between | **INCONCLUSIVE** — re-run with larger N |
+
+For latency, only claim an effect when it survives the interleave.
+
+---
+
+## Reporting
+
+Numbers travel between sessions and end up in slides. A number without
+provenance has already caused one wrong figure to propagate. **Every figure you
+hand back must carry:**
+
+- the **build** (`BUILD_TIME`) and **partition** it came from,
+- **N** and whether it is a median or a mean,
+- whether the arms were **interleaved**,
+- for a routing claim, the three pcap deltas and the control ratio.
+
+State what you left the DUT in: partition, any bind mounts still active, whether
+`snmpd` was restarted, and any capture files left in `/tmp`.
+
+---
+
+## Known state of the system (2026-08-10)
+
+Useful as ready-made controls, and as the answer to "has this already been
+measured?".
+
+- `+getfwd` in `agentx_owned.list` **actually forwards only for `ifmibdb/` and
+  `mxrstpdb/`**. On `mxportdb/` and `stdethdb/` it is a **silent no-op** —
+  measured, root cause not found (ADR-0025). Adding it there changes nothing, so
+  "no slowdown" there means "nothing happened", not "forwarding is free".
+- mxPort `.603.1.1`: mainline **0.768 s** / 154 vb, Plan E **0.681 s** / 193 vb
+  (interleaved, 9 reps each). The 0.871 s figure in the 2026-08-09 handoff is an
+  outlier. **The whole 2026-08-09 mainline table was not interleaved** — re-measure
+  before quoting any row of it.
+- mxRstp `.603.3.2`: mainline ~31 s → Plan E 0.63–0.66 s, 25 → 27 MIB objects.
+  The 31 s also comes from that un-interleaved batch.

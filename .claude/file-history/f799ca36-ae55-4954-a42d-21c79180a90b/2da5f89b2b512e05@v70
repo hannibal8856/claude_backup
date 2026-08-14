@@ -1,0 +1,73 @@
+SILENCE?=@
+
+PWD=$(shell pwd)
+URI_CTRL_HOOK_INC=$(PWD)/inc
+URI_CTRL_HOOK_OBJ=$(PWD)/obj
+URI_CTRL_HOOK_SRC=$(PWD)/src
+URI_CTRL_HOOK_APP=$(PWD)/app
+
+OBJ  = ${URI_CTRL_HOOK_OBJ}/ies_option.o
+OBJ += ${URI_CTRL_HOOK_OBJ}/ies_uri_handle.o
+OBJ += ${URI_CTRL_HOOK_OBJ}/ies_uri_handle_client.o
+OBJ += ${URI_CTRL_HOOK_OBJ}/iss_snmp_uri_remap.o
+APP  = ${URI_CTRL_HOOK_APP}/ies_uri_handle_client 
+
+ifeq ($(MOXA_SW_PACKAGE), L3_BASE)
+CFLAGS += -DINCLUDE_MOXA_L3
+endif
+CFLAGS += -Wall
+CFLAGS += -Werror
+CFLAGS += -fPIC
+CFLAGS += -I $(STAGING_DIR)/usr/include/
+CFLAGS += -I $(URI_CTRL_HOOK_INC)
+CFLAGS += -I $(URI_CTRL_HOOK_SRC)
+ifeq ($(MOXA_PRODUCT_MODEL), RKSG4000PL)
+CFLAGS += -DRKSG4000PL
+endif
+
+CC_VERSION_MAJOR = $(shell $(CC) -dumpversion | cut -f1 -d.)
+ifeq ($(shell [ $(CC_VERSION_MAJOR) -ge 12 ]; echo $$?),0)
+CFLAGS += -Wno-error=format-truncation
+endif
+
+LDFLAGS += -L$(STAGING_DIR)/lib/
+LDFLAGS += -L$(STAGING_DIR)/usr/lib/
+LDFLAGS += -lmoxa_system
+LDFLAGS += -lmoxa_util
+LDFLAGS += -lmoxa_data_buffer
+
+# Final Object
+.PHONY: all
+all: $(APP)
+
+${URI_CTRL_HOOK_APP}/ies_uri_handle_client : ${OBJ}
+	@echo "making" $@ " START ... "
+	$(SILENCE)${CC} ${LDFLAGS} -o $@ $^
+	@echo "making" $@ " DONE "
+
+
+# Object Module Dependency
+${URI_CTRL_HOOK_OBJ}/ies_uri_handle.o: ${URI_CTRL_HOOK_SRC}/ies_uri_handle.c
+	@echo "making" $@ " START ... "
+	$(SILENCE)${CC} ${CFLAGS} -c -o $@ $<
+	@echo "making" $@ " DONE "
+
+${URI_CTRL_HOOK_OBJ}/ies_uri_handle_client.o: ${URI_CTRL_HOOK_SRC}/ies_uri_handle_client.c
+	@echo "making" $@ " START ... "
+	$(SILENCE)${CC} ${CFLAGS} -c -o $@ $<
+	@echo "making" $@ " DONE "
+
+${URI_CTRL_HOOK_OBJ}/iss_snmp_uri_remap.o: ${URI_CTRL_HOOK_SRC}/iss_snmp_uri_remap.c
+	@echo "making" $@ " START ... "
+	$(SILENCE)${CC} ${CFLAGS} -c -o $@ $<
+	@echo "making" $@ " DONE "
+
+${URI_CTRL_HOOK_OBJ}/ies_option.o: ${URI_CTRL_HOOK_SRC}/ies_option.c
+	@echo "making" $@ " START ... "
+	$(SILENCE)${CC} ${CFLAGS} -c -o $@ $<
+	@echo "making" $@ " DONE "
+
+.PHONY: clean
+clean:
+	rm -rf ${OBJ}
+	rm -rf ${APP}

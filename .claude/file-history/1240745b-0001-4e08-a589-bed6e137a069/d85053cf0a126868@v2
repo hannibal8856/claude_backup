@@ -1,0 +1,98 @@
+#!/bin/bash
+# 逐 application 跨 defconfig 比對「解析出來的套件集合」,決定哪些 app 可以安全開 --locked。
+#
+#   ./compare_app_locks.sh <buildroot1> <buildroot2> [buildroot3 ...]
+#
+# 每個 buildroot 必須是「已 build 過、且各自使用不同 defconfig」的 workspace;
+# 腳本讀 output/build 下 cargo 實際產生的 Cargo.lock,不重新 build、不改任何檔案。
+#
+# 為什麼要比:MXNOS 用 dummy package 機制,某產品沒啟用的 plugin 會被換成沒有依賴的
+# stub,於是它整串傳遞依賴從依賴圖消失。同一個 app 在不同產品解出的套件集合因此不同,
+# 一份 committed lock 就無法對所有產品都通過 --locked。
+#
+# 兩種差異的意義完全不同:
+#   套件集合不同 → 依賴圖隨產品而變 → 單一 lock 無法開 --locked(結構性)
+#   同名不同版本 → 解析結果不穩定    → 沒有 committed lock 的直接證據(急迫)
+
+set -u
+[ $# -ge 2 ] || { echo "usage: $0 <buildroot1> <buildroot2> [buildroot3 ...]"; exit 2; }
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+labels=(); n=0
+
+for br in "$@"; do
+    # 允許傳 workspace 根目錄或 buildroot 目錄
+    [ -d "$br/output/build" ] || [ ! -d "$br/buildroot/output/build" ] || br="$br/buildroot"
+    [ -d "$br/output/build" ] || { echo "略過(無 output/build): $br"; continue; }
+    lbl=$(sed -n 's#^BR2_DEFCONFIG="\(.*\)"#\1#p' "$br/.config" 2>/dev/null | xargs -r basename | sed 's/_defconfig$//')
+    [ -n "$lbl" ] || lbl=$(basename "$br")
+    labels+=("$lbl"); n=$((n+1))
+    # cargo 只在 resolve 的根寫 lock,所以 output/build 下的 lock ≈ application/workspace
+    find "$br/output/build" -maxdepth 3 -name Cargo.lock 2>/dev/null | while read -r f; do
+        key=$(dirname "${f#"$br/output/build"/}"); key=${key//-custom/}
+        # name 與 version 成對出現在每個 [[package]] 區塊
+        awk '/^name = /{gsub(/"/,"",$3); nm=$3} /^version = /{gsub(/"/,"",$3); if(nm!=""){print nm" "$3; nm=""}}' \
+            "$f" | sort -u > "$TMP/$lbl@@${key//\//__}"
+    done
+done
+[ "$n" -ge 2 ] || { echo "至少需要兩個已 build 的 buildroot"; exit 2; }
+
+echo "比對 $n 個 defconfig: ${labels[*]}"
+echo
+
+keys=$(ls "$TMP" | sed 's/^[^@]*@@//' | sort -u)
+safe=(); unsafe=(); drift=(); partial=()
+
+for k in $keys; do
+    have=(); for l in "${labels[@]}"; do [ -f "$TMP/$l@@$k" ] && have+=("$l"); done
+    app=${k//__/\/}
+    if [ ${#have[@]} -lt 2 ]; then partial+=("$app (只在 ${have[*]:-無} 出現)"); continue; fi
+
+    ref=${have[0]}; setdiff=""; verdiff=""
+    for l in "${have[@]:1}"; do
+        a="$TMP/$ref@@$k"; b="$TMP/$l@@$k"
+        only_a=$(comm -23 <(cut -d' ' -f1 "$a"|sort -u) <(cut -d' ' -f1 "$b"|sort -u) | tr '\n' ' ')
+        only_b=$(comm -13 <(cut -d' ' -f1 "$a"|sort -u) <(cut -d' ' -f1 "$b"|sort -u) | tr '\n' ' ')
+        [ -n "$only_a$only_b" ] && setdiff="$setdiff\n      vs $l: 僅 $ref 有 [${only_a:-—}] / 僅 $l 有 [${only_b:-—}]"
+        # 版本漂移 = 兩邊都有的套件,但版本「集合」不同。
+        # 不能用 name 單欄 join —— 一份 lock 內同名套件可以並存多個 major(regex 0.2 與 1.x),
+        # join 會交叉配對而產生假陽性。
+        both=$(comm -12 <(cut -d' ' -f1 "$a"|sort -u) <(cut -d' ' -f1 "$b"|sort -u))
+        difn=$(comm -3 <(sort -u "$a") <(sort -u "$b") | sed 's/^\t//' | cut -d' ' -f1 | sort -u)
+        for nm in $(comm -12 <(echo "$both") <(echo "$difn")); do
+            va=$(awk -v n="$nm" '$1==n{printf "%s ",$2}' "$a")
+            vb=$(awk -v n="$nm" '$1==n{printf "%s ",$2}' "$b")
+            verdiff="$verdiff\n        $nm: [${va% }] ($ref) vs [${vb% }] ($l)"
+        done
+    done
+
+    if [ -n "$verdiff" ]; then
+        drift+=("$app"); echo "  版本漂移  $app$(printf "$verdiff")"
+    fi
+    if [ -n "$setdiff" ]; then
+        unsafe+=("$app"); echo "  圖形不同  $app$(printf "$setdiff")"
+    elif [ -z "$verdiff" ]; then
+        safe+=("$app")
+    fi
+done
+
+echo
+echo "======================================================================="
+echo "可安全開 --locked(所有 defconfig 解出的套件集合與版本完全一致): ${#safe[@]}"
+for a in "${safe[@]:-}"; do [ -n "$a" ] && echo "  + $a"; done
+echo
+echo "不可開 --locked(依賴圖隨產品而變,需每產品一份 lock 或只做漂移偵測): ${#unsafe[@]}"
+for a in "${unsafe[@]:-}"; do [ -n "$a" ] && echo "  - $a"; done
+if [ ${#drift[@]} -gt 0 ]; then
+  echo
+  echo "⚠ 有版本漂移(解析不穩定,應盡快 commit lock): ${#drift[@]}"
+  for a in "${drift[@]}"; do echo "  ! $a"; done
+fi
+if [ ${#partial[@]} -gt 0 ]; then
+  echo
+  echo "資料不足(未在兩個以上的 defconfig 出現,無法判斷): ${#partial[@]}"
+  for a in "${partial[@]}"; do echo "  ? $a"; done
+fi
+echo
+echo "提醒:結論只涵蓋這 $n 個 defconfig。定版分支若還帶其他產品,請把它們也 build 出來一起比。"
+exit 0

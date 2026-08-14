@@ -1,0 +1,75 @@
+//! lib_moxa_rust_snmp_agentx — safe-ish Rust FFI over the C `lib_moxa_snmp_agentx`.
+//!
+//! Lets a Rust process (app_moxa_framework) act as an AgentX subagent. Links
+//! `libmoxasnmpagentx.so`. As a library crate this compiles to an rlib without
+//! resolving the C symbols (that happens when the final binary links), so it
+//! type-checks with a plain `cargo build` even off-target.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
+
+/// net-snmp `oid` is `unsigned long` on this target (32-bit ARM => 4 bytes);
+/// `c_ulong` matches it exactly on any target.
+pub type Oid = c_ulong;
+
+/// net-snmp `Netsnmp_Node_Handler`:
+/// `int (*)(mib_handler*, handler_registration*, agent_request_info*, request_info*)`.
+/// The four arguments are opaque here; the concrete handler (framework side)
+/// casts them to the net-snmp types.
+pub type MoxaHandler =
+    extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> c_int;
+
+// HANDLER_CAN_* modes (net-snmp agent_handler.h) for convenience.
+pub const HANDLER_CAN_RONLY: i32 = 0x01; // GETANDGETNEXT
+pub const HANDLER_CAN_SET: i32 = 0x02;
+pub const HANDLER_CAN_RWRITE: i32 = HANDLER_CAN_RONLY | HANDLER_CAN_SET;
+
+#[link(name = "moxasnmpagentx")]
+extern "C" {
+    fn MoxaAgentX_Init(name: *const c_char) -> c_int;
+    fn MoxaAgentX_RegisterScalar(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        mode: c_int,
+        h: MoxaHandler,
+    ) -> c_int;
+    fn MoxaAgentX_RegisterTestInt(
+        descr: *const c_char,
+        o: *const Oid,
+        olen: usize,
+        value: c_long,
+    ) -> c_int;
+    fn MoxaAgentX_RunInThread() -> c_int;
+    fn MoxaAgentX_Shutdown();
+}
+
+/// Initialize the process as an AgentX subagent (connects to snmpd master:705).
+/// Call once before any `register_scalar`. Returns 0 on success.
+pub fn init(daemon_name: &str) -> i32 {
+    let c = CString::new(daemon_name).expect("daemon_name has NUL");
+    unsafe { MoxaAgentX_Init(c.as_ptr()) }
+}
+
+/// Register one scalar OID (RO/RW via `mode`) with a Rust handler.
+pub fn register_scalar(descr: &str, oid: &[Oid], mode: i32, handler: MoxaHandler) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterScalar(c.as_ptr(), oid.as_ptr(), oid.len(), mode, handler) }
+}
+
+/// Register a read-only integer scalar backed by an internal value (B0 test).
+/// `oid` is the full instance OID (e.g. ...99.1.0).
+pub fn register_test_int(descr: &str, oid: &[Oid], value: i64) -> i32 {
+    let c = CString::new(descr).expect("descr has NUL");
+    unsafe { MoxaAgentX_RegisterTestInt(c.as_ptr(), oid.as_ptr(), oid.len(), value as c_long) }
+}
+
+/// Spawn the dedicated AgentX loop thread (does not use tokio). Returns 0 on success.
+pub fn run_in_thread() -> i32 {
+    unsafe { MoxaAgentX_RunInThread() }
+}
+
+/// Stop the loop and shut net-snmp down.
+pub fn shutdown() {
+    unsafe { MoxaAgentX_Shutdown() }
+}

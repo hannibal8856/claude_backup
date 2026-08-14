@@ -1,0 +1,16 @@
+menuconfig BR2_PACKAGE_LIB_MOXA_RUST_SNMP_AGENTX
+    bool "lib_moxa_rust_snmp_agentx"
+    select BR2_PACKAGE_LIB_MOXA_SNMP_AGENTX
+    help
+        Rust FFI binding over lib_moxa_snmp_agentx (Plan D).
+        Lets a Rust process act as an AgentX subagent.
+
+if BR2_PACKAGE_LIB_MOXA_RUST_SNMP_AGENTX
+config BR2_PACKAGE_LIB_MOXA_RUST_SNMP_AGENTX_URL
+    string "URL"
+    default "git@gitlab.com:moxa/sw/switch/general/linuxframework/library/lib_moxa_rust_snmp_agentx.git"
+
+config BR2_PACKAGE_LIB_MOXA_RUST_SNMP_AGENTX_REV
+    string "REV"
+    default "develop"
+endif

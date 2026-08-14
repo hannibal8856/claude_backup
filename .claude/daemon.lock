@@ -1,0 +1,16 @@
+{
+  "pid": 2375887,
+  "version": "2.1.222",
+  "jsonPath": "/home/moxa/.claude/daemon.json",
+  "logPath": "/home/moxa/.claude/daemon.log",
+  "startedAt": 1785883492570,
+  "origin": "transient",
+  "spawnedBy": {
+    "label": "claude",
+    "cwd": "/home/moxa/sdc1/home/moxa/SNMP_PLAN_E/buildroot/dl",
+    "pid": 2565727
+  },
+  "procStart": "109596965",
+  "launchTarget": "/home/moxa/.local/share/claude/versions/2.1.222",
+  "processWrapper": ""
+}

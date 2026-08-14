@@ -1,0 +1,33 @@
+$ mount
+/dev/sda7 on / type squashfs (ro,relatime)
+devtmpfs on /dev type devtmpfs (rw,relatime,size=517016k,nr_inodes=129254,mode=755)
+tmpfs on /overlayfs type tmpfs (rw,relatime)
+overlay on /var type overlay (rw,relatime,lowerdir=/var,upperdir=/overlayfs/overlayfs//var_rw/upper,workdir=/overlayfs/overlayfs//var_rw/work)
+overlay on /etc type overlay (rw,relatime,lowerdir=/etc,upperdir=/overlayfs/overlayfs//etc_rw/upper,workdir=/overlayfs/overlayfs//etc_rw/work)
+overlay on /home type overlay (rw,relatime,lowerdir=/home,upperdir=/overlayfs/overlayfs//home_rw/upper,workdir=/overlayfs/overlayfs//home_rw/work)
+overlay on /usr/share type overlay (rw,relatime,lowerdir=/usr/share,upperdir=/overlayfs/overlayfs//usr/share_rw/upper,workdir=/overlayfs/overlayfs//usr/share_rw/work)
+overlay on /tmp type overlay (rw,relatime,lowerdir=/tmp,upperdir=/overlayfs/overlayfs//tmp_rw/upper,workdir=/overlayfs/overlayfs//tmp_rw/work)
+overlay on /mnt type overlay (rw,relatime,lowerdir=/mnt,upperdir=/overlayfs/overlayfs//mnt_rw/upper,workdir=/overlayfs/overlayfs//mnt_rw/work)
+overlay on /opt type overlay (rw,relatime,lowerdir=/opt,upperdir=/overlayfs/overlayfs//opt_rw/upper,workdir=/overlayfs/overlayfs//opt_rw/work)
+overlay on /media type overlay (rw,relatime,lowerdir=/media,upperdir=/overlayfs/overlayfs//media_rw/upper,workdir=/overlayfs/overlayfs//media_rw/work)
+proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)
+sysfs on /sys type sysfs (rw,nosuid,nodev,noexec,relatime)
+tmpfs on /dev/shm type tmpfs (rw,nosuid,nodev)
+devpts on /dev/pts type devpts (rw,nosuid,noexec,relatime,gid=5,mode=620)
+tmpfs on /run type tmpfs (rw,nosuid,nodev,size=206860k,nr_inodes=819200,mode=755)
+tmpfs on /sys/fs/cgroup type tmpfs (ro,nosuid,nodev,noexec,size=4096k,nr_inodes=1024,mode=755)
+cgroup on /sys/fs/cgroup/systemd type cgroup (rw,nosuid,nodev,noexec,relatime,xattr,release_agent=/usr/lib/systemd/systemd-cgroups-agent,name=systemd)
+cgroup on /sys/fs/cgroup/net_cls type cgroup (rw,nosuid,nodev,noexec,relatime,net_cls)
+mqueue on /dev/mqueue type mqueue (rw,nosuid,nodev,noexec,relatime)
+ramfs on /run/credentials/systemd-sysctl.service type ramfs (ro,nosuid,nodev,noexec,relatime,mode=0700)
+ramfs on /run/credentials/systemd-tmpfiles-setup-dev.service type ramfs (ro,nosuid,nodev,noexec,relatime,mode=0700)
+/dev/sda10 on /moxa type ext4 (rw,relatime,data=ordered)
+tmpfs on /moxa/run type tmpfs (rw)
+/dev/sda9 on /env type vfat (rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=iso8859-1,shortname=mixed,errors=remount-ro)
+$ 
+$ which framework
+framework not found
+$ ps ax | grep framework
+2062 ?        Ssl    0:02 /usr/bin/app_moxa_framework
+3945 ttyS0    S+     0:00 grep framework
+$ 

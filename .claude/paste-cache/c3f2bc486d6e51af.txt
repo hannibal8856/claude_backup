@@ -1,0 +1,57 @@
+{"id":2736678732,"iid":156617,"project_id":47575741,"sha":"64112165855ca27cc4fefb95666e250a2affcfc6","ref":"main","status":"created","source":"api","created_at":"2026-08-06T09:31:36.131Z","updated_at":"2026-08-06T09:31:36.131Z","web_url":"https://gitlab.com/moxa/sw/sre/inner/sign-server/sign-for-linux/-/pipelines/2736678732","before_sha":"0000000000000000000000000000000000000000","tag":false,"yaml_errors":null,"user":{"id":15167569,"username":"oscarmh.tu.moxa","public_email":"","name":"OscarMH Tu","state":"active","locked":false,"avatar_url":"https://gitlab.com/uploads/-/system/user/avatar/15167569/avatar.png","web_url":"https://gitlab.com/oscarmh.tu.moxa"},"started_at":null,"finished_at":null,"committed_at":null,"duration":null,"queued_duration":null,"coverage":null,"detailed_status":{"icon":"status_created","text":"Created","label":"created","group":"created","tooltip":"created","has_details":false,"details_path":"/moxa/sw/sre/inner/sign-server/sign-for-linux/-/pipelines/2736678732","illustration":null,"favicon":"/assets/ci_favicons/favicon_status_created-4b975aa976d24e5a3ea7cd9a5713e6ce2cd9afd08b910415e96675de35f64955.png"},"archived":false}
+2736678732
+Sign pipeline web url: https://gitlab.com/moxa/sw/sre/inner/sign-server/sign-for-linux/-/pipelines/2736678732
+Waiting child sign pipeline to complete... (status: pending)(0)
+Waiting child sign pipeline to complete... (status: running)(1)
+Waiting child sign pipeline to complete... (status: running)(2)
+Waiting child sign pipeline to complete... (status: running)(3)
+Waiting child sign pipeline to complete... (status: running)(4)
+Waiting child sign pipeline to complete... (status: success)(5)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100   326  100   326    0     0    465      0 --:--:-- --:--:-- --:--:--   464
+100 65.8M  100 65.8M    0     0  9023k      0  0:00:07  0:00:07 --:--:-- 11.9M
+Archive:  artifacts.zip
+   creating: hsm_download_files/signed/
+  inflating: hsm_download_files/signed/armada-370-moxa-mds-g4000-4xgs.itb  
+  inflating: hsm_download_files/signed/rootfs.squashfs  
+  inflating: hsm_download_files/signed/rootfs.squashfs_crt  
+  inflating: hsm_download_files/signed/rootfs.squashfs_hash  
+success
+INFO: cmd: "mkdir -p "/home/moxa/mds4xgl3/buildroot/output/build/genimage.tmp"" (stderr):
+INFO: cmd: "rm -rf "/home/moxa/mds4xgl3/buildroot/output/build/genimage.tmp"/*" (stderr):
+INFO: cmd: "mkdir -p "/home/moxa/mds4xgl3/buildroot/output/build/genimage.tmp"" (stderr):
+INFO: cmd: "cp -a "/home/moxa/mds4xgl3/buildroot/output/target" "/home/moxa/mds4xgl3/buildroot/output/build/genimage.tmp/root"" (stderr):
+INFO: cmd: "mkdir -p "/home/moxa/mds4xgl3/buildroot/output/images"" (stderr):
+INFO: vfat(boot.vfat): cmd: "mkdosfs   '/home/moxa/mds4xgl3/buildroot/output/images/boot.vfat'" (stderr):
+INFO: vfat(boot.vfat): adding file 'armada-370-moxa-mds-g4000-4xgs.itb' as 'armada-370-moxa-mds-g4000-4xgs.itb' ...
+INFO: vfat(boot.vfat): cmd: "MTOOLS_SKIP_CHECK=1 mcopy -sp -i '/home/moxa/mds4xgl3/buildroot/output/images/boot.vfat' '/home/moxa/mds4xgl3/buildroot/output/images/armada-370-moxa-mds-g4000-4xgs.itb' '::'" (stderr):
+Kernel partition size: 33554432
+Kernel partition sha256sum: a040dd6649b72aaba19b1f10ab220ad4c84b17c936cb76b8436abf240f7e043e
+rootfs partition size: 73904640
+rootfs partition sha256sum: 97df11d22379e42db9acebbc6fbd2dee407b5de2783a6dc49c1d69d696a7402e
+sw-description
+preinstall.sh
+postinstall.sh
+fwr.boot.vfat.gz
+fwr.rootfs.squashfs.gz
+134347 blocks
+IMAGE : /home/moxa/mds4xgl3/buildroot/output/images/FWR_MDS-G4000-L3-4XGS_v7.0_2026_0806_1730.swu
+SHA-256 API Test: SUCCEEDED
+SHA: e88288037f6093fb78f194b9dbb2f8ecc71a1d37d695a39e99cbe979cfaf5fa0
+Checksum Algorithm: 0x00000001
+SHA(4 bytes): 0xcfaf5fa0
+-------------------------------------------
+header length  = 536870912,(0x20000000)
+Check Sum Algo = 0x01000000
+Check Sum      = 0xcfaf5fa0
+File Length    = 9836804,(0x00961904)
+Magic Code     = 0x12050000
+Version        = 0x07000000
+Built Time     = 0x1a080611
+-------------------------------------------
+write /home/moxa/mds4xgl3/buildroot/output/images/FWR_MDS-G4000-L3-4XGS_v7.0_2026_0806_1730.swu.header ok.
+Copy MIB Zip File...Done
+Copy EthernetIP Zip File...Done
+Copy PROFINET GSDML Zip File...Done
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/dl/plugin_moxa_snmp] (snmp-plan-E) 17:32 $ run_in_docker.sh "make"

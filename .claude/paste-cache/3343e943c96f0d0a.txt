@@ -1,0 +1,102 @@
+$ grep 'PlanE-DBG' /run/util_debug/debug_log_5 | tail -20
+$ cat -n /run/util_debug/debug_log_5 | tail -n 100
+    19  uri   : mxrstpdb/rstpStatPortTable/ 
+    20  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    21  uri   : mxrstpdb/rstpStatSwiftSwitchStatus 
+    22  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    23  uri   : std1w1db/ieee8021SpanningTreeTable/ 
+    24  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    25  uri   : std1d1db/ieee8021BridgeBaseTable/ 
+    26  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    27  uri   : mxstcldb/stclConfigTable/ 
+    28  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    29  uri   : mxqosdb/qosConfigDefaultPriorityTable/ 
+    30  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    31  uri   : mxqosdb/qosConfigPbitPreferenceTable/ 
+    32  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    33  uri   : mxqosdb/qosConfigMeterTable/ 
+    34  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    35  uri   : mxqosdb/qosConfigSchedulerTable/ 
+    36  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    37  uri   : mxqosdb/qosConfigShaperTable/ 
+    38  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    39  uri   : stdladb/dot3adAggPortTable/ 
+    40  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    41  uri   : fsladb/fsLaPortTable/ 
+    42  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    43  uri   : mxigmpdb/igmpsnpConfigVlanTable/ 
+    44  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    45  uri   : mxigmpdb/igmpsnpStatusVlanTable/ 
+    46  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    47  uri   : mxradiusdb/radiusConfigRadiusServerTable/ 
+    48  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    49  uri   : stdpnadb/dot1xPaePortTable/ 
+    50  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    51  uri   : mxtcstdb/tcstConfigClearPortStatisticsTable/ 
+    52  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    53  uri   : mxtcstdb/tcstStatGroupTable/ 
+    54  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+    55  uri   : mxrlpsdb/rlpsConfigPortThresholdTable/ 
+    56  ies_uri_handle_client@279             
+    57  ies_uri_handle_client@280 iputURI  'mxportdb/portStatTable/' 
+    58  ies_uri_handle_client@281 iputFile '/moxa/run/issStatusPlugin/mxport_portstat_remap' 
+    59  get_oid: oid len = '14'
+    60   01  03  06  01  04  01  8691  603 
+    61   01  01  02  01  01  01 
+    62  get_table_pRootOid: oid len = '14'
+    63   01  03  06  01  04  01  8691  603 
+    64   01  01  02  01  01  01 
+    65  get_oid: oid len = '14'
+    66   01  03  06  01  04  01  8691  603 
+    67   01  01  02  01  01  02 
+    68  get_table_pRootOid: oid len = '14'
+    69   01  03  06  01  04  01  8691  603 
+    70   01  01  02  01  01  02 
+    71  get_oid: oid len = '14'
+    72   01  03  06  01  04  01  8691  603 
+    73   01  01  02  01  01  03 
+    74  get_table_pRootOid: oid len = '14'
+    75   01  03  06  01  04  01  8691  603 
+    76   01  01  02  01  01  03 
+    77  get_oid: oid len = '14'
+    78   01  03  06  01  04  01  8691  603 
+    79   01  01  02  01  01  04 
+    80  get_table_pRootOid: oid len = '14'
+    81   01  03  06  01  04  01  8691  603 
+    82   01  01  02  01  01  04 
+    83  get_oid: oid len = '14'
+    84   01  03  06  01  04  01  8691  603 
+    85   01  01  02  01  01  05 
+    86  get_table_pRootOid: oid len = '14'
+    87   01  03  06  01  04  01  8691  603 
+    88   01  01  02  01  01  05 
+    89  ies_uri_handle_client@310             
+    90  ies_uri_handle_client@311 oputFile '/moxa/run/issStatusPlugin/mxport_portstat' 
+    91  ies_uri_handle_client@279             
+    92  ies_uri_handle_client@280 iputURI  'mxportdb/portStatLinkUpDelayTable/' 
+    93  ies_uri_handle_client@281 iputFile '/moxa/run/issStatusPlugin/mxport_linkupDelay_remap' 
+    94  get_oid: oid len = '14'
+    95   01  03  06  01  04  01  8691  603 
+    96   01  01  02  02  01  01 
+    97  get_table_pRootOid: oid len = '14'
+    98   01  03  06  01  04  01  8691  603 
+    99   01  01  02  02  01  01 
+   100  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   101  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   102  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   103  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   104  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   105  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   106  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   107  % ies_auto_mibs_setup_entry_flags_net_mxIpifdb@41 : here ...
+   108  get_oid: oid len = '14'
+   109   01  03  06  01  04  01  8691  603 
+   110   01  01  02  02  01  02 
+   111  get_table_pRootOid: oid len = '14'
+   112   01  03  06  01  04  01  8691  603 
+   113   01  01  02  02  01  02 
+   114  ies_uri_handle_client@310             
+   115  ies_uri_handle_client@311 oputFile '/moxa/run/issStatusPlugin/mxport_linkupDelay' 
+   116  moxaSnmpHandle_UtilMibEntryGenerateTableIndexEntry@350 : MAKEUP_INDEX_FOR_ISS 
+   117  uri   : mxmabdb/mabConfigLocalDatabaseTable/ 
+   118  init_ies_auto_mibs Done !!

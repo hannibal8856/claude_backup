@@ -1,0 +1,44 @@
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:37 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.3.1.0
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+
+real    0m0.017s
+user    0m0.003s
+sys    0m0.003s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:48 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.603.3.4.1.2.1.2.1
+iso.3.6.1.4.1.8691.603.3.4.1.2.1.2.1 = INTEGER: 2
+
+real    0m0.012s
+user    0m0.004s
+sys    0m0.001s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:48 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.3.1.0
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+
+real    0m0.011s
+user    0m0.002s
+sys    0m0.003s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:49 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.3.2.0
+iso.3.6.1.4.1.8691.603.3.4.1.3.2.0 = INTEGER: 2
+
+real    0m0.013s
+user    0m0.006s
+sys    0m0.001s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:49 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.3.3.0
+iso.3.6.1.4.1.8691.603.3.4.1.3.3.0 = INTEGER: 4
+
+real    0m0.013s
+user    0m0.000s
+sys    0m0.007s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:49 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.4.1.0
+iso.3.6.1.4.1.8691.603.3.4.1.4.1.0 = INTEGER: 0
+
+real    0m0.011s
+user    0m0.000s
+sys    0m0.005s
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:50 $ time /usr/bin/snmpget -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.2.1.3.2
+snmpget      snmpgetnext  
+[moxa@moxa-HP-EliteDesk-800-G1-TWR ~/mds4xgl3/buildroot/output/images] (2023.02.11_develop) 13:50 $ time /usr/bin/snmpgetnext -v2c -c public 192.168.127.253 iso.3.6.1.4.1.8691.603.3.4.1.2.1.3.2
+iso.3.6.1.4.1.8691.603.3.4.1.3.1.0 = INTEGER: 2
+
+real    0m3.886s
+user    0m0.000s
+sys    0m0.008s

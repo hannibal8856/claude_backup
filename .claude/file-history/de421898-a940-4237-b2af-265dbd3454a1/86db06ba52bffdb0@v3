@@ -1,0 +1,106 @@
+/*
+ * lib_moxa_snmp_agentx - AgentX subagent shim for app_moxa_framework.
+ *
+ * This library exists to keep libnetsnmpmibs out of the framework process
+ * (design doc D6 / section 5.2). It links -lnetsnmpagent -lnetsnmp and nothing
+ * else from net-snmp; anything that needs the MIB tree does not belong here.
+ *
+ * Threading: net-snmp is not thread-safe and this library does not make it so.
+ * Every function below must be called from one and the same thread, which for
+ * app_moxa_framework means one tokio task (design D5 / section 5.3). There is
+ * no locking, and adding some would not make net-snmp reentrant.
+ *
+ * OID subidentifiers cross this API as unsigned long rather than net-snmp's
+ * oid typedef, so the Rust FFI does not have to know net-snmp's headers. The
+ * implementation asserts at compile time that the two are the same width.
+ */
+
+#ifndef LIB_MOXA_SNMP_AGENTX_AGENTX_H
+#define LIB_MOXA_SNMP_AGENTX_AGENTX_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * Session lifecycle. Call order is fixed: init -> register* -> poll loop.
+ */
+
+/* Enable subagent mode and open the AgentX session. Returns 0 on success,
+ * -1 on failure. Calling it twice is a no-op that returns 0.
+ *
+ * `socket` is the master's AgentX address, in net-snmp's transport syntax
+ * (e.g. "tcp:127.0.0.1:705"). Pass NULL to accept net-snmp's compiled-in
+ * default, which is the unix socket /var/agentx/master.
+ *
+ * This is a parameter rather than a constant because the address is a product
+ * decision, not a property of this library: whoever writes snmpd.conf decides
+ * it, and a subagent pointed elsewhere does not fail loudly - net-snmp keeps
+ * retrying in the background and the session simply never appears. */
+int  mx_agentx_init(const char *name, const char *socket);
+
+void mx_agentx_shutdown(void);
+
+/*
+ * Register one whole OID arc. Per D3 / section 4.2 this is arc-level, not
+ * per-column: pass the arc root and its length. Registering finer than
+ * in-master is what the namelen watchdog in ies-auto-mibs catches, and it
+ * breaks SET silently - see design section 4.4.
+ * Returns 0 on success, -1 on failure.
+ */
+int  mx_agentx_register_arc(const unsigned long *oid, size_t oid_len,
+                            int priority);
+
+/*
+ * Event loop, modelled on FRR's agentx_events_update()
+ * (~/SRC/frr/lib/agentx.c:94). The caller owns the reactor; this returns the
+ * fds net-snmp wants watched and how long it may sleep.
+ *
+ * Fills fds[] with the readable-watch set and returns how many were written,
+ * or -1 on error (including fds_cap being too small). *maxfd is net-snmp's
+ * own highest fd + 1. *timeout_us is -1 when net-snmp has no deadline, which
+ * is the same condition as *block being non-zero.
+ *
+ * Re-query after every read and every timeout: the fd set changes when the
+ * AgentX session reconnects.
+ */
+int  mx_agentx_select_info(int *maxfd, int *fds, size_t fds_cap,
+                           long *timeout_us, int *block);
+void mx_agentx_handle_read(int fd);
+void mx_agentx_handle_timeout(void);
+
+/*
+ * Value delivery. The Rust handler is called back with a request id and an
+ * OID; it answers with exactly one of these. Types are scalars only - no
+ * netsnmp_request_info, no unions, no macros across the FFI boundary (D6).
+ *
+ * Each returns 0 if the value was delivered, -1 if req does not name the
+ * request currently being served - which is what happens if a handler tries
+ * to answer twice, or answers after it has already returned.
+ */
+int  mx_agentx_reply_integer(unsigned long req, long value);
+int  mx_agentx_reply_octets(unsigned long req, const unsigned char *buf,
+                            size_t len);
+int  mx_agentx_reply_oid(unsigned long req, const unsigned long *oid,
+                         size_t oid_len);
+int  mx_agentx_reply_nosuch(unsigned long req);
+
+/*
+ * Handler registration: Rust supplies one callback for all arcs.
+ *
+ * The callback runs synchronously inside the net-snmp dispatcher, on the same
+ * thread, and must not block. Returning non-zero, or returning without having
+ * called one of mx_agentx_reply_*, both yield noSuchObject for that varbind.
+ */
+typedef int (*mx_agentx_get_cb)(unsigned long req,
+                                const unsigned long *oid, size_t oid_len,
+                                void *ctx);
+void mx_agentx_set_get_handler(mx_agentx_get_cb cb, void *ctx);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIB_MOXA_SNMP_AGENTX_AGENTX_H */

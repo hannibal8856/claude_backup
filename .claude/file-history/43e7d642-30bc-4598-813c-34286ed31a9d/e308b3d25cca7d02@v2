@@ -1,0 +1,35 @@
+---
+name: edsg4000-plan-e-port-scope
+description: "The SNMP Plan E port to EDS-G4000 spans 13 repos on branch snmp-plan-E-edsg4000-mainline, not the 2 originally assumed"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 43e7d642-30bc-4598-813c-34286ed31a9d
+  modified: 2026-08-09T03:44:11.985Z
+---
+
+Porting the SNMP AgentX Plan E work from the mds4xgl3 tree to
+`/home/moxa/edsg4000/buildroot` spans **13 repos**, all landed on branch
+`snmp-plan-E-edsg4000-mainline` (created and rebased onto each repo's `origin/develop`
+on 2026-08-09, zero conflicts):
+
+`app_moxa_framework` (36) · `3rdparty_net_snmp` (32) · `lib_moxa_ies_auto_mibs` (29) ·
+`app_moxa_iss_10_1_0` (20) · `lib_moxa_rust_snmp_agentx` (15) · `plugin_moxa_snmp` (13) ·
+`lib_moxa_snmp_agentx` (13) · `lib_moxa_rust_ies_auto_mibs` (13) · `moxa` overlay (12) ·
+`lib_moxa_utility` (2) · `app_moxa_fiber_check` (2) ·
+`plugin_moxa_system_information` (1) · `plugin_moxa_fiber_check` (1, branched from
+`snmp-agentx` not `snmp-plan-E`).
+
+**Why:** two things make the scope easy to under-count. The `moxa` **buildroot overlay
+is its own git repo** (`buildsystem/moxa.git`), separate from the buildroot repo, and it
+carries all four AgentX package definitions plus the defconfig switches — miss it and
+the other 12 rebase cleanly but Plan E still cannot build. And `app_moxa_iss_10_1_0`
+**must** change: ISS defaults to a standalone SNMP agent that binds UDP 161 and blocks
+snmpd, so it has to be switched to subagent mode against master `127.0.0.1:705`.
+
+**How to apply:** when enumerating scope in a sibling tree, scan exhaustively
+(`for d in dl/*/` plus the overlay) for repos ahead of `origin/develop` — do **not**
+filter on `branch == snmp-plan-E`, which misses `plugin_moxa_fiber_check`. Ignore
+`app_moxa_cli` (detached, 592 ahead) and `plugin_moxa_user_account` — unrelated to SNMP.
+See [[agentx-libs-in-personal-gitlab-namespace]] and
+[[no-flash-edsg4000-swu-to-mdsg4000-dut]].

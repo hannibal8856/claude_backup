@@ -1,0 +1,213 @@
+# ADR-0026: 評估 Vincent「3rdparty_net_snmp enhancement」提案的 Quick Win #1(編譯旗標)與 #3(分級 TTL)
+
+Status: **Accepted**（#3 的否決為程式碼實證結論;#1 的採用範圍已定,但實際旗標值仍待 per-product 實測放行）
+Date: 2026-08-11
+
+Context:
+  Confluence 文件《3rdparty_net_snmp enhancement》(Vincent Tung,2026-03-23,
+  Status 標 *Draft - Internal Review*,`~/WORK/SNMP_50ms/` 下有 PDF 存檔)提出 6 個
+  效能瓶頸與 3 個架構選項,並把 **#1 編譯旗標** 與 **#3 分級快取 TTL** 列為 Tier 1
+  Quick Wins(合計 1.5 天工時、宣稱 +20~40% 吞吐與 −80% 冷快取命中)。
+
+  文件全文的數字皆自陳為 *estimated*,且第 10 節明載
+  「All performance claims must be validated against this baseline on real hardware,
+  not simulation」—— 亦即提案內沒有任何一個數字經過量測。
+
+  本 ADR 只評估 #1 與 #3 兩項。評估方法為對照現行 `snmp-plan-E` 樹逐項查證前提,
+  並與既有 ADR-0001~0025 交叉比對。**評估的是旗標與常數的「輸入來源」,
+  未攔截實際的 gcc 命令列**(見 Constraints 3)。
+
+  評估期間使用者補充了關鍵硬體事實:產品線橫跨三個 CPU 家族,而文件通篇假設
+  單一目標平台「ARM Cortex-A9 800 MHz」。
+
+Decision:
+
+  ## (A) Quick Win #3(分級 TTL)—— **否決,不以 Quick Win 形式進行**
+
+  文件提議在 `moxa_snmp_const.h` 把單一 800ms TTL 改為依 URI 前綴分級
+  (config 10s / status 800ms / event 200ms)。查證後前提三處皆不成立:
+
+  1. **要改的常數是死碼。** `MOXA_SNMP_MAX_TABLE_ENTRY_TIMEOUT` 與
+     `MOXA_SNMP_MAX_TABLE_ENTRY_LAST_ACCESS_TIME`(`moxa_snmp_const.h:23-24`)
+     在 `ies-auto-mibs/` 與 `snmp_tools/` 底下**沒有任何 .c 引用**。真正生效的是
+     `entry_handle_check_value_file()` 函式內重新 `#define` 的同名局部常數
+     (`ies_auto_mibs.c:2027-2028`)。改 header 不會改變行為,且不會有任何警告 ——
+     與 ADR-0025(`+getfwd` 靜默無效)、`ies_auto_mibs_setup.c` 無相依追蹤
+     同屬「改了、編了、行為沒變」這一類。
+
+  2. **800ms 分支不可達。** `ies_auto_mibs.c:2099-2108` 的 `if/else` 兩個分支都
+     `return`,其後 `:2109` 檢查 `MAX_TABLE_TIMEOUT` 的區塊永遠執行不到。
+     **實際生效的 TTL 只有 `MAX_TABLE_TIMELAST` = 200ms(last-access)**,
+     不是文件說的 800ms。同一函式尾端 `#undef MAX_ENTRY_TIMEOUT` 解除的是一個
+     從未定義過的名字,是同一段程式碼失修的旁證。
+
+  3. **那不是快取,是單槽快照。** `gSnmpTblSnapShot` 只保存一個 `fname`,
+     換一張表即整個失效(`ies_auto_mibs.c:2055-2062`);且 scalar entry 直接
+     `return IES_ERR`,**從不快取**。文件把它當成可分級 TTL 的通用多筆快取設計,
+     結構上對不上。
+
+  裁定:**#3 從 Tier 1 移除**。若日後仍要處理,先做的是清理該段死碼並確認 200ms
+  是否為預期行為 —— 那是 bug 修正,不是效能項目,也不是 1 天的工作。
+
+  ## (B) Quick Win #1(編譯旗標)—— **採用方向,但範圍與內容都要改寫**
+
+  ### B-1 前提屬實,且缺 `-O` 的範圍比文件講的大
+
+  | 目標 | 文件有提 | 現況 |
+  |---|---|---|
+  | `snmp_tools` 兩支工具 | ✅ | `CFLAGS = -Wall -Werror -fPIC -I..`,無 `-O` |
+  | `generate_uri_snmp_table` / `generate_iss_snmp_merge_table` | ✅ | `opt-level = "s"` |
+  | **`net-snmp` + `ies-auto-mibs`(snmpd 本體)** | ❌ | 無 `-O`(見下) |
+  | **`rust_moxa_build`(→ `app_moxa_framework`)** | ❌ | `opt-level = "s"` |
+
+  傳遞路徑三處查證:
+  - `.config:300` `BR2_TARGET_OPTIMIZATION=""` —— 整棵 target build 無最佳化旗標。
+  - `3rdparty_net_snmp.mk:209` 以 `make -C snmp_tools all CC=$(TARGET_CC)` 呼叫,
+    **CFLAGS 未走命令列**;而 `snmp_tools/Makefile:15` 用 `CFLAGS = -Wall`(直接賦值)
+    會蓋掉環境傳入的 `TARGET_CFLAGS`。
+  - `3rdparty_net_snmp.mk:176` `--with-cflags="$(3RDPARTY_NET_SNMP_CFLAGS)"`,
+    而該變數(`:44` 起)全部是 `-I` 與 `-D<feature>`,無 `-O`。
+    這會**覆蓋 autoconf 預設的 `-g -O2`**。
+
+  **文件指向兩支冷門 helper binary,漏掉了真正的熱區** —— 每個 GET/GETNEXT 都會執行的
+  `libnetsnmpmibs` 內 `ies_auto_mibs.c`,以及 Plan E 下承擔愈來愈多 OID 的
+  framework subagent。這使 #1 的潛在價值高於文件宣稱,但也表示文件的施作範圍不能照抄。
+
+  ### B-2 arch 旗標**一律不加** —— 跨三個 CPU 家族是可攜性 bug
+
+  產品線 CPU:
+
+  | 產品 CPU | 架構 | 核心 | SIMD |
+  |---|---|---|---|
+  | Marvell **PJ4B-MP**(現行 DUT,`0x56`/`0x584`) | ARMv7-A | 2 | VFPv3,**無 NEON** |
+  | **CN9130** | **ARMv8-A / aarch64** | 4 | ASIMD |
+  | **AM335X**(Cortex-A8) | ARMv7-A | **1** | VFPv3 + NEON |
+
+  文件 4.1 節提議
+  `CFLAGS += -O3 -flto -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard`,其中:
+
+  - `-march=armv7-a` → CN9130 **編不過**;另二者冗餘。
+  - `-mfpu=neon-vfpv4` → PJ4B **產生機器不支援的指令**(cpuinfo Features 無 `neon`);
+    CN9130 無意義;AM335X 世代也不對(A8 為 `neon`/`vfpv3`)。
+  - `-mfloat-abi=hard` → aarch64 無意義;另二者冗餘。
+
+  `snmp_tools/Makefile` 與那兩個 `Cargo.toml` **三個產品共用同一份**,產品差異靠
+  buildroot `.config` 與 `.mk` 的 `-D$(BR2_MOXA_PRODUCT_MODEL)` 區分。現行機制
+  (`output/host/bin/arm-linux-gnueabihf-gcc → toolchain-wrapper`)已依各產品
+  `.config` 的 `BR2_GCC_TARGET_CPU="cortex-a9"` / `_FPU="vfpv3-d16"` /
+  `_FLOAT_ABI="hard"` 自動注入正確組合。**手寫 arch 旗標只會覆蓋掉一個目前正確的機制。**
+
+  ### B-3 `-O3` 亦非跨平台無條件更優
+
+  文件在 #6 以「Cortex-A9 L1 D-cache 僅 32KB,40KB 堆疊框會沖掉整個工作集」論證
+  快取壓力的重要性,卻在 #1 把 `-O3` 當成無條件更快。`-O3` 相對 `-O2` 的主要手段
+  (積極 inline、迴圈展開)會放大程式碼體積、增加 **I-cache** 壓力;三個平台 L1 I-cache
+  皆為 32KB 級,在單核順序執行的 AM335X 上 `-O2`/`-Os` 勝過 `-O3` 是常見結果。
+  **同一份文件對快取壓力採用了不一致的推理標準。**
+
+  ### B-4 裁定
+
+  1. **arch 相關四個旗標一律不加**,交由 buildroot toolchain-wrapper 處理。
+  2. 最佳化等級**設在 buildroot 層而非共用 Makefile**(`BR2_TARGET_OPTIMIZATION`),
+     使其 per-product 可調。前提是先修 `snmp_tools/Makefile:15`
+     `CFLAGS = -Wall` → `CFLAGS += -Wall`,否則設了也吃不到。
+  3. Rust 側 `opt-level` 無 per-product 機制,若要分平台應以
+     `CARGO_PROFILE_RELEASE_OPT_LEVEL` 環境變數覆蓋,不要改 `Cargo.toml` 硬編。
+  4. 施作順序:先 `rust_moxa_build`(影響 framework subagent)→ 再 net-snmp 本體
+     → 最後兩支 helper。與文件的順序相反。
+  5. **具體的最佳化等級(-O2 vs -O3、opt-level 2 vs 3)不在本 ADR 決定**,
+     須在 PJ4B 與 AM335X 各量一次後才放行(見 Constraints 2)。
+
+Alternatives Considered:
+
+  - **照文件原樣實施 #1 + #3(1.5 天)** —— 否決。#3 為靜默無效改動;#1 的 arch 旗標
+    會弄壞 CN9130 與 PJ4B 的 build。「零風險 Quick Win」的定位不成立。
+
+  - **只做 #3、暫緩 #1** —— 否決。#3 是三項前提全錯的一項,是最不該優先的。
+
+  - **在 `snmp_tools/Makefile` 內以 `ifeq` 分平台寫 arch 旗標** —— 否決。
+    等於在套件層重建一份 buildroot 已經維護的 per-product 對照表,兩份會發散;
+    且新增產品時必然漏改。
+
+  - **改為優先做 #4(fork/exec)** —— **列為建議的下一步,但不在本 ADR 決定範圍**。
+    理由:跨三平台一致有效;單核 AM335X 相對收益最大;樹內已有現成模式
+    `mox_snmp_iss_uri_read_inplace()`(`ies_auto_mibs.c:2122`,於 `:2273` / `:2305`
+    使用,註解自陳省下 ~25ms);且 ADR-0018 有 PJ4B 上單次 fork+exec **15.0 ms** 的
+    實測背書 —— 是這份提案中少數有我方獨立量測支持的項目。`ies_auto_mibs.c` 仍有
+    9 處 `LibUtil_ExecShCmd`(`:422` `:2140` `:2294` `:2324` `:2523` `:3674` `:3682` 等),
+    #4 目前只做了一半。
+
+Consequences:
+
+  - **正向:避免一次靜默無效的改動。** #3 若照做,會在三個平台上都通過編譯與測試,
+    但行為完全不變 —— 而且沒有任何訊號告知。這類失敗最難事後歸因。
+
+  - **正向:避免一次跨平台 build 破壞。** arch 旗標若照抄,CN9130 會在 build 階段
+    立刻失敗(較易發現),但 PJ4B 會**編得過、跑起來才出非法指令**(難發現得多)。
+
+  - **正向:#1 的真正標的被指認出來。** net-snmp/`ies-auto-mibs` 與
+    `rust_moxa_build` 兩處是文件未涵蓋、但影響面遠大於原提案範圍的目標。
+
+  - **負向 / 新增責任:#1 從「0.5 天零風險」變成需要 per-product 量測的工作。**
+    再加上 `-flto` 與 `snmp_tools/Makefile:16` `-Werror` 的互動(LTO 會在連結期
+    冒出編譯期看不到的跨 TU 警告,配 `-Werror` 即 build 失敗),實際成本遠高於文件估計。
+
+  - **新增待辦(未指派):** `entry_handle_check_value_file()` 的死碼與錯誤 `#undef`
+    應另案清理;`MOXA_SNMP_MAX_TABLE_ENTRY_*` 兩個未使用常數應移除或接回實作,
+    以免下一個人再次踩同一個坑。
+
+  - **方法論層面:再次確認「假設讀取路徑是瓶頸」需要先驗證。** #1 與 #3 皆建立於
+    此假設,而 **ADR-0008 已因同一假設被 DUT 實測推翻而 Deprecated / revert**
+    (真因是 GETNEXT 跨未註冊區間的 probe,見 ADR-0009)。本 ADR 不重蹈該路徑。
+
+Constraints / Assumptions:
+
+  1. **文件版本 2026-03-23,對現行樹已多處過時。** 該文假設 net-snmp **5.8** 且
+     `ies-auto-mibs` 位於 `net-snmp-5.8/agent/mibgroup/`;實際為 **net-snmp-5.9.3**,
+     且 `ies-auto-mibs/` 已於 Issue #421(`f8cad72` / `c208cee`)**移出 net-snmp**。
+     其第 12 節 Key File Reference 的路徑無一正確。此外該文將 `127.0.0.1:80` 後端
+     稱為 "ISS (Internal Settings Server)" 並描述為 "Flask-based",實際為
+     nginx → **Rust actix-web** `app_moxa_framework:9759`;此與本專案語彙中的
+     ISS(`app_moxa_iss_10_1_0` AgentX subagent)是**完全不同的元件**,引用時必須先正名。
+
+  2. **最佳化等級須 per-product 實測,單一平台數字不可外推。** 依 ADR-0013 / 
+     `measure-snmp-walk` 的量測紀律(交錯 A/B/A、取中位數、完整性以 MIB 欄位判定)。
+     現有前例:mxPort mainline 基準曾因未交錯量測而由 0.871s 修正為 0.768s,
+     改善幅度由 −19.8% 修正為 −11.3%。
+
+  3. **本評估查的是旗標的「輸入來源」,未攔截實際 gcc 命令列。** 結論
+     「net-snmp/ies-auto-mibs 缺 `-O`」推導自 `--with-cflags` 會覆蓋 autoconf 預設
+     `-g -O2`,尚未以 build log 或 `make -n` 坐實。實施前應先補這一步。
+
+  4. **CPU 事實來源為 DUT `/proc/cpuinfo` 與使用者告知**,非本人查證產品線清單。
+     PJ4B-MP 無 NEON 一項有 cpuinfo Features 直接佐證;CN9130 / AM335X 的
+     核心數與架構為使用者提供。
+
+  5. 文件的 #2 / #5 / #6 及 Option A~C 不在本 ADR 評估範圍。
+
+Related Files / Modules:
+  - `~/WORK/SNMP_50ms/3rdparty_net_snmp enhancement - Vincent Tung (董建隆) - Moxa Confluence.pdf`
+    —— 被評估的提案(22 頁)
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/moxa_snmp_const.h:23-24`
+    —— 未被引用的 TTL 常數
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c:2021-2118`
+    —— `entry_handle_check_value_file()`:局部 `#define`、不可達分支、單槽快照
+  - `buildroot/dl/3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c:2122`
+    —— `mox_snmp_iss_uri_read_inplace()`,#4 已落地的部分
+  - `buildroot/dl/3rdparty_net_snmp/snmp_tools/Makefile:15-19`
+    —— `CFLAGS = -Wall` 直接賦值,丟棄 `TARGET_CFLAGS`
+  - `buildroot/dl/3rdparty_net_snmp/snmp_script_rust/generate_uri_snmp_table/Cargo.toml:15-20`
+  - `buildroot/dl/3rdparty_net_snmp/snmp_script_rust/generate_iss_snmp_merge_table/Cargo.toml:8-13`
+  - `buildroot/dl/rust_moxa_build/Cargo.toml` —— `opt-level = "s"`,文件未涵蓋
+  - `buildroot/moxa/package/net/3rdparty_net_snmp/3rdparty_net_snmp.mk:44,176,209`
+  - `buildroot/.config:300` —— `BR2_TARGET_OPTIMIZATION=""`
+  - `buildroot/.config:49-65,142-148` —— `BR2_GCC_TARGET_CPU/FPU/FLOAT_ABI`
+  - `buildroot/output/host/bin/toolchain-wrapper` —— arch 旗標的實際注入點
+
+Related ADRs:
+  - **ADR-0008**(Deprecated)—— 「walk 卡頓源自讀取路徑」假設被實測推翻的前例;
+    本 ADR 據此拒絕在未量測前接受 #1/#3 的效益宣稱
+  - **ADR-0009** —— 上述的真因(GETNEXT 跨未註冊區間的 probe 成本)
+  - **ADR-0013** —— 以 walk latency 選候選的量測方法
+  - **ADR-0018** —— fork+exec 15.0 ms 實測值;亦是「未經量測的加速歸因」被推翻的前例
+  - **ADR-0025** —— `+getfwd` 靜默無效,與 #3 同屬「改了但不生效」的失敗模式

@@ -1,0 +1,440 @@
+<title>+getfwd 閘門鏈</title>
+<style>
+  :root{
+    --ground:#F6F8F7;
+    --panel:#FFFFFF;
+    --panel-2:#EDF1F0;
+    --ink:#12201E;
+    --ink-2:#42544F;
+    --ink-3:#71847F;
+    --rule:#D3DCD9;
+    --teal:#0C6F66;
+    --teal-soft:#DCEBE8;
+    --rust:#A6501F;
+    --rust-soft:#F4E5DA;
+    --amber:#8A6A12;
+    --stop:#8E2F2F;
+    --stop-soft:#F5E1E1;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,"DejaVu Sans Mono","Liberation Mono",Menlo,Consolas,monospace;
+    --sans:"Segoe UI",Roboto,-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0E1615;
+      --panel:#151F1D;
+      --panel-2:#1C2927;
+      --ink:#E6EDEB;
+      --ink-2:#AFC0BC;
+      --ink-3:#7E918D;
+      --rule:#2A3A37;
+      --teal:#4FBFB0;
+      --teal-soft:#12312D;
+      --rust:#D98A55;
+      --rust-soft:#312115;
+      --amber:#C9A438;
+      --stop:#D97070;
+      --stop-soft:#331A1A;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0E1615;
+    --panel:#151F1D;
+    --panel-2:#1C2927;
+    --ink:#E6EDEB;
+    --ink-2:#AFC0BC;
+    --ink-3:#7E918D;
+    --rule:#2A3A37;
+    --teal:#4FBFB0;
+    --teal-soft:#12312D;
+    --rust:#D98A55;
+    --rust-soft:#312115;
+    --amber:#C9A438;
+    --stop:#D97070;
+    --stop-soft:#331A1A;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground);
+    color:var(--ink);
+    font-family:var(--sans);
+    line-height:1.65;
+    margin:0;
+    padding:clamp(1.5rem,4vw,3.5rem) clamp(1rem,5vw,2rem) 5rem;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:60rem;margin:0 auto;display:flex;flex-direction:column;gap:3rem}
+
+  header{display:flex;flex-direction:column;gap:.75rem;border-bottom:2px solid var(--ink);padding-bottom:1.25rem}
+  .eyebrow{
+    font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--teal);font-weight:600;
+  }
+  h1{
+    font-size:clamp(1.9rem,4.5vw,2.9rem);line-height:1.1;margin:0;font-weight:650;
+    letter-spacing:-.02em;text-wrap:balance;
+  }
+  h1 .plus{font-family:var(--mono);color:var(--teal)}
+  .thesis{font-size:1.06rem;color:var(--ink-2);margin:0;max-width:44rem}
+
+  section{display:flex;flex-direction:column;gap:1.1rem}
+  h2{
+    font-size:1.28rem;margin:0;font-weight:650;letter-spacing:-.01em;
+    display:flex;align-items:baseline;gap:.6rem;text-wrap:balance;
+  }
+  h2 .num{
+    font-family:var(--mono);font-size:.78rem;color:var(--ink-3);font-weight:600;
+    letter-spacing:.08em;flex:none;
+  }
+  p{margin:0;max-width:44rem;color:var(--ink-2)}
+  p strong{color:var(--ink);font-weight:640}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel-2);
+       padding:.1em .35em;border-radius:3px;color:var(--ink)}
+
+  .phases{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(17rem,1fr))}
+  .phase{
+    background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+    padding:1.1rem 1.15rem;display:flex;flex-direction:column;gap:.55rem;
+  }
+  .phase h3{
+    margin:0;font-size:.75rem;font-family:var(--mono);letter-spacing:.1em;
+    text-transform:uppercase;color:var(--teal);font-weight:600;
+  }
+  .phase p{font-size:.94rem;max-width:none}
+  .phase .fn{font-family:var(--mono);font-size:.8rem;color:var(--ink-3);
+             border-top:1px solid var(--rule);padding-top:.5rem;margin-top:.15rem}
+
+  .figure{
+    background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+    padding:1.25rem;overflow-x:auto;
+  }
+  .figure svg{display:block;min-width:41rem;width:100%;height:auto}
+  .caption{font-size:.85rem;color:var(--ink-3);margin:0;max-width:none;font-family:var(--mono)}
+
+  .callout{
+    background:var(--stop-soft);border:1px solid var(--stop);border-left-width:4px;
+    border-radius:5px;padding:1.1rem 1.25rem;display:flex;flex-direction:column;gap:.7rem;
+  }
+  .callout h3{margin:0;font-size:1rem;font-weight:650;color:var(--ink)}
+  .callout p{color:var(--ink-2);max-width:none}
+  .callout .oid{font-family:var(--mono);font-size:.92rem;color:var(--ink);font-weight:600;
+                word-break:break-all}
+
+  .tblwrap{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:.92rem;min-width:34rem}
+  th,td{padding:.6rem .85rem;text-align:left;border-bottom:1px solid var(--rule)}
+  thead th{
+    font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-3);font-weight:600;background:var(--panel-2);
+  }
+  tbody tr:last-child td{border-bottom:none}
+  td.m{font-family:var(--mono);font-size:.87rem;font-variant-numeric:tabular-nums}
+  .pill{
+    display:inline-block;font-family:var(--mono);font-size:.72rem;font-weight:600;
+    padding:.12em .5em;border-radius:3px;letter-spacing:.03em;white-space:nowrap;
+  }
+  .pill.on{background:var(--teal-soft);color:var(--teal);border:1px solid var(--teal)}
+  .pill.off{background:var(--panel-2);color:var(--ink-3);border:1px solid var(--rule)}
+  .pill.dead{background:var(--rust-soft);color:var(--rust);border:1px solid var(--rust)}
+
+  .silent{display:grid;gap:.9rem;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr))}
+  .silent article{
+    border:1px solid var(--rust);border-radius:5px;background:var(--rust-soft);
+    padding:.95rem 1.05rem;display:flex;flex-direction:column;gap:.4rem;
+  }
+  .silent h3{margin:0;font-size:.94rem;font-weight:650;color:var(--ink)}
+  .silent p{font-size:.9rem;max-width:none;color:var(--ink-2)}
+  .silent .gate{font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;
+                text-transform:uppercase;color:var(--rust);font-weight:600}
+
+  footer{border-top:1px solid var(--rule);padding-top:1.1rem;font-size:.84rem;
+         color:var(--ink-3);font-family:var(--mono);line-height:1.8}
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Plan C · ies-auto-mibs · agentx_owned.list</div>
+  <h1><span class="plus">+getfwd</span> 閘門鏈</h1>
+  <p class="thesis">一個 RW 欄位的 GET 要被轉發給 ISS subagent,必須連過六道閘門。任何一道不過就落回本地讀取 —— 其中兩道不過的時候<strong>不會有任何訊息</strong>。</p>
+</header>
+
+<section>
+  <h2><span class="num">01</span>兩個時期,不要混在一起</h2>
+  <p>同一份 <code>agentx_owned.list</code> 有兩個消費端,分別在不同時間點作用。把它們混談是理解 opt-in 時最常見的錯誤。</p>
+  <div class="phases">
+    <div class="phase">
+      <h3>註冊期 · 開機一次</h3>
+      <p><strong>RO + prefix 命中</strong> → 完全不做本地註冊,snmpd master 的 longest-prefix-match 之後會直送 subagent。in-master 從此不碰這些 OID。</p>
+      <p>同時,每個被交出去的 RO entry 都被記成一個 <strong>probe 候選</strong>,供請求期使用。</p>
+      <div class="fn">mox_snmp_init_entry() · :3545–3579</div>
+    </div>
+    <div class="phase">
+      <h3>請求期 · 每次 GET</h3>
+      <p><strong>RW 一律留在本地註冊</strong>(SET 必須走 framework),所以 master 會把它的 GET 也送進 in-master。唯一能分辨 GET 與 SET 的地方,就是 handler 內部。</p>
+      <p>轉發在這裡發生,而且 prefix 比對<strong>每次 GET 都重算一遍</strong>。</p>
+      <div class="fn">mox_snmp_handle_entry() · :3268–3292</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">02</span>六道閘門</h2>
+  <div class="figure">
+    <svg viewBox="0 0 820 706" role="img" aria-label="+getfwd 的六道閘門流程圖,追蹤 rstpConfigEnable 通過全部六道並被轉發">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto">
+          <path d="M0,0 L7.5,3.2 L0,6.4 Z" fill="var(--ink-3)"/>
+        </marker>
+        <marker id="arT" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto">
+          <path d="M0,0 L7.5,3.2 L0,6.4 Z" fill="var(--teal)"/>
+        </marker>
+      </defs>
+
+      <!-- trace rail -->
+      <text x="14" y="30" font-family="var(--mono)" font-size="9.5" letter-spacing=".8" font-weight="600" fill="var(--teal)">追蹤</text>
+      <text x="14" y="44" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">.603.3.2.1.1.0</text>
+      <line x1="46" y1="56" x2="46" y2="536" stroke="var(--teal)" stroke-width="1.6" stroke-dasharray="3 3"/>
+
+      <!-- entry -->
+      <rect x="170" y="8" width="240" height="40" rx="5" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="290" y="27" text-anchor="middle" font-family="var(--sans)" font-size="13" font-weight="600" fill="var(--ink)">master 把請求送進 in-master</text>
+      <text x="290" y="42" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">mox_snmp_handle_entry()</text>
+      <line x1="290" y1="48" x2="290" y2="72" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G1 -->
+      <circle cx="46" cy="97" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="74" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="1.3"/>
+      <text x="116" y="94" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--teal)">G1</text>
+      <text x="143" y="94" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">是 GET 嗎?</text>
+      <text x="143" y="110" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">MODE_IS_GET(reqinfo-&gt;mode)</text>
+      <rect x="400" y="86" width="66" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="433" y="101" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="600" fill="var(--teal)">是</text>
+      <line x1="480" y1="97" x2="558" y2="97" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="500" y="91" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">否</text>
+      <rect x="560" y="79" width="248" height="36" rx="4" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="684" y="102" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">SET → 本地 framework 路徑</text>
+      <line x1="290" y1="120" x2="290" y2="144" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G2 -->
+      <circle cx="46" cy="169" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="146" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="1.3"/>
+      <text x="116" y="166" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--teal)">G2</text>
+      <text x="143" y="166" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">這是 RW 欄位嗎?</text>
+      <text x="143" y="182" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">entry-&gt;mode &amp; HANDLER_CAN_SET</text>
+      <rect x="400" y="158" width="66" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="433" y="173" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="600" fill="var(--teal)">是</text>
+      <line x1="480" y1="169" x2="558" y2="169" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="500" y="163" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">否</text>
+      <rect x="560" y="151" width="248" height="36" rx="4" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="684" y="174" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">RO 未委派 → 本地讀取</text>
+      <line x1="290" y1="192" x2="290" y2="216" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G3 -->
+      <circle cx="46" cy="241" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="218" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="1.3"/>
+      <text x="116" y="238" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--teal)">G3</text>
+      <text x="143" y="238" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">uri 前綴在 list 裡嗎?</text>
+      <text x="143" y="254" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">prefix_idx &gt;= 0</text>
+      <rect x="374" y="230" width="92" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="420" y="245" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="600" fill="var(--teal)">mxrstpdb/</text>
+      <line x1="480" y1="241" x2="558" y2="241" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="500" y="235" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">否</text>
+      <rect x="560" y="223" width="248" height="36" rx="4" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="684" y="246" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">本地讀取 · 46 個未列入的前綴</text>
+      <line x1="290" y1="264" x2="290" y2="288" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G4 -->
+      <circle cx="46" cy="313" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="290" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="1.3"/>
+      <text x="116" y="310" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--teal)">G4</text>
+      <text x="143" y="310" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">那一行標了 +getfwd 嗎?</text>
+      <text x="143" y="326" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">mox_snmp_agentx_prefix_getfwd()</text>
+      <rect x="400" y="302" width="66" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="433" y="317" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="600" fill="var(--teal)">是</text>
+      <line x1="480" y1="313" x2="558" y2="313" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="500" y="307" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">否</text>
+      <rect x="560" y="295" width="248" height="36" rx="4" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="684" y="318" text-anchor="middle" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">本地讀取 · stdethdb/ mxportdb/</text>
+      <line x1="290" y1="336" x2="290" y2="360" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G5 -->
+      <circle cx="46" cy="385" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="362" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--rust)" stroke-width="1.6" stroke-dasharray="5 3"/>
+      <text x="116" y="382" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--rust)">G5</text>
+      <text x="143" y="382" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">有可用的 probe 嗎?</text>
+      <text x="143" y="398" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">mox_snmp_probe_for_entry() != NULL</text>
+      <rect x="358" y="374" width="108" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="412" y="389" text-anchor="middle" font-family="var(--mono)" font-size="9.5" font-weight="600" fill="var(--teal)">fallback 命中</text>
+      <line x1="480" y1="385" x2="558" y2="385" stroke="var(--rust)" stroke-width="1.6" marker-end="url(#ar)"/>
+      <text x="500" y="379" font-family="var(--mono)" font-size="10" fill="var(--rust)">否</text>
+      <rect x="560" y="367" width="248" height="36" rx="4" fill="var(--rust-soft)" stroke="var(--rust)"/>
+      <text x="684" y="390" text-anchor="middle" font-family="var(--sans)" font-size="12.5" font-weight="600" fill="var(--ink)">本地讀取 · 靜默</text>
+      <line x1="290" y1="408" x2="290" y2="432" stroke="var(--ink-3)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <!-- G6 -->
+      <circle cx="46" cy="457" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="434" width="380" height="46" rx="5" fill="var(--panel)" stroke="var(--rust)" stroke-width="1.6" stroke-dasharray="5 3"/>
+      <text x="116" y="454" font-family="var(--mono)" font-size="10.5" font-weight="600" fill="var(--rust)">G6</text>
+      <text x="143" y="454" font-family="var(--sans)" font-size="13.5" font-weight="600" fill="var(--ink)">subagent 還在線上嗎?</text>
+      <text x="143" y="470" font-family="var(--mono)" font-size="10.5" fill="var(--ink-3)">netsnmp_subtree_find(probe) != NULL</text>
+      <rect x="400" y="446" width="66" height="22" rx="3" fill="var(--teal-soft)" stroke="var(--teal)"/>
+      <text x="433" y="461" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="600" fill="var(--teal)">是</text>
+      <line x1="480" y1="457" x2="558" y2="457" stroke="var(--rust)" stroke-width="1.6" marker-end="url(#ar)"/>
+      <text x="500" y="451" font-family="var(--mono)" font-size="10" fill="var(--rust)">否</text>
+      <rect x="560" y="439" width="248" height="36" rx="4" fill="var(--rust-soft)" stroke="var(--rust)"/>
+      <text x="684" y="462" text-anchor="middle" font-family="var(--sans)" font-size="12.5" font-weight="600" fill="var(--ink)">本地讀取 · 靜默</text>
+      <line x1="290" y1="480" x2="290" y2="506" stroke="var(--teal)" stroke-width="2" marker-end="url(#arT)"/>
+      <text x="301" y="497" font-family="var(--mono)" font-size="10" font-weight="600" fill="var(--teal)">六道全過</text>
+
+      <!-- outcome -->
+      <circle cx="46" cy="536" r="4.5" fill="var(--teal)"/>
+      <rect x="100" y="508" width="380" height="60" rx="5" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="2"/>
+      <text x="290" y="532" text-anchor="middle" font-family="var(--sans)" font-size="14" font-weight="650" fill="var(--ink)">借 probe 的 reginfo,轉發給 ISS subagent</text>
+      <text x="290" y="552" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--ink-2)">netsnmp_call_handlers(iss_sub-&gt;reginfo, ...)</text>
+
+      <!-- note -->
+      <rect x="100" y="592" width="708" height="100" rx="5" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="118" y="614" font-family="var(--mono)" font-size="10" letter-spacing="1" font-weight="600" fill="var(--teal)">G5 這一步實際挑到誰</text>
+      <text x="118" y="634" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">rstpConfigEnable 是 scalar,沒有「自己的表」,同表比對必定落空 → 走 fallback。</text>
+      <text x="118" y="652" font-family="var(--mono)" font-size="11.5" font-weight="600" fill="var(--ink)">probe = .1.3.6.1.4.1.8691.603.3.2.2.1.1.2  (RstpStatPortRole, :99)</text>
+      <text x="118" y="670" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">= 註冊期第一個被交出去的 RO entry。rstpStatPortTable 全 RO、整張委派,</text>
+      <text x="118" y="686" font-family="var(--sans)" font-size="12.5" fill="var(--ink-2)">in-master 不會對它合成 index 欄,所以這個候選不會被 shadowed。</text>
+    </svg>
+  </div>
+  <p class="caption">實線框 = 會落回本地且有跡可循 · 虛線框 = 落回本地且完全靜默</p>
+</section>
+
+<section>
+  <h2><span class="num">03</span>走完六道:rstpConfigEnable</h2>
+  <div class="callout" style="background:var(--teal-soft);border-color:var(--teal)">
+    <p class="oid">.1.3.6.1.4.1.8691.603.3.2.1.1.0 — rstpConfigEnable</p>
+    <p><code>net_mxRSTPdb.h:8</code> · <code>uri = mxrstpdb/rstpConfigEnable</code> · <code>uri_index = 0</code>(scalar)· <code>mode = HANDLER_CAN_RWRITE</code></p>
+    <p>六道全過,GET <strong>真的被轉發給 ISS</strong>。替身 OID 是 <strong><code>.1.3.6.1.4.1.8691.603.3.2.2.1.1.2</code></strong>(<code>RstpStatPortRole</code>,<code>net_mxRSTPdb.h:99</code>)。</p>
+  </div>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>閘門</th><th>判斷</th><th>這個 OID 的答案</th></tr></thead>
+      <tbody>
+        <tr><td class="m">G1</td><td>是 GET?</td><td>是 —— SET 會在這裡分流走本地</td></tr>
+        <tr><td class="m">G2</td><td>是 RW 欄位?</td><td>是 —— <code>HANDLER_CAN_RWRITE</code></td></tr>
+        <tr><td class="m">G3</td><td>前綴在 list?</td><td>是 —— <code>mxrstpdb/</code> 是第 4 行</td></tr>
+        <tr><td class="m">G4</td><td>標了 +getfwd?</td><td>是 —— 2026-08-10 加上(ADR-0024)</td></tr>
+        <tr><td class="m">G5</td><td>有 probe?</td><td>有 —— 走 fallback,見下</td></tr>
+        <tr><td class="m">G6</td><td>subagent 在線?</td><td>是 —— 轉發成立</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>G5 為什麼走 fallback:</strong>它是 scalar,<code>uri</code> 沒有尾斜線,而所有 probe 候選的 <code>uri</code> 都是 <code>mxrstpdb/rstpStatPortTable/</code>。<code>strcmp()</code> 的「同表比對」永遠不會相等,所以只能拿同 prefix 的第一個未 shadowed 候選 —— 也就是註冊順序中第一個被交出去的 RO entry。</p>
+  <p><strong>為什麼它不會被 shadowed:</strong><code>rstpStatPortTable</code> 的 15 個欄位全是 RO、整張交給 ISS,in-master 一個都沒留,因此不會對它跑 <code>GenerateTableIndexEntry()</code>,不會合成 index 欄搶回去。</p>
+  <div class="callout" style="background:var(--panel-2);border-color:var(--rule);border-left-color:var(--teal)">
+    <h3>最容易誤解的一點:probe 不會出現在線上</h3>
+    <p><code>netsnmp_call_handlers(iss_sub-&gt;reginfo, reqinfo, request)</code> 傳的是<strong>原本那個 request</strong>。ISS 收到的仍然是「GET <code>.603.3.2.1.1.0</code>」,不是去查 <code>RstpStatPortRole</code>。</p>
+    <p>probe 的作用只有一個:<strong>讓 <code>netsnmp_subtree_find()</code> 回傳 ISS 的 registration</strong>。它是查表用的鑰匙,不是被查的內容,抓 pcap 也看不到它。</p>
+    <p>這也解釋了為什麼 fallback 拿別張表的 probe 也能work:同一個 prefix 底下的註冊都屬於<strong>同一個 subagent session</strong>,借哪一把鑰匙都開同一扇門。<code>ifmibdb/</code> 那種一個 prefix 橫跨 ifTable / ifXTable 兩個註冊的情況,才需要優先挑同表的。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">04</span>對照組:停在半路的兩種</h2>
+  <div class="phases">
+    <div class="phase">
+      <h3>停在 G3 · 前綴不在 list</h3>
+      <p>例:<code>.603.5.4.1.1.0</code>(<code>tcstConfigClearAllStatistics</code>)。<code>mxtcstdb/</code> 沒寫進 list,<code>prefix_idx</code> 回 <code>-1</code>,後面三道連看都不看,<code>probe_for_entry()</code> <strong>從未被呼叫</strong>。</p>
+      <div class="fn">替身 OID:無 · 46 個前綴都在這裡</div>
+    </div>
+    <div class="phase">
+      <h3>停在 G4 · 有前綴但沒標旗標</h3>
+      <p>例:<code>mxportdb/</code> 的 8 個 RW 欄位。RO 有委派出去,但 RW 的 GET 仍走本地 —— 這是<strong>量測後刻意不標</strong>的決定,不是遺漏。</p>
+      <div class="fn">替身 OID:無 · stdethdb/ 同理</div>
+    </div>
+  </div>
+  <p>兩者合起來就是 opt-in 的定義:<strong>不是「預設轉發、可以關掉」,而是「預設不轉發、必須逐行寫進去、還要再標一次旗標才會啟用」。</strong>全樹 50 個 DB 前綴,只有 4 個進了 list,其中只有 2 個帶 <code>+getfwd</code>。</p>
+</section>
+
+<section>
+  <h2><span class="num">05</span>把 mxtcstdb/ 加進去有風險嗎</h2>
+  <p>把五種風險逐一對照現行機制。<strong>結構性風險低,但有一項前置條件沒過就不能動。</strong></p>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>風險</th><th>評估</th><th>依據</th></tr></thead>
+      <tbody>
+        <tr><td>拆表 / ADR-0011 島</td><td><span class="pill on">低</span></td><td>RO 與 RW 落在不同的表,不會拆表</td></tr>
+        <tr><td>probe 拿不到(G5 靜默)</td><td><span class="pill on">低</span></td><td>整張 RO 表交出去,候選不會被 shadowed</td></tr>
+        <tr><td>多回 index 欄(surplus)</td><td><span class="pill off">要人工判</span></td><td>ISS 多宣告 TcstStatIfIndex,不進 gate</td></tr>
+        <tr><td>+getfwd 反而變慢</td><td><span class="pill off">建議先不標</span></td><td>兩個 RW 都是動作型,本地讀應該就快</td></tr>
+        <tr><td><strong>ISS 沒有實際服務</strong></td><td><span class="pill dead">未驗 · 阻斷</span></td><td>db.h 有宣告不等於有服務</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>mxtcstdb/ 的三張表</th><th class="m">欄位</th><th>委派後歸屬</th></tr></thead>
+      <tbody>
+        <tr><td class="m">tcstStatGroupTable/</td><td class="m">col 2–36(35 RO)</td><td><span class="pill on">整張交給 ISS</span></td></tr>
+        <tr><td class="m">tcstConfigClearPortStatisticsTable/</td><td class="m">col 2(1 RW)</td><td><span class="pill off">整張留 in-master</span></td></tr>
+        <tr><td class="m">tcstConfigClearAllStatistics</td><td class="m">scalar(1 RW)</td><td><span class="pill off">留 in-master · GET 可轉發</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>形狀很乾淨:RO 與 RW 剛好落在不同的表上,不會拆表,不會產生 in-master 島。</strong>這是 ADR-0011 那個缺陷不會出現的理想形狀 —— 跟 <code>mxrstpdb/</code> 同型,而 <code>mxrstpdb/</code> 已經在線上跑成功了。</p>
+  <p>而且 ISS 的 <code>mxTcstdb.h:21</code> 宣告了 <strong>TcstStatIfIndex</strong>(<code>.603.5.4.2.1.1.1</code>)—— <strong>ies-auto-mibs 這邊根本沒有 col 1</strong>。所以委派之後 ISS 可能會多回這個 index 欄,跟 <code>mxportdb/</code> 當初把兩個 portStatus index 欄找回來是同一回事。這會以 <code>surplus</code> 的形式出現在比對結果裡 —— 而 <code>surplus</code> <strong>不進 walkdiff 的 exit code</strong>,必須人工確認它是 <code>.mib</code> 有定義的物件才算數。</p>
+  <p><strong>關於 +getfwd:建議第一輪先不要標。</strong>那兩個 RW 是 <code>ClearAllStatistics</code> 和 <code>ClearPortStatistics</code> —— 動作型的清除開關,不是慢查詢。而且依 ADR-0025,這個旗標目前<strong>在四條裡有兩條實測根本不轉發、根因未定位</strong>,另兩條也沒有「證實變快」的證據。先只做 RO 委派,那才是已知有效益的部分。</p>
+  <div class="callout">
+    <h3>但這一切的前提還沒驗</h3>
+    <p><strong>db.h 有宣告不等於 ISS 真的服務。</strong>上面關於 ISS 的推論只到「<code>tcstrlps/tcst</code> 在 <code>future/LR/Makefile:703</code> 的編譯清單裡、<code>mxTcstdb.h</code> 宣告了 <code>.603.5.4</code> 底下的分支」為止。這個 checkout 是乾淨樹(全樹 0 個 <code>.o</code>),無法用「有沒有編出來」佐證,更沒有 DUT 實測。</p>
+    <p>若 ISS 實際上沒服務這段,把 <code>mxtcstdb/</code> 寫進 list 的後果不是變慢,是<strong>那 35 個統計欄位直接消失</strong>(noSuchObject)。動手前必須先過 ISS 涵蓋篩檢。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">06</span>四行 list 的 opt-in 現況</h2>
+  <div class="tblwrap">
+    <table>
+      <thead>
+        <tr><th>prefix</th><th>+getfwd</th><th class="m">RO 委派</th><th class="m">RW 留下</th><th>RW 的 GET 去哪</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="m">ifmibdb/</td><td><span class="pill on">有</span></td><td class="m">40</td><td class="m">7</td><td>轉發給 subagent</td></tr>
+        <tr><td class="m">mxrstpdb/</td><td><span class="pill on">有</span></td><td class="m">18</td><td class="m">9</td><td>轉發給 subagent</td></tr>
+        <tr><td class="m">stdethdb/</td><td><span class="pill off">無</span></td><td class="m">33</td><td class="m">1</td><td>本地讀取</td></tr>
+        <tr><td class="m">mxportdb/</td><td><span class="pill off">無</span></td><td class="m">9</td><td class="m">8</td><td>本地讀取</td></tr>
+        <tr><td class="m">其餘 46 個前綴</td><td><span class="pill dead">不在 list</span></td><td class="m">0</td><td class="m">—</td><td>本地讀取(G3 擋下)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>為什麼 <code>stdethdb/</code> 和 <code>mxportdb/</code> 沒有標?<strong>是刻意不標,不是還沒導入。</strong>對 <code>mxportdb/</code> 而言,08-08 三顆 image 的 pcap 推導顯示:RO-only 是 0.691s,全轉發推導為 0.779s(<strong>+12.7%</strong>)—— 不但比 RO-only 慢,還比 NOS 7 mainline 的 0.768s 慢。<strong>對 mxPort 是負值。</strong></p>
+  <div class="callout" style="background:var(--rust-soft);border-color:var(--rust)">
+    <h3>⚠ 而且「導入」目前是 no-op:ADR-0025</h3>
+    <p>2026-08-10 封包實測(每項 150 次 GET,只計 ISS 那條 AgentX stream):<code>mxportdb/</code> 的 config RW 表欄 / scalar / LinkUpDelay 是 <strong>+30 / +30 / +39</strong>,<code>stdethdb/</code> 唯一的 RW <code>Dot3PauseAdminMode</code> 是 <strong>+30</strong> —— 全部落在背景級(空窗 15s = +42)。對照組:mxPort status RO <strong>+333</strong>、mxRstp config RW <strong>+327</strong>。</p>
+      <p><strong>這兩個 prefix 加上 <code>+getfwd</code> 也不會轉發,而且根因尚未定位。</strong>剩兩條候選路徑:<code>probe_for_entry()</code> 回 NULL,或 <code>forward_get_to_iss()</code> 回 -1。兩條都是靜默的,黑箱分不出來。</p>
+  </div>
+  <p><strong>所以「模範生」這個標籤要打折。</strong><code>mxrstpdb/</code> 在燒錄版已封包證實<strong>有轉發</strong>(每次 GET 淨 1.950 封包,正對照 1.875、負對照 0.000),但交錯量測顯示 ADR-0024 記的 0.66→0.63 落在量測重複性(0.022–0.033s)之內,<strong>不構成效應</strong> —— mxRstp 的頭條倍數來自唯讀欄委派,不是這個旗標。而 <code>ifmibdb/</code> <strong>從來沒有正面的封包佐證</strong>,它的旗標是手工 probe 年代留下的既有出貨設定。</p>
+  <p><strong>目前沒有任何一條 <code>+getfwd</code> 有「證實變快」的證據。</strong></p>
+</section>
+
+<section>
+  <h2><span class="num">07</span>兩道會靜默失效的閘門</h2>
+  <p>G3 和 G4 不通過是<strong>你自己決定的</strong> —— 沒把前綴寫進去、沒標旗標。但 G5 和 G6 不通過時,設定看起來完全正確,行為卻跟沒設一樣,而且沒有任何錯誤訊息。</p>
+  <div class="silent">
+    <article>
+      <div class="gate">G5 · 沒有可用 probe</div>
+      <h3>整組沒有東西被委派出去</h3>
+      <p>probe 只能來自該群組實際交出去的 RO entry。若一張表唯一的 RO 欄位是 index 欄,它會被 <code>GenerateTableIndexEntry()</code> 在本地合成回來、標成 shadowed,於是整表無 probe 可用。<code>mxportdb/portConfigTable</code> 就是這個情況。</p>
+    </article>
+    <article>
+      <div class="gate">G6 · subagent 不在線上</div>
+      <h3>ISS 沒連上或已斷線</h3>
+      <p><code>netsnmp_subtree_find()</code> 找不到 subagent 的註冊就回 <code>-1</code>,直接落回本地路徑。這是刻意的 best-effort 設計 —— 不會壞掉,但也不會告訴你它沒轉發。</p>
+    </article>
+  </div>
+  <p><strong>實務結論:</strong>在一個群組加上 <code>+getfwd</code> 之後量到「沒變快」,不能解讀成「轉發了但沒效益」。要先確認它到底有沒有真的轉發 —— 而<strong>唯一可靠的判別是線上有沒有 AgentX 流量,不是回傳值</strong>。回得到值不代表走了 ISS。</p>
+</section>
+
+<footer>
+  來源:3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs.c(:3060 註解、:3268–3292 請求期、:3480–3505 prefix 比對、:3545–3579 註冊期)<br>
+  moxa_snmp_handle_util.c:325–368(index 合成)· plugin_moxa_snmp/app/script/agentx_owned.list<br>
+  entry 數字由 net_*.h 直接解析而得,2026-08-12 · 唯讀分析,未經 DUT 實測
+</footer>
+
+</div>

@@ -1,0 +1,19 @@
+$ netstat -antul | grep ":161"
+udp        0      0 0.0.0.0:161             0.0.0.0:*                           
+udp        0      0 :::161                  :::*                                
+$ ss -antp | grep ":705"
+LISTEN     0      0          127.0.0.1:705        0.0.0.0:*     users:(("snmpd",pid=1288,fd=46))                                                  
+ESTAB      0      0          127.0.0.1:51286    127.0.0.1:705   users:(("ISS.exe",pid=299,fd=28))                                                 
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:51298 users:(("snmpd",pid=1288,fd=48))                                                  
+ESTAB      0      0          127.0.0.1:705      127.0.0.1:51286 users:(("snmpd",pid=1288,fd=47))                                                  
+ESTAB      0      0          127.0.0.1:51298    127.0.0.1:705   users:(("app_moxa_framew",pid=1208,fd=62))                                        
+$ 
+$ 
+$ snmpwalk     -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+Timeout: No Response from 192.168.127.253
+$ snmpbulkwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+Timeout: No Response from 192.168.127.253
+
+$ snmpget -v2c -c public 192.168.127.253 .1.3.6.1.2.1.2.1.0
+.1.3.6.1.2.1.2.1.0 = INTEGER: 13
+$ 

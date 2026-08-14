@@ -1,0 +1,41 @@
+---
+name: project_measure_snmp_walk_skill_defects
+description: measure-snmp-walk 的 fwdcheck 有三個會靜默給出錯誤結論的實作缺陷;小 N 會產生假的 delta=0
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 7b76eced-c087-4c3e-af48-3a002d2190b4
+  modified: 2026-08-11T07:19:56.024Z
+---
+
+2026-08-11 實地踩到。`~/.claude/skills/measure-snmp-walk/` 的 `fwdcheck` 這條路徑有
+**三個缺陷,共同形狀是「失敗時不報錯,而且產生的數字剛好長得像一個合理結論」**。
+
+| # | 缺陷 | 症狀 |
+|---|---|---|
+| 1 | `fwdcheck_remote.sh:38` `DUR = IDLE*2 + 90` **寫死,不隨 N 縮放** | N 一大,burst 跑超過擷取時長,`tcpdump` 自行結束,後面視窗讀到靜態檔 → 正對照歸零 → INVALID。**skill 正文要求 N≥150,與自己的實作互相矛盾** |
+| 2 | `dutssh.exp` 寫死 `set timeout 300` | 遠端腳本超時 → 輸出被截斷 → 外層 `sed` 範圍比對匹配不到結束標記 → **整份輸出靜默消失**(跑十分鐘什麼都拿不到)|
+| 3 | `fwdcheck_remote.sh:44` `cnt()` **每次都 `tcpdump -r` 重讀整個 pcap** | 檔案越大越慢,視窗越後面越慢,最後撞上缺陷 2。**實測 200 次 GET 只花 5 秒 —— 慢的是計數,不是量測** |
+
+**⚠️ 最隱蔽的一個:小 N 會產生假的 `delta = 0`。**
+N=20 時 burst 太快,封包還沒被 `tcpdump` 寫進檔案就被 `cnt()` 讀走 → `TARGET delta=0`
+→ 判定 NOT FORWARDED。同一組 OID 用 N=150 重跑得到 `delta=243`(正對照 267),**方向完全相反**。
+**0 往往也正好是「沒有轉發」這個假說的預期值**,所以假的零看起來像完美的證據。
+這是 skill trap 2 的變形 —— trap 2 講的是 `timeout` 不存在導致 tcpdump 沒啟動,
+**共同形狀都是「工具沒運作」與「假說成立」在輸出上長得一樣**。
+
+## 繞過方式(已驗證可用)
+
+- **在 DUT 上 `nohup` 背景執行、輸出落檔,再分開 ssh 取回** —— 避開缺陷 2。
+- **不要用診斷用的縮水參數形成判斷**。要嘛用足夠的 N,要嘛只拿它來確認腳本會跑。
+- **判定拿 TARGET 對 POSITIVE,不要對 NEGATIVE** —— 背景率會漂(實測 0.8–5 pkt/s,跳 6 倍),
+  分母不可靠;正對照才是「確定會轉發」的參照物。
+- **背景要用多個 idle 視窗平均,每個 burst 記錄耗時再扣掉該時段的預期背景**,
+  得到「每次 GET 的淨 AgentX 封包數」,才可跨 OID 比較。
+- **腳本開頭先驗每個 OID 都答得出來** —— 原 `burst()` 把 `snmpget` 輸出丟 `/dev/null`
+  且不檢查回傳,所以 `No Such Object` 與「未轉發」長得一模一樣。
+
+自訂版留在 session scratchpad 的 `fwd2_remote.sh`(四 idle 視窗 + 扣背景 + 對正對照判定
++ OID 可答性前置檢查)。**skill 本身尚未修改** —— 那是使用者的資產,要改前先問。
+
+相關:[[project_getfwd_noop_on_mxportdb_stdethdb]]、[[project_getfwd_probe_must_be_wire_verified]]

@@ -1,0 +1,18 @@
+# RO entries under these URI prefixes skip local netsnmp_register_*,
+# letting snmpd master route them (longest-prefix-match) to the ISS AgentX subagent.
+# RW columns are NEVER skipped (SET stays on framework). Add a MIB = add a prefix here.
+#
+# Before adding a prefix, check that ISS actually covers the OIDs: read the
+# branches in app_moxa_iss_10_1_0/code/future/<mod>/inc/<mod>db.h, NOT the length
+# of its tSNMP_OID_TYPE root (that root is only a SysORTable label -- ifmibOID is
+# .1.3.6.1.2.1.2 yet ISS serves .1.3.6.1.2.1.31 too). See ADR-0011.
+#
+# Known deficiency (ADR-0011): if the RW column in-master keeps is the FIRST
+# column of a delegated table, a continuous walk from an ancestor OID skips it
+# (net-snmp master emits an inverted search range across the empty ISS region
+# before the island). Targeted walks and exact GETs are unaffected.
+ifmibdb/
+# ADR-0011: EtherLike-MIB dot3. ISS serves .10.7.{2,5,9,10,11}; delegating gains
+# 5 columns in-master never implemented (incl. all of dot3CollTable).
+# .10.7 walk: 348 -> 576 whole-tree / 588 summed per table.
+stdethdb/

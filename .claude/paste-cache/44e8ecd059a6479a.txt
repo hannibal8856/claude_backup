@@ -1,0 +1,48 @@
+Welcome to MOXA
+moxa login: admin
+ 
+Password: 
+$ sh ru 
+sh: 0: Can't open ru
+$ su
+Password: 
+$ moxash
+Welcome to MOXA command shell
+Current time is Tuesday, April 25, 2023, 07:26 AM
+
+
+Please change the password in order to enhance security.
+
+moxa# sh ru 
+Building user configuration ...
+
+! ----------------------------------------
+! Time: 2023-04-25 07:26:28
+! Model name: MDS-G4012-L3-4XGS-T
+! Firmware version: v7.0 Build 2026_0724_1233
+! Product revision: V1.0.1
+! IP address: 192.168.127.253
+! MAC address: 00:90:E8:BD:1B:8A
+! Serial number: TBCHB1139862
+! Module M2 product revision: V2.0.0
+! Module M3 product revision: V2.0.0
+! ----------------------------------------
+configure terminal
+no logging-server 1 enable
+no logging-server 2 enable
+no logging-server 3 enable
+snmp-server access enable
+interface ethernet 1/1
+!
+interface ethernet 1/2
+!
+moxa# exit
+$ snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.1.4.1.2
+.1.3.6.1.4.1.8691.602.1.4.1.2 = No Such Object available on this agent at this OID
+$ snmpwalk -v2c -c public 192.168.127.253 .1.3.6.1.4.1.8691.602.99
+.1.3.6.1.4.1.8691.602.99.1.1.1.1 = INTEGER: 10
+.1.3.6.1.4.1.8691.602.99.1.1.1.2 = INTEGER: 20
+.1.3.6.1.4.1.8691.602.99.1.1.1.3 = INTEGER: 30
+.1.3.6.1.4.1.8691.602.99.1.1.2.1 = STRING: "row-1"
+.1.3.6.1.4.1.8691.602.99.1.1.2.2 = STRING: "row-2"
+.1.3.6.1.4.1.8691.602.99.1.1.2.3 = STRING: "row-3"

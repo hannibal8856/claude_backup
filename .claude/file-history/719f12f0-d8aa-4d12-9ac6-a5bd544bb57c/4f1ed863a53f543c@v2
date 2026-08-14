@@ -1,0 +1,127 @@
+# Handoff — framework SNMP read-path 架構定論 + Plan E 4 棵樹 (2026-07-28)
+
+## TL;DR
+本 session 從「依 ADR-0006 實作 mxTrap Plan E」一路做到 mxIpIf、mxTurboRingV2，最後挖出並釐清了
+**framework AgentX subagent 的 GET 資料讀取架構的根本問題**，收斂成 **ADR-0007（Accepted）**。
+
+**最重要的架構定論**：framework 的 GET 目前用 **in-process** 讀 `running_config`/raw status，這份是**窄/形狀不對**的視圖 →
+mxIpIf（config 缺）、turboRing（status ring1/ring2 vs 陣列）都卡在這。**根解 = 忠實重現 in-master 的「依 URI flag 三路分流」**：
+FIXED_VALUE 本地 / URI_STATUS→`/api/v1/status/<uri>` / 預設→`/api/v1/setting/data/<uri>`（都經 nginx:80，DUT 已證 setting endpoint 完整）。
+**下個 session 主任務 = ①(2026-07-29 起)ADR-0007 config 半邊已實作 → 確認三 package 重編進 image + 跑 config OID 回歸(trustAccess/mxTrap/scalars);②turboRing status 半邊(改 mapping + `ies_status_get`);mxIpIf in-master shadow 已暫緩(見下方 2026-07-29 更新)。**
+
+---
+
+## ⏫ 2026-07-29 更新 — ADR-0007 **config 半邊已實作**（待 commit + 回歸驗證）
+
+**已實作**（branch `snmp-plan-E`，三個 package，**尚未 commit**、working tree 有改動）：
+- `lib_moxa_ies_auto_mibs/src/config_set.c` + `include/…h`：新增 `ies_config_get(uri)` → GET `/api/v1/setting/data/<uri>`（重用既有 `s_handle`/`s_token`/`ies_set_init`）+ `ies_string_free`（parson 序列化字串）。
+- `lib_moxa_rust_ies_auto_mibs/src/lib.rs`：新增 FFI `config_get(uri) -> Option<String>`（copy out + 交還 C free）。
+- `app_moxa_framework/src/snmp_subagent.rs`：新增 `rest_config_get()`；`read_config_value` + 所有 inline in-process config 讀取（handle_get / pbmp get·set / idx_index config 分支 / rowstatus get·set / config_field_is_bool / 三個 `*_rows`）**全改走 REST**；移除 `remove_password_from_config`（REST `_setting_get` 本身就是 `get_config_from_path` + `remove_password_from_config`，`rust_moxa_config_layer/src/lib.rs:270` —— 行為一致、密碼照剝 server 端）；移除被孤立的 `SubagentState.configs/plugins`、start 參數、`config_operation`/`Plugins`/`Configs` imports。
+- `app_moxa_framework/src/uri_service.rs`：`start_snmp_subagent` 呼叫端移除 2 個不再需要的參數。
+- **status 半邊完全沒動**（`get_status_with_snap`/`handle_status_get` 仍 in-process）；turboRing 那半留待獨立子任務。
+- Build：`lib_moxa_ies_auto_mibs` → `lib_moxa_rust_ies_auto_mibs` → `app_moxa_framework` → 打包（**不用** rebuild 3rdparty_net_snmp）。
+
+**DUT 驗證（2026-07-28/29）：**
+- mxIpIf `.605.1.1.1.1` col2（ifVlanId）仍 walk 出 **`0/0`** = **in-master 在 shadow/服務**（`atoi("vlanN")`→0）；framework 接管會是 `1/222`。**使用者判定為 in-master 問題、暫緩**（memory `project_mxipif_col2_inmaster_deferred.md`）。→ mxIpIf 解封被 in-master shadow 擋住,**不是** config-read bug。
+- trustAccess `.602.1.4.1.2` 1 列正常；AgentX 705 上 app_moxa_framework + ISS.exe 皆連 master；snmpd 綁 161。
+- ⚠️ **尚待驗**：重編含上述三 package 的 image 後,其他既有 config OID（trustAccess walk / mxTrap createAndGo·destroy / systemInformation scalars）是否仍正常 —— 這是「改走 REST」的回歸點。
+
+**下一步優先序（取代下方原任務 1）：**
+1. 確認三 package 已重編進 image → 跑 config OID **回歸驗證**（trustAccess / mxTrap / scalars）。
+2. mxIpIf in-master shadow = 另案,**暫緩**（已記 memory）。
+3. turboRing **status 半邊**（需改 mapping：`stat/` strip + `ring<N>` 具名鍵 + TR2RING 分類 + `ies_status_get`）—— 見下方原任務 2/3。
+
+---
+
+## 這個 session 的 4 棵樹狀態（已 commit 在 branch `snmp-plan-E`）
+
+| 樹 | 做法 | 狀態 | 驗證 |
+|---|---|---|---|
+| **mxTrap** `.602.7.2.1.3` | Plan E（framework RONLY table_iterator GET + in-master rowStatus SET，ADR-0006） | ✅ 完成 | DUT 全綠（createAndGo/destroy→config 變+walk 即時反映；scalars 正常） |
+| **trustAccess** `.602.1.4.1.2` | Plan E（前一 session） | ✅ 完成 | 前 session 驗過；本 session 又當控制組確認仍正常 |
+| **mxIpIf** `.605.1.1.1.1` | Plan E iterator（col2 修正 vlanN→VLAN id）+ **ADR-0007 config 半邊(REST 讀取)已實作** | 🅿️ **仍被 in-master shadow**：ADR-0007 config 讀取已補上(iterator 不再因空而 no-op),但 DUT walk col2 仍 `0/0` = in-master 服務。**使用者判定 in-master 問題、暫緩**(memory `project_mxipif_col2_inmaster_deferred.md`)。SET 仍正常。 | col2 `0/0`(in-master atoi) vs framework 應為 `1/222` |
+| **mxTurboRingV2** MAC | 狀態欄 MAC render 修正（`designatedMaster` 等，val_type 0xf4→6 bytes，非 Plan E） | 🆕 **在位但未測**：ring 狀態表 0 列（in-process status=`{ring1,ring2}` 物件 ≠ SNMP 期望的陣列 index-table）。code 正確但觸發不到，**待 ADR-0007 status 半邊生效** | mainline 證明目標=`Hex-STRING` 6 bytes |
+
+---
+
+## ★ 核心架構定論（ADR-0007，`~/mds4xgl3/.adr/ADR-0007-*.md`, Accepted）
+
+### 兩條讀取路徑
+- **in-master（mainline，完整）**：`ies_auto_mibs.c:158,819` `LibFrameworkUri_CreateHandle("127.0.0.1",80)` → HTTP GET nginx:80 →
+  依 flag 去 `/api/v1/status/<uri>` 或 `/api/v1/setting/data/<uri>`。對所有 module 完整。
+- **framework subagent GET（窄）**：in-process `config_operation::get_config_from_path(configs.running_config)` /
+  `status_operation`。`running_config` 由 `rust_moxa_config_layer/config_loader.rs check_and_fix_config(plugins)` 建 = 較窄視圖。
+
+### DUT 驗證（決定性，2026-07-28 curl :80）
+- **setting endpoint 完整 ✓**：`curl :80 /api/v1/setting/data/ipInterface/l3VlanIfTable` → 回完整 `[{vlan1},{vlan222}]`。
+  即使 :80→nginx→**繞回 app_moxa_framework:9759**（actix 綁 127.0.0.1:9759，非 :80；:80=nginx from flask_moxa_base），
+  **config_layer 的 REST handler 讀到完整 config ≠ subagent in-process 那份**。→「self-loop 無效」的疑慮**被推翻**。
+  → snmp_subagent 註解「GET byte-identical to REST `_setting_get`」**是錯的**（REST 較完整）。
+- **status endpoint 是 named-key**：`curl :80 /api/v1/status/turboringv2/ring` → "Invalid Request URI"
+  （status=`{ring1,ring2,coupling}`，無 `ring` 節點）。SNMP mapping 的 `stat/turboringv2/ring/<row>` 陣列式路徑
+  在 in-process 與 :80 **兩路都對不上** = named-key(ring1/ring2) vs 陣列的 URI 落差（**與 config 完整性無關**）。
+  in-master 靠 row N→`ring<N>` 拿到 2 列；framework 要比照。
+
+### ADR-0007 決策（依 URI flag 三路分流，取代 in-process GET）
+1. `lib_moxa_ies_auto_mibs/src/config_set.c`（或平行 config_get.c）新增 `ies_config_get(uri)`（GET `/api/v1/setting/data/<uri>`）
+   + `ies_status_get(uri)`（GET `/api/v1/status/<uri>`），**重用既有** `s_handle`(127.0.0.1:80)+`s_token`(`/moxa/run/auto_mibs/s_token`)，
+   呼叫 `LibFrameworkUri_GetUri`。（config_set.c 已有 SET 的 handle/token bootstrap，GET 對稱加即可。）
+2. `lib_moxa_rust_ies_auto_mibs/src/lib.rs` 加 Rust FFI `config_get()`/`status_get()`（對映既有 `config_set*`）。
+3. `app_moxa_framework/src/snmp_subagent.rs` 的 GET（`handle_get`/`handle_status_get`/iterator `*_rows()`）
+   **依 flag 三路取值**（= in-master `entry_handle_generate_uri_value_file()`）：
+   - `IES_FLAG_SNMP_URI_FIXED_VALUE` → 本地不走 nginx
+   - `IES_FLAG_SNMP_URI_STATUS`（含 uri `stat/` 前綴，mapping_reuse.c:249 設 is_status）→ `ies_status_get` → `/api/v1/status`
+   - 預設 → `ies_config_get` → `/api/v1/setting`
+   **這才是根解**（由 URI/flag 決定 config vs status layer），**不是**「in-process 讀 running_config」，也**不是**「繞回 :80 進 in-process」。
+   uniform（依 flag 走三路取代 in-process GET）為主決策；hybrid（in-process 快取 + fallback）僅列為日後選配優化。
+
+**不動**：OID↔URI mapping（ADR-0002）、registration/routing（ADR-0004）。只換 GET 的「拿值來源」。
+
+---
+
+## 下個 session 主任務（依序）
+1. **實作 ADR-0007**：`ies_config_get`/`ies_status_get`（C，config_set.c 範式）+ Rust wrapper + framework GET 依 flag 分流。
+   - 注意 thread-safety：`s_handle` 是 config_set.c lazy singleton，AgentX 在自己 thread，GET/SET 共用 handle 要確認可重入或加鎖。
+   - 注意 status endpoint 的 URI 是否需 stat/ 前綴 strip、以及 named-key(ring<N>) 對映（turboRing）。先 `curl :80 /api/v1/status/turboringv2/ring1` 與 `/api/v1/status/turboringv2` 確認可定址形式。
+2. **重驗 mxTurboRingV2**：ADR-0007 status 半邊生效後，`snmpwalk .603.3.4.2.1` designatedMaster 應=`Hex-STRING` 6 bytes（in-master 那 2 列）。
+3. **mxIpIf 解封**：ADR-0007 config 半邊生效後，iterator 不再空 → `snmpwalk .605.1.1.1.1` col2=VLAN id(1/222)、其餘同 in-master。
+4. **檢視前面 implement 的 feature 是否運作正常**：mxTrap（重驗 createAndGo/destroy）、trustAccess（walk）、確認 ADR-0007 改動沒破壞它們（它們的 config 本來 in-process 就完整；改 flag 分流後應仍正常，但要驗）。
+
+---
+
+## 改動已 COMMIT（branch `snmp-plan-E`，四個 repo，working tree clean；本 session 由使用者逐 feature commit）
+Commits：app_moxa_framework `d1183be Update mxTurboRingV2` / `109b8da mxIpIfdb & bug fix for ifVlanId` / `35b2097 Move mxTrap`；
+lib_moxa_rust_snmp_agentx `bdd6ec4 Update mxTurboRingV2`；3rdparty_net_snmp `093971e Move mxTrap`；lib_moxa_snmp_agentx `72ec530 table_iterator`(前 session)。
+（注意：外層 buildroot/dl repo 在 `2023.02.11_develop`；但各 package 子 repo 都在 `snmp-plan-E`。下個 session 在 `snmp-plan-E` 上繼續。）
+改動內容：
+- **app_moxa_framework/src/snmp_subagent.rs**：
+  - mxTrap：`SNMPTRAP_HOST_ROOT` + `snmptrap_host_rows/row_count/iter_handler` + `register_snmptrap_host_table` + start 迴圈 skip
+  - mxIpIf：`L3VLANIF_ROOT` + `l3vlanif_rows/row_count/iter_handler`（col2=strip"vlan"→int）+ `set_int_or_truth` + `register_l3vlanif_table`
+  - mxTurboRingV2：`SNMP_DATA_TYPE_MAC=0xf4` const + `mac_to_bytes`（前 6 組）+ `handle_status_get` 的 0xf4 分支
+- **lib_moxa_rust_snmp_agentx/src/lib.rs**：`set_octet_bytes(&[u8])`
+- **3rdparty_net_snmp/ies-auto-mibs/ies_auto_mibs_setup.c:357**：還原 `MOX_SNMP_INIT_ENTRY(mxTrap_MibEntry);`
+- （lib_moxa_snmp_agentx/agentx.c 的 `MoxaAgentX_RegisterIterTable`/`SetIpAddress` 是前一 session 就有，未變）
+
+### Build 指令
+- mxTrap（有動 C setup.c）：`3rdparty_net_snmp` + `app_moxa_framework`（+rust 鏈）+ 打包。
+- mxIpIf / mxTurboRingV2（只動 rust）：`app_moxa_framework`（+rust 鏈,含 lib_moxa_rust_snmp_agentx）+ 打包，**不用 rebuild 3rdparty_net_snmp**。
+- ADR-0007（會動 C config_set.c/.h + rust）：`lib_moxa_ies_auto_mibs` + `lib_moxa_rust_ies_auto_mibs` + `app_moxa_framework` + 打包。
+- 建置環境無本機 toolchain，build/DUT 由使用者跑。DUT=192.168.127.253，admin/moxa，write community `private`。
+
+---
+
+## ADR 地圖（`~/mds4xgl3/.adr/`）
+- ADR-0001 mxTrap Plan-D/Rust rowStatus → **Superseded by ADR-0006**
+- ADR-0002 資料層（lib_moxa_ies_auto_mibs 純資料 + REST bridge）→ Accepted（ADR-0007 在同層加 GET bridge）
+- ADR-0003 → Superseded by ADR-0004
+- ADR-0004 native dual-reg + table_iterator（trustAccess 驗證）→ Accepted（ADR-0007 精修其「GET in-process」假設，不 supersede）
+- ADR-0005 iss0 end-state（全 GET-framework/SET-in-master）→ Proposed（ADR-0007 是其使能器）
+- ADR-0006 mxTrap→Plan E → **Accepted + DUT 驗證**
+- **ADR-0007 framework GET 依 flag 三路分流（取代 in-process GET）→ Accepted（config 半邊 DUT 驗證；實作待下個 session）**
+
+## 關鍵 gotchas
+- **col1 index 對每個 server 都回 row number → 無法辨識誰在服務;只有特殊值欄能當照妖鏡**（mxIpIf col2=0 是 in-master、=VLANid 是 framework）。
+- **snmpset 回顯的是 request varbind，不算確認**；要看事後 GET + config 檔。
+- **pcap 分析**：tshark AgentX response 常標 [Malformed]（dissector 限制），varbind type 要手解 hex（endOfMibView=0x82）。
+- **framework 讀取完整性**：只看 config 檔存在**不夠**，要確認 framework 執行期讀得到（in-process running_config 可能較窄）。ADR-0007 用 REST endpoint 一次解掉。
+- memory `project_plan_e_iss0_get_forward.md` 有本 session 完整細節（會自動載入）。

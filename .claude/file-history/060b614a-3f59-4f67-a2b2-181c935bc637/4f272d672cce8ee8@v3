@@ -1,0 +1,212 @@
+# Handoff — SNMP AgentX 簡報文件撰寫
+
+Date: 2026-08-08
+Session: "snmp-plan-E reopen 2"
+前一份 handoff:`~/session-handoff-snmp-plan-E-2026-08-06.md`
+
+---
+
+## 1. 這個 session 在做什麼
+
+**主線**:替使用者撰寫一份 Confluence 頁面(Markdown 格式,可複製貼上),主題是「最近使用 AgentX 優化 SNMP GET 效能」。使用者會拿這份去 **present**。
+
+**不是**寫程式,**不是**改產品行為。這是文件工作,但所有數字都必須有實測依據 —— 使用者明確要求「**所有的推論都不能用猜測的**」。
+
+副線(已完成,不需接續):回答了 in-master GET 路徑(`3rdparty_net_snmp/ies-auto-mibs`)如何處理 GETNEXT,以及 mxPort 是否已改用 AgentX。
+
+---
+
+## 2. 產出檔案
+
+簡報工作的文件集中在 **`~/WORK/SNMP_50ms/outline_CIC/`**(本 handoff 也在其中):
+
+| 檔案 | 用途 | 狀態 |
+|---|---|---|
+| `outline_CIC/confluence-snmp-agentx-v1.md` | **主要工作檔**,接續請改這份 | 部分完成,見 §4 |
+| `outline_CIC/confluence-snmp-agentx-get-optimization.md` | 素材庫。第一版寫滿的完整草稿,長內容時從這裡搬 | 完整但結構是舊的 |
+| `outline_CIC/confluence-snmp-agentx-SKELETON.md` | 純骨架,已被 v1 取代 | 可忽略 |
+| `outline_CIC/session-handoff-snmp-confluence-doc-2026-08-08.md` | 本文件 | — |
+
+工具與原始資料**不在** `outline_CIC/`,維持原位:
+
+| 路徑 | 用途 |
+|---|---|
+| `~/WORK/SNMP_50ms/tools/latency_stats.sh` | **本 session 新增**。從 pcap 重算 avg/worst/>50ms%,已驗證可用 |
+| `~/WORK/SNMP_50ms/snmpwalk/` | walk 收集與 `RESULT-*.txt` 實測紀錄 |
+| `~/pcap/` | 延遲量測的 pcap |
+
+---
+
+## 3. 已定案的決策(不要重新討論)
+
+| 項目 | 決定 | 理由 |
+|---|---|---|
+| **輸出格式** | Markdown,貼進 Confluence Cloud 新編輯器自動轉換 | 使用者選的 |
+| **讀者** | 主管為主,另有 RD / SQA / PM | 決定細節深度 |
+| **效能指標** | **平均 / 最壞情況 / 超過 50ms 的次數佔比** | 使用者指定。**不對外用中位數** |
+| **FAQ 呈現** | Confluence Expand macro(貼上後打 `/expand` 手動轉) | `<details>` 標籤 Confluence 不渲染 |
+| **摺疊範圍** | **只有 FAQ**,主線章節不摺疊 | 使用者確認 |
+| **`outline.txt`** | **不採用** | 使用者明確指示忽略 |
+| **大綱** | 使用者在對話中給的版本(問題 / 先講結果 / 目標與限制 / 方案與取捨 / Original Arch / Enhanced Arch / Comparison + FAQ / Test / Maintenance / Next / Appendix) | 使用者提供 |
+
+---
+
+## 4. v1.md 逐節完成度
+
+| 章節 | 狀態 | 備註 |
+|---|---|---|
+| 問題 | **完成** | 兩點:①秒級延遲(北交控 ifTable 跨 ifXTable + fiber check)②處理方式分歧 |
+| 先講結果 | **完成** | 含附帶效益(OID 覆蓋率)與已知退步案例 |
+| 目標與限制 | 骨架 | 素材齊,可直接長 |
+| 方案與取捨 | 骨架 | 素材齊 |
+| Original Architecture | 骨架 | **圖待放**,素材庫有 ASCII 版 |
+| Enhanced Architecture | 骨架 | **圖待放**,素材庫有 ASCII 版 |
+| Comparison | 骨架 | 缺 binary 尺寸 |
+| FAQ | **完成** | 兩則:Q1 RO/RW 分流、Q2 why not proxy |
+| Test | 骨架 | **Stress Test 完全沒資料** |
+| Maintenance | **部分完成** | hot-swap 除錯手法已寫;其餘仍是骨架 |
+| Next | 骨架 | 素材齊 |
+| Appendix A/B/D/E | 骨架 | B 缺逐 MIB 明細 |
+| Appendix C(量測方法) | **完成** | 含指標格式的規定與理由 |
+
+---
+
+## 5. 關鍵發現 —— 不可遺失
+
+### 5.1 改用 avg/worst 之後,mx_device_io 的結論翻轉
+
+這是本 session 最重要的發現。原本用 p50 記錄的結論是「安全但無加速」,換成使用者指定的指標後變成**明顯退步**:
+
+| 指標 | Before(in-master) | After(framework) |
+|---|---|---|
+| 中位數 | 113.3 ms | 112.9 ms(看似持平)|
+| **平均** | 117.0 ms | **417.7 ms(+257%)** |
+| **最壞** | 153.5 ms | **10134.5 ms(66 倍)** |
+
+原因是那個**未解的 10 秒 stall**(每輪第一次請求)。只影響第一次,所以中位數看不到,但平均與最壞值被它主導。
+
+→ **文件中已如實揭露**,並附根因與「已列最優先待解」。**使用者尚未拍板是否維持這個揭露**(見 §6)。
+
+### 5.2 主要成果數據(已從 pcap 重算,方法經驗證)
+
+mxPort MIB,單一 GET 帶 13 個 OID,n=100:
+
+| 指標 | mainline | Plan E | 改善 |
+|---|---|---|---|
+| 平均 | 267.2 ms | 15.4 ms | −94.2% |
+| 最壞 | 301.1 ms | 48.8 ms | −83.8% |
+| **>50ms 佔比** | **100/100 = 100%** | **0/100 = 0%** | 完全達標 |
+
+**方法已驗證**:`latency_stats.sh` 重算出的 p50/p95/p100(264.4/287.8/301.1、13.4/19.3/48.8)與 `snmpwalk/RESULT-phase2-task4.txt` 記錄完全一致。
+
+pcap 來源:`~/pcap/mxportdb-13oid-{mainline-20260805_1147,planE-20260805_1150}.pcapng`
+
+### 5.3 北交控案例數據(問題章節用)
+
+**注意版本歸屬**:以下為 **NOS v5.x 優化前**,與 NOS 7 的 264 ms 不同基準,**不可相減**。
+
+- 單一 GET 帶 1–3 個 `ifTable` OID:~600 ms
+- 單一 GET **跨 `ifTable` + `ifXTable`**:**~1200 ms** ← 秒級的來源
+- `fiberCheckStatTx/RxPower`(28 埠):15 ms,最大 122 ms(走 dlmod)
+
+來源:`~/beijing_proxy_case_study.md`、`~/WORK/SNMP_50ms/fiber_check/fiber_check_optimization.md`
+
+fiber check 的根因:為了取每埠 link status 而向 ISS 拉**整張 28 列 ifTable**,而該資訊本就在 fiber_check daemon 手上。
+
+### 5.4 RO/RW 分流的正確說法(FAQ Q1)
+
+**分流發生在註冊階段,不是每個 PDU 進來才判斷。**
+
+- RO + URI 前綴命中 `agentx_owned.list` → **跳過本地註冊** → snmpd longest-prefix-match 送 ISS → **完全不進 in-master**
+- RW → **一律本地註冊** → 一律先進 `mox_snmp_handle_entry()`(`ies_auto_mibs.c:3179`)→ 再依 PDU 模式分流
+- 依據:`ies_auto_mibs.c:3404` `if (entry->mode & HANDLER_CAN_SET) return 0;`
+
+**兩個容易講錯的後果**:
+1. RW 欄的 **GET 也留在本地**,不存在「同欄 GET 走 ISS、SET 走本地」。僅四個 ifTable/ifXTable 欄位有例外轉發規則(`ies_auto_mibs.c:3099`)。
+2. 一張表會被拆成兩邊 → 若 RW 欄是第一欄,連續 walk 會跳過它(ADR-0011)。
+
+### 5.5 mxPort 現況(使用者問過)
+
+已委派,**但是給 ISS AgentX subagent(Plan C),不是 framework subagent(Plan E)**。
+
+- commit `376fa49`,working tree 乾淨,已進 `output/target/etc/moxa/netsnmp/agentx_owned.list`
+- 範圍:17 個 entry 中的 **9 個 RO**;8 個 RW 留在 in-master
+- **未量測**:那 8 個 RW 欄的 GET 延遲。若要宣稱「mxPort 已完成優化」需先補量
+
+---
+
+## 6. 待使用者決定(接續時先問)
+
+1. **mx_device_io 的負面數字要不要放在「先講結果」?** 目前如實揭露。選項:①維持 ②移到 Test/Next ③等 stall 修掉再放。我的建議是維持(遲早會在 Stress Test 被問出來)。
+2. **「問題」要不要加第三點?** 候選是「根因曾被誤判、缺乏可重複量測方法」。目前以 HTML 註解留在檔案裡,建議放 Maintenance 而非「問題」。
+3. **「教訓」引言(方向錯了兩輪)要不要留?** 目前在問題第 1 點底下。對主管坦白根因誤判是加分或扣分,由使用者判斷。
+4. **Stress Test 要不要補做?** 還是這版寫「未執行」並列入 Next。
+5. **Code Size 要不要補 binary / flash 尺寸?** 目前只有原始碼行數。
+
+---
+
+## 6.5 待辦(使用者指定,2026-08-09)
+
+**跨週末壓力測試** —— 挑幾個有代表性的 OID 做 over-weekend 長時間壓測。
+
+- **目的**:目前穩定度證據只到「整日」量級,發表前需要更長時間的資料。這是 FAQ Q3(ISS AgentX 會不會不穩)與 Test → Stress Test 兩節的主要缺料。
+- **選 OID 的原則**(建議,待確認):in-application 與 AgentX 各一組、含 GETNEXT 走訪而非只有單點 GET、納入已知較慢的路徑。
+- **要收的數字**:沿用既有格式 —— 平均 / 最壞 / 超過 50 ms 佔比;另記期間有無斷線、重連、以及那個未解的 10 秒 stall 是否出現。
+- **工具**:`~/WORK/SNMP_50ms/tools/latency_stats.sh <pcap>`
+
+---
+
+## 7. 缺料清單
+
+| 缺什麼 | 影響章節 | 補法 |
+|---|---|---|
+| **Stress Test 數據** | Test | 完全沒有,需先決定要不要做 |
+| **逐 MIB 的四條路對應表** | Appendix B | 原始資料在 `~/WORK/SNMP_50ms/iss_build{,_0}.txt`,目前只有總數(iss1 約 2,134 / iss0 約 646) |
+| **binary / flash 尺寸** | Comparison | 需量 `.so` 與執行檔大小 |
+| **架構圖** | Original / Enhanced Arch | 素材庫有 ASCII 版可搬;若要美化需另外畫 |
+| **mxPort RW 欄的 GET 延遲** | 若要宣稱 mxPort 全面優化 | 需上機量測 |
+
+---
+
+## 8. 環境與操作備忘
+
+### hot-swap 除錯(已寫進文件 Maintenance)
+
+```bash
+BR=~/mds4xgl3/buildroot ~/.claude/skills/dut-console/dut_hotswap.sh \
+    --service snmpd.service output/target/usr/sbin/snmpd
+BR=~/mds4xgl3/buildroot ~/.claude/skills/dut-console/dut_hotswap.sh \
+    --restore --service snmpd.service
+```
+
+**兩個坑**:①腳本內建 `BR` 指向舊建置樹(`SNMP_PLAN_E`),每次都要覆寫 ②`--service` 預設是 `app_moxa_framework.service`。
+
+### 延遲重算
+
+```bash
+~/WORK/SNMP_50ms/tools/latency_stats.sh <pcap> [threshold_ms]
+```
+
+### tmux(使用者遠端連線用)
+
+機器有 tmux 3.0a,無 screen。`tmux new -s snmp` → 斷線後 `tmux attach -t snmp`。
+session 紀錄落地在 `~/.claude/projects/-home-moxa-sdc1-home-moxa-mds4xgl3-buildroot-dl/*.jsonl`,
+必要時 `claude --continue` / `claude --resume`(須先 cd 回同一目錄)。
+
+---
+
+## 9. 本 session 對設定的改動
+
+**`~/.claude/CLAUDE.md`** —— 依使用者指示,移除「不可讀 `~/mds4xgl3/.adr/` 底下檔案」這條限制(使用者已回到 mds4xgl3 作為主要開發目錄)。
+
+同段落中另外兩個具名 session log(`session-plan-e-handoff-2026-07-27.md`、`session-framework-readpath-2026-07-28.md`)的禁讀**未動** —— 使用者只提到 `.adr`。若接續時需要讀那兩份,要先問。
+
+---
+
+## 10. 建議的下一步
+
+1. 先問 §6 的五個待決事項(至少問 1 和 4,它們會改變文件結構)。
+2. 接著寫「**目標與限制**」—— 最短、素材最齊,寫完可順勢接「方案與取捨」。
+3. 架構圖兩節放最後 —— 它們最花時間,且需要使用者確認圖的精細度(ASCII 夠不夠,還是要 draw.io)。
+
+**寫作原則(使用者明確要求)**:所有數字都要有實測依據,不可推測。版本歸屬要標清楚(NOS v5.x vs NOS 7 不可混用)。
