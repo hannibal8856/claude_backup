@@ -1,0 +1,11 @@
+MOXA-DEV-AUTOLOGIN
+==================
+
+Development-only rootfs overlay. Drops the serial console (ttyS0, 115200)
+straight into a root shell with no username or password prompt.
+
+Used only by moxa/configs/mdsg4000l34xgs_autologin_defconfig. No release
+defconfig references this directory.
+
+To find every trace of it:   grep -rl MOXA-DEV-AUTOLOGIN <buildroot>
+To remove: delete this directory and the autologin defconfig, then rebuild.
